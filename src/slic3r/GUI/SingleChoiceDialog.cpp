@@ -32,7 +32,7 @@ SingleChoiceDialog::SingleChoiceDialog(const wxString &message, const wxString &
 
     dlg_btns->GetCANCEL()->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) { EndModal(wxID_CANCEL); });
 
-    bSizer->Add(dlg_btns, 0, wxEXPAND);
+    bSizer->Add(dlg_btns, 0, wxEXPAND | wxLEFT | wxRIGHT, 5);
 
     this->SetSizer(bSizer);
     this->Layout();

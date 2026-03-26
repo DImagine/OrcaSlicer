@@ -39,6 +39,8 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
+#include <functional>
+
 #ifdef __WXMSW__
 #include "wx/uiaction.h"
 #include <wx/renderer.h>
@@ -344,6 +346,66 @@ ObjectList::~ObjectList()
 {
     if (m_objects_model)
             m_objects_model->DecRef();
+}
+
+std::vector<ObjectList::VolumeHierarchyEntry> ObjectList::collect_volume_hierarchy() const
+{
+    std::vector<VolumeHierarchyEntry> entries;
+    if (m_objects_model == nullptr || m_objects == nullptr)
+        return entries;
+
+    // Walk the UI tree to reflect the exact hierarchy as seen by the user.
+    std::function<void(const wxDataViewItem&, const ModelObject*, const ModelVolume*)> traverse;
+    traverse = [this, &entries, &traverse](const wxDataViewItem& parent_item,
+                                           const ModelObject* owner,
+                                           const ModelVolume* parent_volume)
+    {
+        if (!parent_item.IsOk() || owner == nullptr)
+            return;
+
+        wxDataViewItemArray children;
+        m_objects_model->GetChildren(parent_item, children);
+        for (const wxDataViewItem& child : children) {
+            if (!child.IsOk())
+                continue;
+
+            auto* node = static_cast<ObjectDataViewModelNode*>(child.GetID());
+            if (node == nullptr)
+                continue;
+
+            const bool is_volume_node = (node->GetType() & itVolume) != 0;
+            const ModelVolume* child_volume = nullptr;
+            if (is_volume_node) {
+                const int volume_idx = m_objects_model->GetVolumeIdByItem(child);
+                if (volume_idx >= 0 && volume_idx < int(owner->volumes.size())) {
+                    child_volume = owner->volumes[volume_idx];
+                    entries.push_back(VolumeHierarchyEntry{
+                        owner,
+                        child_volume,
+                        parent_volume,
+                        volume_idx // Use existing ModelObject order as the UI ordering key.
+                    });
+                }
+            }
+
+            const ModelVolume* next_parent = (is_volume_node && child_volume != nullptr) ? child_volume : parent_volume;
+            traverse(child, owner, next_parent);
+        }
+    };
+
+    for (size_t obj_idx = 0; obj_idx < m_objects->size(); ++obj_idx) {
+        const ModelObject* object = (*m_objects)[obj_idx];
+        if (object == nullptr)
+            continue;
+
+        wxDataViewItem object_item = m_objects_model->GetItemById(int(obj_idx));
+        if (!object_item.IsOk())
+            continue;
+
+        traverse(object_item, object, nullptr);
+    }
+
+    return entries;
 }
 
 void ObjectList::set_min_height()
@@ -1887,6 +1949,24 @@ bool ObjectList::can_drop(const wxDataViewItem& item, int& src_obj_id, int& src_
 
         if (dragged_item_v_type == item_v_type && dragged_item_v_type != ModelVolumeType::MODEL_PART)
             return true;
+
+        // Special handling for Precise Seam modifiers: allow drag&drop within same group (strong↔strong or weak↔weak)
+        const int obj_idx = m_dragged_data.obj_idx();
+        const int dragged_vol_idx = m_dragged_data.sub_obj_idx();
+        const int target_vol_idx = m_objects_model->GetVolumeIdByItem(item);
+
+        if (obj_idx >= 0 && dragged_vol_idx >= 0 && target_vol_idx >= 0) {
+            ModelVolume* dragged_vol = (*m_objects)[obj_idx]->volumes[dragged_vol_idx];
+            ModelVolume* target_vol  = (*m_objects)[obj_idx]->volumes[target_vol_idx];
+
+            if (dragged_vol->is_precise_seam() && target_vol->is_precise_seam()) {
+                // Allow drop only if both volumes are in the same group (strong or weak)
+                bool dragged_strong = dragged_vol->is_precise_seam_strong();
+                bool target_strong  = target_vol->is_precise_seam_strong();
+                return dragged_strong == target_strong; // same group → allow, different groups → block
+            }
+        }
+
         if ((dragged_item_v_type != item_v_type) ||   // we can't reorder volumes outside of types
             item_v_type >= ModelVolumeType::SUPPORT_BLOCKER)        // support blockers/enforcers can't change its place
             return false;
@@ -5415,10 +5495,20 @@ void ObjectList::change_part_type()
     if (!volume->is_svg() && !volume->is_text()) {
       names.Add(_L("Support Blocker"));
       names.Add(_L("Support Enforcer"));
+      names.Add(_L("Precise Seam"));  // Defaults to PRECISE_SEAM_CENTER subtype
     }
 
-    SingleChoiceDialog dlg(_L("Type:"), _L("Choose part type"), names, int(type));
+    // Map all Precise Seam subtypes to "Precise Seam" item (index 5 in names array)
+    int type_index = int(type);
+    if (volume->is_precise_seam())
+        type_index = 5;  // "Precise Seam" is at index 5 in names array
+
+    SingleChoiceDialog dlg(_L("Type:"), _L("Choose part type"), names, type_index);
     auto new_type = ModelVolumeType(dlg.GetSingleChoiceIndex());
+
+    // If user selected "Precise Seam" and volume was already Precise Seam, keep original subtype
+    if (new_type == ModelVolumeType::PRECISE_SEAM_CENTER && volume->is_precise_seam())
+        new_type = type;  // Preserve original subtype (LEFT, RIGHT, etc.)
 
     if (new_type == type || new_type == ModelVolumeType::INVALID) {
       return;
@@ -5426,12 +5516,58 @@ void ObjectList::change_part_type()
 
     take_snapshot("Change part type");
 
+    ModelVolumeType old_type = volume->type();
     volume->set_type(new_type);
-    wxDataViewItemArray sel = reorder_volumes_and_get_selection(obj_idx, [volume](const ModelVolume* vol) { return vol == volume; });
-    if (!sel.IsEmpty()) {
-      select_item(sel.front());
+
+    // Track if Precise Seam group changed (strong ↔ weak)
+    bool group_changed = true; // Default: reorder for non-Precise Seam types
+
+    // If switching to/from Precise Seam with group change, move to end of volumes array
+    if (volume->is_precise_seam() || (old_type >= ModelVolumeType::PRECISE_SEAM_CENTER &&
+                                      old_type <= ModelVolumeType::PRECISE_SEAM_NEUTRAL)) {
+        // Determine if group changed (strong ↔ weak or non-PS ↔ PS)
+        bool old_is_ps = (old_type >= ModelVolumeType::PRECISE_SEAM_CENTER &&
+                          old_type <= ModelVolumeType::PRECISE_SEAM_NEUTRAL);
+        bool new_is_ps = volume->is_precise_seam();
+
+        group_changed = false; // Reset for Precise Seam types
+        if (old_is_ps && new_is_ps) {
+            // Both Precise Seam: check if strong ↔ weak change occurred
+            bool old_strong = (old_type >= ModelVolumeType::PRECISE_SEAM_CENTER &&
+                               old_type <= ModelVolumeType::PRECISE_SEAM_RIGHT);
+            bool new_strong = volume->is_precise_seam_strong();
+            group_changed = (old_strong != new_strong);
+        } else if (old_is_ps != new_is_ps) {
+            // Switching between Precise Seam and other type → always move to end
+            group_changed = true;
+        }
+
+        // Move volume to end if entering new group
+        if (group_changed) {
+            ModelObject* obj = (*m_objects)[obj_idx];
+            auto it = std::find(obj->volumes.begin(), obj->volumes.end(), volume);
+            if (it != obj->volumes.end()) {
+                obj->volumes.erase(it);
+                obj->volumes.push_back(volume); // place at end before sort
+            }
+        }
     }
-    
+
+    // Update UI based on whether group/type changed
+    if (group_changed) {
+        // Group changed: reorder volumes and reselect
+        wxDataViewItemArray sel = reorder_volumes_and_get_selection(obj_idx, [volume](const ModelVolume* vol) { return vol == volume; });
+        if (!sel.IsEmpty())
+            select_item(sel.front());
+    } else {
+        // Same group: just update the item's icon/name without reordering
+        wxDataViewItem item = GetSelection();
+        if (item.IsOk()) {
+            m_objects_model->ItemChanged(item);
+            changed_object(obj_idx);
+        }
+    }
+
   return;
   }
 
@@ -5462,7 +5598,7 @@ void ObjectList::change_part_type()
     if (vol->is_svg() || vol->is_text())
       any_text_or_svg = true;
   }
-  
+
   if (targets.empty()) {
     return;
   }
@@ -5542,12 +5678,12 @@ void ObjectList::change_part_type()
     return;
   }
 
- // Reorder per object and rebuild selection to follow changed volumes 
+ // Reorder per object and rebuild selection to follow changed volumes
   wxDataViewItemArray new_selection;
   for (const auto& kv : changed_per_object) {
     const int obj_idx = kv.first;
     const auto& changed_vols = kv.second;
-    
+
     std::unordered_set<const ModelVolume*> changed_set;
     changed_set.reserve(changed_vols.size());
     for (const auto* v : changed_vols) {

@@ -85,6 +85,16 @@ struct MeshErrorsInfo
 class ObjectList : public wxDataViewCtrl
 {
 public:
+
+    struct VolumeHierarchyEntry
+    {
+        // For current UI hierarchy snapshot.
+        const ModelObject* object { nullptr };       // Owning object node.
+        const ModelVolume* volume { nullptr };       // Current volume entry.
+        const ModelVolume* parent_volume { nullptr };// Direct parent volume, null when attached to object.
+        int                order_within_parent { -1 }; // Position among siblings matching UI order.
+    };
+
     enum SELECTION_MODE
     {
         smUndef     = 0,
@@ -120,6 +130,9 @@ public:
         t_layer_config_ranges   m_layer_config_ranges_cache;
         DynamicPrintConfig      m_config_cache;
     };
+
+    // Snapshot current UI hierarchy so other subsystems can match ModelVolumes to their tree order.
+    std::vector<VolumeHierarchyEntry> collect_volume_hierarchy() const;
 
 private:
     SELECTION_MODE  m_selection_mode {smUndef};

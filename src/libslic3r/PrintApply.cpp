@@ -54,6 +54,53 @@ namespace Slic3r {
             delete mv_with_status.first;
 }
 
+// Add or remove Precise Seam modifier ModelVolumes from model_object_dst to match the ModelVolumes of model_object_new
+// in the exact order and with the same IDs.
+// It is expected, that the model_object_dst already contains the non-precise-seam volumes of model_object_new in the correct order.
+// Friend to ModelVolume to allow copying.
+// static is not accepted by gcc if declared as a friend of ModelObject.
+/* static */ void model_volume_list_update_precise_seam(ModelObject &model_object_dst, const ModelObject &model_object_new)
+{
+    typedef std::pair<const ModelVolume*, bool> ModelVolumeWithStatus;
+    std::vector<ModelVolumeWithStatus> old_volumes;
+    old_volumes.reserve(model_object_dst.volumes.size());
+    for (const ModelVolume *model_volume : model_object_dst.volumes)
+        old_volumes.emplace_back(ModelVolumeWithStatus(model_volume, false));
+    auto model_volume_lower = [](const ModelVolumeWithStatus &mv1, const ModelVolumeWithStatus &mv2){ return mv1.first->id() <  mv2.first->id(); };
+    auto model_volume_equal = [](const ModelVolumeWithStatus &mv1, const ModelVolumeWithStatus &mv2){ return mv1.first->id() == mv2.first->id(); };
+    std::sort(old_volumes.begin(), old_volumes.end(), model_volume_lower);
+    model_object_dst.volumes.clear();
+    model_object_dst.volumes.reserve(model_object_new.volumes.size());
+    for (const ModelVolume *model_volume_src : model_object_new.volumes) {
+        ModelVolumeWithStatus key(model_volume_src, false);
+        auto it = std::lower_bound(old_volumes.begin(), old_volumes.end(), key, model_volume_lower);
+        if (it != old_volumes.end() && model_volume_equal(*it, key)) {
+            // The volume was found in the old list. Just copy it.
+            assert(! it->second); // not consumed yet
+            it->second = true;
+            ModelVolume *model_volume_dst = const_cast<ModelVolume*>(it->first);
+            // For Precise Seam modifiers, the type may have been switched between subtypes (CENTER, LEFT, RIGHT, etc.)
+            assert((model_volume_dst->is_precise_seam() && model_volume_src->is_precise_seam()) || model_volume_dst->type() == model_volume_src->type());
+            model_object_dst.volumes.emplace_back(model_volume_dst);
+            if (model_volume_dst->is_precise_seam()) {
+                // For Precise Seam modifiers, the type may have been switched between subtypes
+                model_volume_dst->set_type(model_volume_src->type());
+                model_volume_dst->set_transformation(model_volume_src->get_transformation());
+            }
+            assert(model_volume_dst->get_matrix().isApprox(model_volume_src->get_matrix()));
+        } else {
+            // The volume was not found in the old list. Create a new copy.
+            assert(model_volume_src->is_precise_seam());
+            model_object_dst.volumes.emplace_back(new ModelVolume(*model_volume_src));
+            model_object_dst.volumes.back()->set_model_object(&model_object_dst);
+        }
+    }
+    // Release the non-consumed old volumes (those were deleted from the new list).
+    for (ModelVolumeWithStatus &mv_with_status : old_volumes)
+        if (! mv_with_status.second)
+            delete mv_with_status.first;
+}
+
 static inline void model_volume_list_copy_configs(ModelObject &model_object_dst, const ModelObject &model_object_src, const ModelVolumeType type)
 {
     size_t i_src, i_dst;
@@ -1394,9 +1441,16 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                                           model_fuzzy_skin_data_changed(model_object, model_object_new);
         bool supports_differ            = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_BLOCKER) ||
                                           model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_ENFORCER);
+        bool precise_seam_differ        = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::PRECISE_SEAM_CENTER) ||
+                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::PRECISE_SEAM_LEFT) ||
+                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::PRECISE_SEAM_RIGHT) ||
+                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::PRECISE_SEAM_ENFORCED) ||
+                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::PRECISE_SEAM_BLOCKED) ||
+                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::PRECISE_SEAM_NEUTRAL);
         bool layer_height_ranges_differ = ! layer_height_ranges_equal(model_object.layer_config_ranges, model_object_new.layer_config_ranges, model_object_new.layer_height_profile.empty());
         bool model_origin_translation_differ = model_object.origin_translation != model_object_new.origin_translation;
         bool brim_points_differ = model_brim_points_data_changed(model_object, model_object_new);
+        bool ui_volume_order_differ = ui_volume_order_changed(model_object, model_object_new);
         auto print_objects_range        = print_object_status_db.get_range(model_object);
         // The list actually can be empty if all instances are out of the print bed.
         //assert(print_objects_range.begin() != print_objects_range.end());
@@ -1406,6 +1460,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             model_object_status.print_object_regions->ref_cnt_inc();
         }
         if (solid_or_modifier_differ || model_origin_translation_differ || layer_height_ranges_differ ||
+            ui_volume_order_differ ||
             ! model_object.layer_height_profile.timestamp_matches(model_object_new.layer_height_profile)) {
             // The very first step (the slicing step) is invalidated. One may freely remove all associated PrintObjects.
             model_object_status.print_object_regions_status =
@@ -1440,6 +1495,15 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                     // Copy just the support volumes.
                     model_volume_list_update_supports(model_object, model_object_new);
                 }
+            }
+            if (precise_seam_differ) {
+                // First stop background processing before shuffling or deleting the ModelVolumes in the ModelObject's list.
+                this->call_cancel_callback();
+                update_apply_status(false);
+                // Invalidate seam placement (affects G-code export).
+                update_apply_status(this->invalidate_step(psGCodeExport));
+                // Copy just the Precise Seam volumes.
+                model_volume_list_update_precise_seam(model_object, model_object_new);
             } else if (model_custom_seam_data_changed(model_object, model_object_new)) {
                 update_apply_status(this->invalidate_step(psGCodeExport));
             }
@@ -1467,6 +1531,13 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             //FIXME What to do with m_material_id?
 			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::MODEL_PART);
 			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::PARAMETER_MODIFIER);
+			// Synchronize Precise Seam modifier volumes
+			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::PRECISE_SEAM_CENTER);
+			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::PRECISE_SEAM_LEFT);
+			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::PRECISE_SEAM_RIGHT);
+			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::PRECISE_SEAM_ENFORCED);
+			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::PRECISE_SEAM_BLOCKED);
+			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, ModelVolumeType::PRECISE_SEAM_NEUTRAL);
             layer_height_ranges_copy_configs(model_object.layer_config_ranges /* dst */, model_object_new.layer_config_ranges /* src */);
             // Copy the ModelObject name, input_file and instances. The instances will be compared against PrintObject instances in the next step.
             model_object.name       = model_object_new.name;

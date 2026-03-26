@@ -21,6 +21,7 @@
 
 #include "libslic3r/Geometry/ConvexHull.hpp"
 
+#include <algorithm>
 #include <float.h>
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -1144,6 +1145,20 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
         this->volumes.emplace_back(new ModelVolume(*model_volume));
         this->volumes.back()->set_model_object(this);
     }
+
+    // Copy ui_volume_order with pointer remapping (Frontend → Backend)
+    this->ui_volume_order.clear();
+    this->ui_volume_order.reserve(rhs.ui_volume_order.size());
+    for (const ModelVolume* old_vol : rhs.ui_volume_order) {
+        // Find index of old_vol in rhs.volumes
+        auto it = std::find_if(rhs.volumes.begin(), rhs.volumes.end(),
+            [old_vol](const ModelVolume* v) { return v == old_vol; });
+        if (it != rhs.volumes.end()) {
+            size_t idx = std::distance(rhs.volumes.begin(), it);
+            this->ui_volume_order.push_back(this->volumes[idx]);
+        }
+    }
+
     this->clear_instances();
 	this->instances.reserve(rhs.instances.size());
     for (const ModelInstance *model_instance : rhs.instances) {
@@ -1182,6 +1197,10 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
 	rhs.volumes.clear();
     for (ModelVolume *model_volume : this->volumes)
         model_volume->set_model_object(this);
+
+    // Move ui_volume_order (pointers remain valid after volumes moved)
+    this->ui_volume_order = std::move(rhs.ui_volume_order);
+
     this->clear_instances();
 	this->instances = std::move(rhs.instances);
 	rhs.instances.clear();
@@ -1305,7 +1324,14 @@ ModelVolume* ModelObject::add_volume_with_shared_mesh(const ModelVolume &other, 
 void ModelObject::delete_volume(size_t idx)
 {
     ModelVolumePtrs::iterator i = this->volumes.begin() + idx;
-    delete *i;
+    ModelVolume* volume_to_delete = *i;
+
+    // Remove from ui_volume_order before deleting the volume to avoid dangling pointer
+    auto ui_it = std::find(ui_volume_order.begin(), ui_volume_order.end(), volume_to_delete);
+    if (ui_it != ui_volume_order.end())
+        ui_volume_order.erase(ui_it);
+
+    delete volume_to_delete;
     this->volumes.erase(i);
 
     if (this->volumes.size() == 1)
@@ -1334,6 +1360,7 @@ void ModelObject::clear_volumes()
     for (ModelVolume *v : this->volumes)
         delete v;
     this->volumes.clear();
+    this->ui_volume_order.clear();
     this->invalidate_bounding_box();
     // BBS: backup: do not save
     // Slic3r::save_object_mesh(*this);
@@ -1364,6 +1391,20 @@ void ModelObject::sort_volumes(bool full_sort)
     // sort volumes inside the object to order "Model Part, Negative Volume, Modifier, Support Blocker and Support Enforcer. "
     if (full_sort)
         std::stable_sort(volumes.begin(), volumes.end(), [](ModelVolume* vl, ModelVolume* vr) {
+            // Special handling for Precise Seam modifiers: group-based sorting with user order preservation
+            if (vl->is_precise_seam() && vr->is_precise_seam()) {
+                // Strong (center/left/right) always before weak (enforced/blocked/neutral)
+                bool vl_strong = vl->is_precise_seam_strong();
+                bool vr_strong = vr->is_precise_seam_strong();
+                if (vl_strong != vr_strong)
+                    return vl_strong; // strong < weak → strong group appears first
+
+                // Within same group (both strong or both weak): preserve current order
+                // stable_sort will maintain relative positions when comparator returns false
+                return false;
+            }
+
+            // For non-Precise-Seam or mixed types: use standard enum-based ordering
             return vl->type() < vr->type();
         });
     // sort have to controll "place" of the support blockers/enforcers. But one of the model parts have to be on the first place.
@@ -1371,10 +1412,19 @@ void ModelObject::sort_volumes(bool full_sort)
         std::stable_sort(volumes.begin(), volumes.end(), [](ModelVolume* vl, ModelVolume* vr) {
             ModelVolumeType vl_type = vl->type() > ModelVolumeType::PARAMETER_MODIFIER ? vl->type() : ModelVolumeType::PARAMETER_MODIFIER;
             ModelVolumeType vr_type = vr->type() > ModelVolumeType::PARAMETER_MODIFIER ? vr->type() : ModelVolumeType::PARAMETER_MODIFIER;
+
+            // Apply same Precise Seam grouping logic for partial sort
+            if (vl->is_precise_seam() && vr->is_precise_seam()) {
+                bool vl_strong = vl->is_precise_seam_strong();
+                bool vr_strong = vr->is_precise_seam_strong();
+                if (vl_strong != vr_strong)
+                    return vl_strong;
+                return false; // preserve order within same group
+            }
+
             return vl_type < vr_type;
         });
 }
-
 ModelInstance* ModelObject::add_instance()
 {
     ModelInstance* i = new ModelInstance(this);
@@ -2655,6 +2705,19 @@ ModelVolumeType ModelVolume::type_from_string(const std::string &s)
 		return ModelVolumeType::SUPPORT_ENFORCER;
     if (s == "support_blocker")
 		return ModelVolumeType::SUPPORT_BLOCKER;
+    // Precise Seam types
+    if (s == "precise_seam_center")
+		return ModelVolumeType::PRECISE_SEAM_CENTER;
+    if (s == "precise_seam_left")
+		return ModelVolumeType::PRECISE_SEAM_LEFT;
+    if (s == "precise_seam_right")
+		return ModelVolumeType::PRECISE_SEAM_RIGHT;
+    if (s == "precise_seam_enforced")
+		return ModelVolumeType::PRECISE_SEAM_ENFORCED;
+    if (s == "precise_seam_blocked")
+		return ModelVolumeType::PRECISE_SEAM_BLOCKED;
+    if (s == "precise_seam_neutral")
+		return ModelVolumeType::PRECISE_SEAM_NEUTRAL;
     //assert(s == "0");
     // Default value if invalud type string received.
 	return ModelVolumeType::MODEL_PART;
@@ -2669,6 +2732,12 @@ std::string ModelVolume::type_to_string(const ModelVolumeType t)
 	case ModelVolumeType::PARAMETER_MODIFIER: return "modifier_part";
 	case ModelVolumeType::SUPPORT_ENFORCER:   return "support_enforcer";
 	case ModelVolumeType::SUPPORT_BLOCKER:    return "support_blocker";
+	case ModelVolumeType::PRECISE_SEAM_CENTER:   return "precise_seam_center";
+	case ModelVolumeType::PRECISE_SEAM_LEFT:     return "precise_seam_left";
+	case ModelVolumeType::PRECISE_SEAM_RIGHT:    return "precise_seam_right";
+	case ModelVolumeType::PRECISE_SEAM_ENFORCED: return "precise_seam_enforced";
+	case ModelVolumeType::PRECISE_SEAM_BLOCKED:  return "precise_seam_blocked";
+	case ModelVolumeType::PRECISE_SEAM_NEUTRAL:  return "precise_seam_neutral";
     default:
         assert(false);
         return "normal_part";
@@ -3598,6 +3667,25 @@ bool model_volume_list_changed(const ModelObject &model_object_old, const ModelO
     return model_volume_list_changed(model_object_old, model_object_new, [&types](const ModelVolumeType t) {
         return std::find(types.begin(), types.end(), t) != types.end();
     });
+}
+
+bool ui_volume_order_changed(const ModelObject &model_object_old, const ModelObject &model_object_new)
+{
+    // If new object has no ui_volume_order, nothing changed
+    if (model_object_new.ui_volume_order.empty())
+        return false;
+
+    // If sizes differ, order changed
+    if (model_object_old.ui_volume_order.size() != model_object_new.ui_volume_order.size())
+        return true;
+
+    // Compare volume IDs (not pointers - pointers change after assign_copy)
+    for (size_t i = 0; i < model_object_old.ui_volume_order.size(); ++i) {
+        if (model_object_old.ui_volume_order[i]->id() != model_object_new.ui_volume_order[i]->id())
+            return true;
+    }
+
+    return false;
 }
 
 template< typename TypeFilterFn, typename CompareFn>

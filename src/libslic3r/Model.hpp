@@ -345,6 +345,13 @@ enum class ModelVolumeType : int {
     PARAMETER_MODIFIER,
     SUPPORT_BLOCKER,
     SUPPORT_ENFORCER,
+    // Precise seam modifiers (6 subtypes for seam placement control)
+    PRECISE_SEAM_CENTER,
+    PRECISE_SEAM_LEFT,
+    PRECISE_SEAM_RIGHT,
+    PRECISE_SEAM_ENFORCED,
+    PRECISE_SEAM_BLOCKED,
+    PRECISE_SEAM_NEUTRAL,
 };
 
 // A printable object, possibly having multiple print volumes (each with its own set of parameters and materials),
@@ -395,6 +402,12 @@ public:
 
     // BBS: save for compare with new load volumes
     std::vector<ObjectID>   volume_ids;
+
+    // UI tree hierarchy order for volumes (populated from ObjectList in GUI layer).
+    // Used by backend modules (e.g., Precise Seam) to respect user-defined drag-and-drop order.
+    // Filled only when precise seam modifiers exist (see Plater::populate_ui_order_precise_seam).
+    // Each entry points to a volume from this object's volumes vector in UI display order.
+    std::vector<const ModelVolume*> ui_volume_order;
 
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors cut_connectors;
@@ -901,6 +914,14 @@ public:
 	bool                is_support_enforcer()   const { return m_type == ModelVolumeType::SUPPORT_ENFORCER; }
 	bool                is_support_blocker()    const { return m_type == ModelVolumeType::SUPPORT_BLOCKER; }
 	bool                is_support_modifier()   const { return m_type == ModelVolumeType::SUPPORT_BLOCKER || m_type == ModelVolumeType::SUPPORT_ENFORCER; }
+	// Check if this volume is any of the precise seam modifier subtypes
+	bool                is_precise_seam()       const { return m_type >= ModelVolumeType::PRECISE_SEAM_CENTER && m_type <= ModelVolumeType::PRECISE_SEAM_NEUTRAL; }
+	// Helper to check if volume is a "strong" Precise Seam type (center, left, right)
+	// Strong modifiers have priority and always appear above weak modifiers in UI
+	bool                is_precise_seam_strong() const { return m_type >= ModelVolumeType::PRECISE_SEAM_CENTER && m_type <= ModelVolumeType::PRECISE_SEAM_RIGHT; }
+	// Helper to check if volume is a "weak" Precise Seam type (enforced, blocked, neutral)
+	// Weak modifiers always appear below strong modifiers in UI
+	bool                is_precise_seam_weak()   const { return m_type >= ModelVolumeType::PRECISE_SEAM_ENFORCED && m_type <= ModelVolumeType::PRECISE_SEAM_NEUTRAL; }
     bool                is_text()               const { return text_configuration.has_value(); }
     bool                is_svg() const { return emboss_shape.has_value()  && !text_configuration.has_value(); }
     bool                is_the_only_one_part() const; // behave like an object
@@ -1017,6 +1038,7 @@ protected:
     friend class Model;
 	friend class ModelObject;
     friend void model_volume_list_update_supports(ModelObject& model_object_dst, const ModelObject& model_object_new);
+    friend void model_volume_list_update_precise_seam(ModelObject& model_object_dst, const ModelObject& model_object_new);
 
 	// Copies IDs of both the ModelVolume and its config.
 	explicit ModelVolume(const ModelVolume &rhs) = default;
@@ -1739,6 +1761,10 @@ bool model_object_list_extended(const Model &model_old, const Model &model_new);
 // than the old ModelObject.
 bool model_volume_list_changed(const ModelObject &model_object_old, const ModelObject &model_object_new, const ModelVolumeType type);
 bool model_volume_list_changed(const ModelObject &model_object_old, const ModelObject &model_object_new, const std::initializer_list<ModelVolumeType> &types);
+
+// Test whether ui_volume_order has changed between old and new ModelObject.
+// Used to detect drag&drop reordering of volumes in UI (which doesn't change volume IDs or types).
+bool ui_volume_order_changed(const ModelObject &model_object_old, const ModelObject &model_object_new);
 
 // Test whether the now ModelObject has newer custom supports data than the old one.
 // The function assumes that volumes list is synchronized.

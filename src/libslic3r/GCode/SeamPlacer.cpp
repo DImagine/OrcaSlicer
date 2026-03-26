@@ -23,6 +23,7 @@
 #include "libslic3r/TriangleSetSampling.hpp"
 
 #include "libslic3r/Utils.hpp"
+#include "PreciseSeam.hpp"
 
 //#define DEBUG_FILES
 
@@ -303,6 +304,11 @@ struct GlobalModelInfo {
   AABBTreeIndirect::Tree<3, float> enforcers_tree;
   AABBTreeIndirect::Tree<3, float> blockers_tree;
 
+  // Precise Seam modifiers: strong modifiers (CENTER/LEFT/RIGHT) determine exact seam placement
+  std::vector<const ModelVolume*> precise_seam_strong_volumes;
+  // Precise Seam modifiers: weak modifiers (ENFORCED/BLOCKED/NEUTRAL) provide hints for seam placement
+  std::vector<const ModelVolume*> precise_seam_weak_volumes;
+
   bool is_enforced(const Vec3f &position, float radius) const {
     if (enforcers.empty()) {
       return false;
@@ -460,6 +466,39 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   }
   Polygon polygon = orig_polygon;
   bool was_clockwise = polygon.make_counter_clockwise();
+  // NOTE: In OrcaSlicer (as in upstream Slic3r) polygons are conceptually closed but stored without
+  // repeating the first vertex. At this point in the pipeline we consistently receive polygons whose
+  // first and last points coincide, creating a zero-length edge. Ideally such inputs should be rebuilt
+  // (drop the duplicate or remodel this contour as a Polyline), but until that contract is enforced we
+  // nudge the duplicate slightly toward the previous vertex before running the precise seam logic; see
+  // the workaround later here.
+
+  // Process Precise Seam modifiers to find seam placement
+  const Layer* layer = region ? region->layer() : nullptr;
+  const PrintObject* print_object = layer ? layer->object() : nullptr;
+
+  // Use pre-computed Precise Seam volumes from global_model_info (computed once in init)
+  const auto& strong_volumes = global_model_info.precise_seam_strong_volumes;
+  const auto& weak_volumes = global_model_info.precise_seam_weak_volumes;
+
+  // Apply vertex nudging workaround only when precise seam modifiers are present
+  if (!strong_volumes.empty() || !weak_volumes.empty()) {
+      PreciseSeam::nudge_duplicate_vertex(polygon);
+  }
+
+  auto seam_point = PreciseSeam::insert_strong_seam_point(strong_volumes, polygon, layer, print_object);
+
+  // Store the inserted point position for marking as central_enforcer later
+  std::optional<Vec3f> inserted_seam_position;
+  if (seam_point.has_value()) {
+    Vec2f unscaled_p = unscale(seam_point.value()).cast<float>();
+    inserted_seam_position = Vec3f(unscaled_p.x(), unscaled_p.y(), z_coord);
+  }
+
+  // Process weak modifiers (ENFORCED/BLOCKED/NEUTRAL)
+  std::vector<PreciseSeam::WeakModifierSegment> weak_segments =
+    PreciseSeam::collect_weak_modifier_segments(strong_volumes, weak_volumes, polygon, layer, print_object);
+
   float angle_arm_len = region != nullptr ? region->flow(FlowRole::frExternalPerimeter).nozzle_diameter() : 0.5f;
 
   std::vector<float> lengths { };
@@ -528,6 +567,18 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
 
   perimeter.end_index = result.points.size();
 
+  // Apply weak modifiers if no strong modifier was inserted
+  if (!inserted_seam_position.has_value() && !weak_segments.empty()) {
+    PreciseSeam::apply_weak_modifiers_to_perimeter(
+        weak_segments, polygon, result, perimeter, some_point_enforced,
+        &weak_volumes, layer ? layer->id() : 0);
+  }
+
+#ifdef PS_DEBUG
+  // Debug: dump perimeter points with weak modifier types
+  PreciseSeam::debug_weak_modifiers(result, perimeter, layer ? layer->id() : 0);
+#endif
+
   if (some_point_enforced) {
     // We will patches of enforced points (patch: continuous section of enforced points), choose
     // the longest patch, and select the middle point or sharp point (depending on the angle)
@@ -595,6 +646,24 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     }
   }
 
+  // Apply precise seam point if it was inserted
+  if (inserted_seam_position.has_value()) {
+    // Set single point as Enforced, block all others
+    for (size_t i = perimeter.start_index; i < perimeter.end_index; ++i) {
+      if (result.points[i].position == inserted_seam_position.value()) {
+        // Mark as the single enforced point with highest priority
+        result.points[i].type = EnforcedBlockedSeamPoint::Enforced;
+        result.points[i].central_enforcer = true;
+        perimeter.precise_seam_point = inserted_seam_position;
+        perimeter.precise_seam_index = i;
+      } else {
+        // Block all other points
+        result.points[i].type = EnforcedBlockedSeamPoint::Blocked;
+        result.points[i].central_enforcer = false;
+      }
+    }
+  }
+
 }
 
 // Get index of previous and next perimeter point of the layer. Because SeamCandidates of all polygons of the given layer
@@ -608,7 +677,7 @@ std::pair<size_t, size_t> find_previous_and_next_perimeter_point(const std::vect
 
   if (point_index == current.perimeter.start_index) {
     // if point_index is equal to start, it means that the previous neighbour is at the end
-    prev = current.perimeter.end_index;
+    prev = current.perimeter.end_index - 1;
   }
 
   if (point_index == current.perimeter.end_index - 1) {
@@ -1436,6 +1505,11 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
     {
       GlobalModelInfo global_model_info { };
       gather_enforcers_blockers(global_model_info, po);
+      PreciseSeam::init_precise_seam_data(
+          global_model_info.precise_seam_strong_volumes,
+          global_model_info.precise_seam_weak_volumes,
+          m_seam_per_object[po].has_precise_seam_strong_volumes,
+          po->model_object());
       throw_if_canceled_func();
       if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {
         compute_global_occlusion(global_model_info, po, throw_if_canceled_func, configured_seam_preference);
@@ -1489,6 +1563,11 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       align_seam_points(po, comparator);
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: align_seam_points : end";
+    }
+
+    // Restore precise seam positions that were potentially modified
+    if (m_seam_per_object[po].has_precise_seam_strong_volumes) {
+      PreciseSeam::restore_precise_seam_positions(m_seam_per_object[po].layers);
     }
 
 #ifdef DEBUG_FILES

@@ -41,7 +41,7 @@ enum class EnforcedBlockedSeamPoint {
 // struct representing single perimeter loop
 struct Perimeter {
   size_t start_index{};
-  size_t end_index{}; //inclusive!
+  size_t end_index{}; //exclusive (one-past-the-end)
   size_t seam_index{};
   float flow_width{};
 
@@ -50,6 +50,10 @@ struct Perimeter {
   // Random position also uses this flexibility to set final seam point position
   bool finalized = false;
   Vec3f final_seam_position = Vec3f::Zero();
+
+  // Stores precise seam coordinates found by Precise Seam modifiers
+  std::optional<Vec3f> precise_seam_point;
+  size_t precise_seam_index{};
 };
 
 //Struct over which all processing of perimeters is done. For each perimeter point, its respective candidate is created,
@@ -101,6 +105,9 @@ struct PrintObjectSeamData
   std::vector<LayerSeams> layers;
   // Map of PrintObjects (PO) -> vector of layers of PO -> unique_ptr to KD
   // tree of all points of the given layer
+
+  // Indicates presence of strong Precise Seam modifiers (CENTER/LEFT/RIGHT) for this object
+  bool has_precise_seam_strong_volumes;
 
   void clear()
   {
