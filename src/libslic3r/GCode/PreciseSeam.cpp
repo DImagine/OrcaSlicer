@@ -897,7 +897,8 @@ std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
     const Layer *layer,
-    const PrintObject *print_object)
+    const PrintObject *print_object,
+    std::atomic<bool>* warning_flag)  // set to true on multiple intersections detected
 {
     if (strong_volumes.empty() || layer == nullptr || print_object == nullptr) {
         return std::nullopt;
@@ -921,6 +922,17 @@ std::optional<Point> insert_strong_seam_point(
         for (const Polygon &modifier_polygon : modifier_polygons) {
             // Find intersection with perimeter
             Polygons intersection_polygons = intersection(Polygons{polygon}, Polygons{modifier_polygon});
+
+            // Multiple intersection polygons = modifier crosses perimeter in several places
+            if (warning_flag && intersection_polygons.size() > 1)  // warning_flag: nullptr check before dereference
+                warning_flag->store(true, std::memory_order_relaxed);
+            // Diff check: normal case gives 1 polygon, >1 means multiple intersections
+            // This Clipper call is only for warning detection, not required for algorithm
+            if (warning_flag && !warning_flag->load(std::memory_order_relaxed)) {
+                Polygons diff_polygons = diff(Polygons{modifier_polygon}, Polygons{polygon});
+                if (diff_polygons.size() > 1)
+                    warning_flag->store(true, std::memory_order_relaxed);
+            }
 
             // Process each intersection polygon
             for (Polygon &intersection_polygon : intersection_polygons) {
@@ -1061,7 +1073,8 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
     const Layer *layer,
-    const PrintObject *print_object)
+    const PrintObject *print_object,
+    std::atomic<bool>* warning_flag)  // set to true on multiple intersections detected
 {
     std::vector<WeakModifierSegment> result;
 
@@ -1088,6 +1101,17 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         for (const Polygon &modifier_polygon : modifier_polygons) {
             // Find intersection with perimeter
             Polygons intersection_polygons = intersection(Polygons{polygon}, Polygons{modifier_polygon});
+
+            // Multiple intersection polygons = modifier crosses perimeter in several places
+            if (warning_flag && intersection_polygons.size() > 1)  // warning_flag: nullptr check before dereference
+                warning_flag->store(true, std::memory_order_relaxed);
+            // Diff check: normal case gives 1 polygon, >1 means multiple intersections
+            // This Clipper call is only for warning detection, not required for algorithm
+            if (warning_flag && !warning_flag->load(std::memory_order_relaxed)) {
+                Polygons diff_polygons = diff(Polygons{modifier_polygon}, Polygons{polygon});
+                if (diff_polygons.size() > 1)
+                    warning_flag->store(true, std::memory_order_relaxed);
+            }
 
             // Process each intersection polygon
             for (Polygon &intersection_polygon : intersection_polygons) {

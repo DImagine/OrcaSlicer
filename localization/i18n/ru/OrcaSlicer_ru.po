@@ -25010,3 +25010,12 @@ msgstr ""
 
 #~ msgid "Right click to reset value to system default."
 #~ msgstr "Правая кнопка мыши - сброс значения до системного по умолчанию."
+
+msgid ""
+"Precise Seam modifier creates multiple intersections with a perimeter. "
+"The result may be unpredictable. Reposition the modifier so that it "
+"intersects each perimeter wall in one place only."
+msgstr ""
+"Модификатор Precise Seam создаёт множественные пересечения с периметром. "
+"Результат может быть непредсказуем. Переместите модификатор так, чтобы он "
+"пересекал стенку каждого периметра только в одном месте."

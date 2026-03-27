@@ -80,7 +80,8 @@ std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
     const Layer *layer,
-    const PrintObject *print_object);
+    const PrintObject *print_object,
+    std::atomic<bool>* warning_flag = nullptr);  // set to true on multiple intersections detected
 
 // Collect all weak modifier segments for a perimeter polygon
 // Processes weak modifiers (ENFORCED/BLOCKED/NEUTRAL) and collects segment boundaries
@@ -99,7 +100,8 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
     const Layer *layer,
-    const PrintObject *print_object);
+    const PrintObject *print_object,
+    std::atomic<bool>* warning_flag = nullptr);  // set to true on multiple intersections detected
 
 // Apply weak modifier types to perimeter points based on segment boundaries
 // Finds boundary points in refined polygon and sets types for points within segments

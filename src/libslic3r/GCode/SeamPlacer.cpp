@@ -460,7 +460,8 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
 //each SeamCandidate also contains pointer to shared Perimeter structure representing the polygon
 // if Custom Seam modifiers are present, oversamples the polygon if necessary to better fit user intentions
 void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const LayerRegion *region,
-                               const GlobalModelInfo &global_model_info, PrintObjectSeamData::LayerSeams &result) {
+                               const GlobalModelInfo &global_model_info, PrintObjectSeamData::LayerSeams &result,
+                               std::atomic<bool>* warning_flag = nullptr) {
   if (orig_polygon.size() == 0) {
     return;
   }
@@ -486,7 +487,7 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
       PreciseSeam::nudge_duplicate_vertex(polygon);
   }
 
-  auto seam_point = PreciseSeam::insert_strong_seam_point(strong_volumes, polygon, layer, print_object);
+  auto seam_point = PreciseSeam::insert_strong_seam_point(strong_volumes, polygon, layer, print_object, warning_flag);
 
   // Store the inserted point position for marking as central_enforcer later
   std::optional<Vec3f> inserted_seam_position;
@@ -497,7 +498,7 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
 
   // Process weak modifiers (ENFORCED/BLOCKED/NEUTRAL)
   std::vector<PreciseSeam::WeakModifierSegment> weak_segments =
-    PreciseSeam::collect_weak_modifier_segments(strong_volumes, weak_volumes, polygon, layer, print_object);
+    PreciseSeam::collect_weak_modifier_segments(strong_volumes, weak_volumes, polygon, layer, print_object, warning_flag);
 
   float angle_arm_len = region != nullptr ? region->flow(FlowRole::frExternalPerimeter).nozzle_diameter() : 0.5f;
 
@@ -1080,13 +1081,14 @@ void pick_random_seam_point(const std::vector<SeamCandidate> &perimeter_points, 
 // Parallel process and extract each perimeter polygon of the given print object.
 // Gather SeamCandidates of each layer into vector and build KDtree over them
 // Store results in the SeamPlacer variables m_seam_per_object
-void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerImpl::GlobalModelInfo &global_model_info) {
+void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerImpl::GlobalModelInfo &global_model_info,
+                                        std::atomic<bool>* warning_flag) {
   using namespace SeamPlacerImpl;
   PrintObjectSeamData &seam_data = m_seam_per_object.emplace(po, PrintObjectSeamData { }).first->second;
   seam_data.layers.resize(po->layer_count());
 
   tbb::parallel_for(tbb::blocked_range<size_t>(0, po->layers().size()),
-                    [po, &global_model_info, &seam_data]
+                    [po, &global_model_info, &seam_data, warning_flag]
                     (tbb::blocked_range<size_t> r) {
                       for (size_t layer_idx = r.begin(); layer_idx < r.end(); ++layer_idx) {
                         PrintObjectSeamData::LayerSeams &layer_seams = seam_data.layers[layer_idx];
@@ -1097,7 +1099,8 @@ void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerI
                         Polygons polygons = extract_perimeter_polygons(layer, regions);
                         for (size_t poly_index = 0; poly_index < polygons.size(); ++poly_index) {
                           process_perimeter_polygon(polygons[poly_index], unscaled_z,
-                                                    regions[poly_index], global_model_info, layer_seams);
+                                                    regions[poly_index], global_model_info, layer_seams,
+                                                    warning_flag);
                         }
                         auto functor = SeamCandidateCoordinateFunctor { layer_seams.points };
                         seam_data.layers[layer_idx].points_tree =
@@ -1515,11 +1518,20 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
         compute_global_occlusion(global_model_info, po, throw_if_canceled_func, configured_seam_preference);
       }
       throw_if_canceled_func();
+      // Flag: set to true if any Precise Seam modifier creates multiple intersections with a perimeter
+      std::atomic<bool> precise_seam_multiple_intersections{false};
+
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: gather_seam_candidates: start";
-      gather_seam_candidates(po, global_model_info);
+      gather_seam_candidates(po, global_model_info, &precise_seam_multiple_intersections);
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: gather_seam_candidates: end";
+      if (precise_seam_multiple_intersections.load(std::memory_order_relaxed))
+          const_cast<Print&>(print).active_step_add_warning(
+              PrintStateBase::WarningLevel::NON_CRITICAL,
+              L("Precise Seam modifier creates multiple intersections with a perimeter. "
+                "The result may be unpredictable. Reposition the modifier so that it "
+                "intersects each perimeter wall in one place only."));
       throw_if_canceled_func();
       if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {
         BOOST_LOG_TRIVIAL(debug)
