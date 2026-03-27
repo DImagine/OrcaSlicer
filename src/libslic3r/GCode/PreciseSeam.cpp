@@ -254,8 +254,7 @@ static std::optional<SegmentData> common_segment_in_intersection(
         constexpr double EDGE_CENTER_THRESHOLD = MACHINE_PRECISION_SQUARED + 0.5;
 
         // Check each intersection edge - does its midpoint lie on perimeter
-        size_t edges_not_on_perimeter = 0;
-        size_t edge_not_on_perim_idx = std::numeric_limits<size_t>::max();
+        std::vector<size_t> edges_not_on_perim_indices;
 
         for (size_t i = 0; i < isect_n; ++i) {
             size_t next_i = (i + 1) % isect_n;
@@ -276,38 +275,54 @@ static std::optional<SegmentData> common_segment_in_intersection(
 
             // Check if midpoint lies on perimeter (accounting for rounding error)
             if (dist_sq > EDGE_CENTER_THRESHOLD) {
-                edges_not_on_perimeter++;
-                edge_not_on_perim_idx = i;  // Save start index of edge
+                edges_not_on_perim_indices.push_back(i);
             }
         }
 
         // Analyze results
-        if (edges_not_on_perimeter == 0) {
+        if (edges_not_on_perim_indices.empty()) {
             // All edges on perimeter → complete polygon match → not suitable for seam placement
             return std::nullopt;
-        } else if (edges_not_on_perimeter == 1) {
-            // One edge not on perimeter → remove it, form open segment
-            // Edge edge_not_on_perim_idx → (edge_not_on_perim_idx+1)%n is removed
-            // Segment: from (edge_not_on_perim_idx+1)%n to edge_not_on_perim_idx via CCW traversal
-            SegmentData result;
-            result.segment.points.reserve(isect_n);
-            result.perimeter_edge_indices.reserve(isect_n);
+        }
 
-            size_t start_idx = (edge_not_on_perim_idx + 1) % isect_n;  // Start after removed edge
-            for (size_t i = 0; i < isect_n; ++i) {
-                size_t idx = (start_idx + i) % isect_n;  // Wrap-around traversal
-                result.segment.points.push_back(intersection_polygon.points[idx]);
-                result.perimeter_edge_indices.push_back(projections[idx].edge_index);
+        // Edges not on perimeter act as "cuts" that split the circular ring of vertices
+        // into separate on-perimeter segments. For k cuts there are k segments.
+        // We iterate over consecutive pairs of cuts and pick the longest segment.
+        const size_t k = edges_not_on_perim_indices.size();
+        size_t best_start = 0;
+        size_t best_length = 0;
+
+        for (size_t i = 0; i < k; ++i) {
+            size_t gap_cur  = edges_not_on_perim_indices[i];
+            size_t gap_next = edges_not_on_perim_indices[(i + 1) % k];
+
+            // Segment starts at the vertex right after the current cut
+            size_t start  = (gap_cur + 1) % isect_n;
+            // Number of vertices from start up to and including the vertex before the next cut
+            size_t length = (gap_next - gap_cur - 1 + isect_n) % isect_n + 1;
+
+            if (length > best_length) {
+                best_length = length;
+                best_start  = start;
             }
+        }
 
-            return result;
-        } else {
-            // More than one edge not on perimeter → invalid geometry
-            BOOST_LOG_TRIVIAL(error) << "Precise seam: " << edges_not_on_perimeter
-                                     << " edges not on perimeter while all vertices lie on perimeter. "
-                                     << "Expected 0 (full match) or 1 (valid segment).";
+        if (best_length < 2) {
             return std::nullopt;
         }
+
+        // Form SegmentData from the longest on-perimeter segment
+        SegmentData result;
+        result.segment.points.reserve(best_length);
+        result.perimeter_edge_indices.reserve(best_length);
+
+        for (size_t i = 0; i < best_length; ++i) {
+            size_t idx = (best_start + i) % isect_n;
+            result.segment.points.push_back(intersection_polygon.points[idx]);
+            result.perimeter_edge_indices.push_back(projections[idx].edge_index);
+        }
+
+        return result;
     }
 
     // ============================================================
