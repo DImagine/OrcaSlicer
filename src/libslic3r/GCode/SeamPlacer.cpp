@@ -575,11 +575,6 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
         &weak_volumes, layer ? layer->id() : 0);
   }
 
-#ifdef PS_DEBUG
-  // Debug: dump perimeter points with weak modifier types
-  PreciseSeam::debug_weak_modifiers(result, perimeter, layer ? layer->id() : 0);
-#endif
-
   if (some_point_enforced) {
     // We will patches of enforced points (patch: continuous section of enforced points), choose
     // the longest patch, and select the middle point or sharp point (depending on the angle)
@@ -1590,6 +1585,8 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       const bool mi = precise_seam_warnings.multiple_intersections.load(std::memory_order_relaxed);
       const bool mc = precise_seam_warnings.multiply_connected.load(std::memory_order_relaxed);
       std::string warning_text;
+      // NOTE: Russian translations exist in localization/i18n/ru/OrcaSlicer_ru.po
+      // and must be updated when these messages change.
       if (mi && mc)
           warning_text = L("Precise Seam: Modifier creates multiple or through-body intersections "
                            "with a perimeter, and has a multiply-connected cross-section "

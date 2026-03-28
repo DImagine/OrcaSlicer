@@ -15,22 +15,34 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "SeamPlacer.hpp"
 
-// DESIGN CONSTRAINT:
-// The modifier volume must intersect the model's wall (the sliced perimeter) in exactly
-// one place — it must not pass through the model completely or create multiple intersections
-// in any other way. It also must not engulf the perimeter entirely.
-// The algorithm was not designed to support such kind of intersections, and the result
-// will be unpredictable (either only one intersection can be found, or none at all).
+// CURRENT STATUS:
+// Strong modifiers (Center/Left/Right): only one intersection per perimeter is supported,
+// since there can be only one seam. Additional intersections are ignored.
+//
+// Weak modifiers (Enforced/Blocked/Neutral): multiple intersections are supported,
+// but none of them should pass through the model entirely. A through-body intersection
+// produces multiple segments, of which only one will be processed.
+//
+// In both cases, a pop-up warning is shown when unsupported intersections are detected.
+//
+// If any modifier has a multiply-connected cross-section (e.g. a hollow shape),
+// it is skipped and a corresponding notification is shown.
+//
+// Full containment of the perimeter within modifier is not handled.
 //
 // FUTURE DIRECTION:
-// For Weak modifier types, it would be worthwhile to support multiple intersections.
-// However, a new algorithm capable of finding all separate intersection segments and handling
-// all edge cases (including complete engulfment of the perimeter) could significantly slow
-// down slicing. Therefore, it makes sense to add a new modifier type alongside the existing
-// six — for example, "Enforced MZ" (Multiple Zones) — that would contain the heavier
-// algorithm for locating every distinct intersection segment and correctly painting
-// the enforced zone for each of them. This way the existing fast path remains untouched
-// for the common single-intersection case.
+// A lightweight algorithm is needed to detect and handle through-body intersections
+// for Weak modifiers. The algorithm must not slow down the 99.9% common case.
+// Possible approach: if intersection passes the diff check (no through-body),
+// use the current fast algorithm. If diff check fails, fall back to a heavier
+// method: compute midpoints of intersection polygon edges, then check which
+// midpoints lie strictly inside the modifier (not on boundary) using
+// point_in_polygon. Those edges originate from the perimeter; the rest
+// originate from the modifier boundary. Collect perimeter edges into a polyline.
+// Additionally, multiply-connected cross-sections could be supported instead of
+// being skipped entirely (e.g. by decomposing them into simple polygons).
+// For Enforced and Neutral weak modifiers, full containment of the perimeter
+// within modifier could be handled (currently ignored).
 
 namespace Slic3r {
 namespace PreciseSeam {
