@@ -294,12 +294,12 @@ static const constexpr std::array<std::pair<const char *, const char *>, 11> ADD
         {L("Add support blocker"),   "menu_support_blocker"},     // ~ModelVolumeType::SUPPORT_BLOCKER
         {L("Add support enforcer"),  "menu_support_enforcer"},     // ~ModelVolumeType::SUPPORT_ENFORCER
         // Precise Seam modifiers (all 6 subtypes - only first one shown in menu, others used for tree icons)
-        {L("Add precise seam"),      "menu_precise_seam_center"},     // ~ModelVolumeType::PRECISE_SEAM_CENTER
-        {L("Add precise seam"),      "menu_precise_seam_left"},       // ~ModelVolumeType::PRECISE_SEAM_LEFT
-        {L("Add precise seam"),      "menu_precise_seam_right"},      // ~ModelVolumeType::PRECISE_SEAM_RIGHT
-        {L("Add precise seam"),      "menu_precise_seam_enforced"},   // ~ModelVolumeType::PRECISE_SEAM_ENFORCED
-        {L("Add precise seam"),      "menu_precise_seam_blocked"},    // ~ModelVolumeType::PRECISE_SEAM_BLOCKED
-        {L("Add precise seam"),      "menu_precise_seam_neutral"},    // ~ModelVolumeType::PRECISE_SEAM_NEUTRAL
+        {L("Add Precise Seam"),      "menu_precise_seam_center"},     // ~ModelVolumeType::PRECISE_SEAM_CENTER
+        {L("Add Precise Seam"),      "menu_precise_seam_left"},       // ~ModelVolumeType::PRECISE_SEAM_LEFT
+        {L("Add Precise Seam"),      "menu_precise_seam_right"},      // ~ModelVolumeType::PRECISE_SEAM_RIGHT
+        {L("Add Precise Seam"),      "menu_precise_seam_enforced"},   // ~ModelVolumeType::PRECISE_SEAM_ENFORCED
+        {L("Add Precise Seam"),      "menu_precise_seam_blocked"},    // ~ModelVolumeType::PRECISE_SEAM_BLOCKED
+        {L("Add Precise Seam"),      "menu_precise_seam_neutral"},    // ~ModelVolumeType::PRECISE_SEAM_NEUTRAL
 }};
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
