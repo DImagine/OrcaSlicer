@@ -919,6 +919,20 @@ std::optional<Point> insert_strong_seam_point(
         const Polygons &modifier_polygons = modifier_slices[layer_id];
 
         // Iterate through all polygons of the modifier on this layer
+        size_t modifier_polygon_idx = 0;
+        // After finding a match, check if remaining modifier polygons also intersect the perimeter.
+        // Strong modifiers process only one intersection (one seam per perimeter), so any additional
+        // intersections from unprocessed polygons indicate a multiple-intersection situation.
+        auto check_remaining_polygons = [&]() {
+            if (warning_flag && !warning_flag->load(std::memory_order_relaxed)) {
+                for (size_t j = modifier_polygon_idx + 1; j < modifier_polygons.size(); ++j) {
+                    if (!intersection(Polygons{polygon}, Polygons{modifier_polygons[j]}).empty()) {
+                        warning_flag->store(true, std::memory_order_relaxed);
+                        break;  // one extra intersection is enough to trigger the warning
+                    }
+                }
+            }
+        };
         for (const Polygon &modifier_polygon : modifier_polygons) {
             // Find intersection with perimeter
             Polygons intersection_polygons = intersection(Polygons{polygon}, Polygons{modifier_polygon});
@@ -977,6 +991,7 @@ std::optional<Point> insert_strong_seam_point(
                         refine_at_vertex(point_idx, +1, polygon);
                         refine_at_vertex(point_idx, -1, polygon);
 
+                        check_remaining_polygons();
                         return inserted_point_coords;
                     }
 
@@ -1006,6 +1021,7 @@ std::optional<Point> insert_strong_seam_point(
                         refine_at_vertex(point_idx, +1, polygon);
                         refine_at_vertex(point_idx, -1, polygon);
 
+                        check_remaining_polygons();
                         return inserted_point_coords;
                     }
 
@@ -1035,6 +1051,7 @@ std::optional<Point> insert_strong_seam_point(
                         refine_at_vertex(point_idx, +1, polygon);
                         refine_at_vertex(point_idx, -1, polygon);
 
+                        check_remaining_polygons();
                         return inserted_point_coords;
                     }
 
@@ -1042,6 +1059,7 @@ std::optional<Point> insert_strong_seam_point(
                         continue;
                 }
             }
+            modifier_polygon_idx++;
         }
     }
 
