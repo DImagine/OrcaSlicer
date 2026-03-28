@@ -1120,11 +1120,13 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
             // Find intersection with perimeter
             Polygons intersection_polygons = intersection(Polygons{polygon}, Polygons{modifier_polygon});
 
-            // Multiple intersection polygons = modifier crosses perimeter in several places
-            if (warning_flag && intersection_polygons.size() > 1)  // warning_flag: nullptr check before dereference
-                warning_flag->store(true, std::memory_order_relaxed);
-            // Diff check: normal case gives 1 polygon, >1 means multiple intersections
-            // This Clipper call is only for warning detection, not required for algorithm
+            // Note: intersection_polygons.size() > 1 is NOT flagged as a warning here.
+            // For weak modifiers, multiple intersection polygons are expected (the modifier
+            // may legitimately cross the perimeter in several places).
+            // Only through-body intersections (detected by diff below) are abnormal.
+
+            // Diff check: if modifier minus perimeter yields >1 polygon, the modifier
+            // passes through the model body, creating a through-body intersection
             if (warning_flag && !warning_flag->load(std::memory_order_relaxed)) {
                 Polygons diff_polygons = diff(Polygons{modifier_polygon}, Polygons{polygon});
                 if (diff_polygons.size() > 1)

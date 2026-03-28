@@ -1529,9 +1529,9 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       if (precise_seam_multiple_intersections.load(std::memory_order_relaxed))
           const_cast<Print&>(print).active_step_add_warning(
               PrintStateBase::WarningLevel::NON_CRITICAL,
-              L("Precise Seam modifier creates multiple intersections with a perimeter. "
-                "The result may be unpredictable. Reposition the modifier so that it "
-                "intersects each perimeter wall in one place only."));
+              L("Precise Seam modifier creates multiple or through-body intersections "
+                "with a perimeter, which may lead to unpredictable results. "
+                "Consider repositioning the modifier to avoid such intersections."));
       throw_if_canceled_func();
       if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {
         BOOST_LOG_TRIVIAL(debug)
