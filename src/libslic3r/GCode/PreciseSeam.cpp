@@ -898,7 +898,7 @@ std::optional<Point> insert_strong_seam_point(
     Polygon &polygon,
     const Layer *layer,
     const PrintObject *print_object,
-    std::atomic<bool>* warning_flag)  // set to true on multiple intersections detected
+    PreciseSeamWarnings* warnings)
 {
     if (strong_volumes.empty() || layer == nullptr || print_object == nullptr) {
         return std::nullopt;
@@ -909,6 +909,11 @@ std::optional<Point> insert_strong_seam_point(
     // Iterate through strong modifiers in hierarchy order
     for (const ModelVolume* modifier_volume : strong_volumes) {
         // Get slices for this specific modifier volume
+        // TODO: slice_single_volume() converts ExPolygons to flat Polygons, losing
+        // the association between outer contours and their holes. This makes correct
+        // handling of multiply-connected modifier regions (e.g. a torus cross-section)
+        // impossible. Consider a variant returning std::vector<ExPolygons> and adapting
+        // the algorithm to work with multiply-connected domains.
         std::vector<Polygons> modifier_slices = print_object->slice_single_volume(modifier_volume);
 
         // Check if this layer has slices for this modifier
@@ -918,16 +923,28 @@ std::optional<Point> insert_strong_seam_point(
 
         const Polygons &modifier_polygons = modifier_slices[layer_id];
 
+        // Check for multiply-connected regions (holes = CW polygons).
+        // slice_single_volume() flattens ExPolygons into Polygons, but preserves
+        // orientation: CCW = outer contour, CW = hole. If any CW polygon is present,
+        // the modifier is multiply-connected and cannot be processed correctly.
+        bool has_holes = std::any_of(modifier_polygons.begin(), modifier_polygons.end(),
+            [](const Polygon &p) { return p.is_clockwise(); });
+        if (has_holes) {
+            if (warnings)
+                warnings->multiply_connected.store(true, std::memory_order_relaxed);
+            continue;
+        }
+
         // Iterate through all polygons of the modifier on this layer
         size_t modifier_polygon_idx = 0;
         // After finding a match, check if remaining modifier polygons also intersect the perimeter.
         // Strong modifiers process only one intersection (one seam per perimeter), so any additional
         // intersections from unprocessed polygons indicate a multiple-intersection situation.
         auto check_remaining_polygons = [&]() {
-            if (warning_flag && !warning_flag->load(std::memory_order_relaxed)) {
+            if (warnings && !warnings->multiple_intersections.load(std::memory_order_relaxed)) {
                 for (size_t j = modifier_polygon_idx + 1; j < modifier_polygons.size(); ++j) {
                     if (!intersection(Polygons{polygon}, Polygons{modifier_polygons[j]}).empty()) {
-                        warning_flag->store(true, std::memory_order_relaxed);
+                        warnings->multiple_intersections.store(true, std::memory_order_relaxed);
                         break;  // one extra intersection is enough to trigger the warning
                     }
                 }
@@ -938,14 +955,14 @@ std::optional<Point> insert_strong_seam_point(
             Polygons intersection_polygons = intersection(Polygons{polygon}, Polygons{modifier_polygon});
 
             // Multiple intersection polygons = modifier crosses perimeter in several places
-            if (warning_flag && intersection_polygons.size() > 1)  // warning_flag: nullptr check before dereference
-                warning_flag->store(true, std::memory_order_relaxed);
+            if (warnings && intersection_polygons.size() > 1)
+                warnings->multiple_intersections.store(true, std::memory_order_relaxed);
             // Diff check: normal case gives 1 polygon, >1 means multiple intersections
             // This Clipper call is only for warning detection, not required for algorithm
-            if (warning_flag && !warning_flag->load(std::memory_order_relaxed)) {
+            if (warnings && !warnings->multiple_intersections.load(std::memory_order_relaxed)) {
                 Polygons diff_polygons = diff(Polygons{modifier_polygon}, Polygons{polygon});
                 if (diff_polygons.size() > 1)
-                    warning_flag->store(true, std::memory_order_relaxed);
+                    warnings->multiple_intersections.store(true, std::memory_order_relaxed);
             }
 
             // Process each intersection polygon
@@ -1092,7 +1109,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     Polygon &polygon,
     const Layer *layer,
     const PrintObject *print_object,
-    std::atomic<bool>* warning_flag)  // set to true on multiple intersections detected
+    PreciseSeamWarnings* warnings)
 {
     std::vector<WeakModifierSegment> result;
 
@@ -1106,6 +1123,11 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     // Iterate through all weak modifiers in hierarchy order
     for (const ModelVolume* modifier_volume : weak_volumes) {
         // Get slices for given modifier
+        // TODO: slice_single_volume() converts ExPolygons to flat Polygons, losing
+        // the association between outer contours and their holes. This makes correct
+        // handling of multiply-connected modifier regions (e.g. a torus cross-section)
+        // impossible. Consider a variant returning std::vector<ExPolygons> and adapting
+        // the algorithm to work with multiply-connected domains.
         std::vector<Polygons> modifier_slices = print_object->slice_single_volume(modifier_volume);
 
         // Check if slices exist for given layer
@@ -1114,6 +1136,18 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         }
 
         const Polygons &modifier_polygons = modifier_slices[layer_id];
+
+        // Check for multiply-connected regions (holes = CW polygons).
+        // slice_single_volume() flattens ExPolygons into Polygons, but preserves
+        // orientation: CCW = outer contour, CW = hole. If any CW polygon is present,
+        // the modifier is multiply-connected and cannot be processed correctly.
+        bool has_holes = std::any_of(modifier_polygons.begin(), modifier_polygons.end(),
+            [](const Polygon &p) { return p.is_clockwise(); });
+        if (has_holes) {
+            if (warnings)
+                warnings->multiply_connected.store(true, std::memory_order_relaxed);
+            continue;
+        }
 
         // Iterate through all modifier polygons on this layer
         for (const Polygon &modifier_polygon : modifier_polygons) {
@@ -1127,10 +1161,10 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
 
             // Diff check: if modifier minus perimeter yields >1 polygon, the modifier
             // passes through the model body, creating a through-body intersection
-            if (warning_flag && !warning_flag->load(std::memory_order_relaxed)) {
+            if (warnings && !warnings->multiple_intersections.load(std::memory_order_relaxed)) {
                 Polygons diff_polygons = diff(Polygons{modifier_polygon}, Polygons{polygon});
                 if (diff_polygons.size() > 1)
-                    warning_flag->store(true, std::memory_order_relaxed);
+                    warnings->multiple_intersections.store(true, std::memory_order_relaxed);
             }
 
             // Process each intersection polygon

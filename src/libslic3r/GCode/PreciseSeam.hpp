@@ -38,6 +38,12 @@ namespace PreciseSeam {
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
+// Warning flags set during Precise Seam processing (thread-safe)
+struct PreciseSeamWarnings {
+    std::atomic<bool> multiple_intersections{false};  // multiple or through-body intersections detected
+    std::atomic<bool> multiply_connected{false};      // modifier has holes (multiply-connected cross-section)
+};
+
 // Result of finding common segment between perimeter and intersection
 struct SegmentData {
     Polyline segment;                         // Points from intersection_polygon forming the segment
@@ -81,7 +87,7 @@ std::optional<Point> insert_strong_seam_point(
     Polygon &polygon,
     const Layer *layer,
     const PrintObject *print_object,
-    std::atomic<bool>* warning_flag = nullptr);  // set to true on multiple intersections detected
+    PreciseSeamWarnings* warnings = nullptr);
 
 // Collect all weak modifier segments for a perimeter polygon
 // Processes weak modifiers (ENFORCED/BLOCKED/NEUTRAL) and collects segment boundaries
@@ -101,7 +107,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     Polygon &polygon,
     const Layer *layer,
     const PrintObject *print_object,
-    std::atomic<bool>* warning_flag = nullptr);  // set to true on multiple intersections detected
+    PreciseSeamWarnings* warnings = nullptr);
 
 // Apply weak modifier types to perimeter points based on segment boundaries
 // Finds boundary points in refined polygon and sets types for points within segments
