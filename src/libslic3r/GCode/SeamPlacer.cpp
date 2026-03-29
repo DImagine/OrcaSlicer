@@ -496,9 +496,11 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     inserted_seam_position = Vec3f(unscaled_p.x(), unscaled_p.y(), z_coord);
   }
 
-  // Process weak modifiers (ENFORCED/BLOCKED/NEUTRAL)
-  std::vector<PreciseSeam::WeakModifierSegment> weak_segments =
-    PreciseSeam::collect_weak_modifier_segments(strong_volumes, weak_volumes, polygon, layer, print_object, warnings);
+  // Process weak modifiers (ENFORCED/BLOCKED/NEUTRAL) only if no strong modifier was inserted
+  std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
+  if (!inserted_seam_position.has_value()) {
+    weak_segments = PreciseSeam::collect_weak_modifier_segments(strong_volumes, weak_volumes, polygon, layer, print_object, warnings);
+  }
 
   float angle_arm_len = region != nullptr ? region->flow(FlowRole::frExternalPerimeter).nozzle_diameter() : 0.5f;
 
