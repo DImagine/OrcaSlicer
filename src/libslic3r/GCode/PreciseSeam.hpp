@@ -1,6 +1,9 @@
 #ifndef slic3r_PreciseSeam_hpp_
 #define slic3r_PreciseSeam_hpp_
 
+// Debug flag for PreciseSeam module — uncomment to enable file logging
+#define PS_DEBUG
+
 #include <atomic>
 #include <optional>
 #include <vector>
@@ -151,6 +154,19 @@ void nudge_duplicate_vertex(Polygon &polygon);
 // Restore precise seam positions that may have been modified by alignment
 // Iterates through all perimeters and restores precise_seam_point positions
 void restore_precise_seam_positions(std::vector<PrintObjectSeamData::LayerSeams> &layers);
+
+#ifdef PS_DEBUG
+// Debug utility: dump polygon/polyline points to file (scaled units)
+template<typename PolyType>
+void dump_points_to_file(const PolyType &poly, const std::string &filename);
+
+// Debug utility: dump perimeter points with weak modifier types to file (scaled units)
+// Each line: X\tY\tTYPE (0=Blocked, 1=Neutral, 2=Enforced)
+void debug_weak_modifiers(
+    const PrintObjectSeamData::LayerSeams &result,
+    const SeamPlacerImpl::Perimeter &perimeter,
+    size_t layer_id);
+#endif // PS_DEBUG
 
 } // namespace PreciseSeam
 } // namespace Slic3r

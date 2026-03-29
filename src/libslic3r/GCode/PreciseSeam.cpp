@@ -8,6 +8,9 @@
 #include <unordered_map>
 #include <boost/log/trivial.hpp>
 #include <tbb/parallel_for.h>
+#ifdef PS_DEBUG
+#include <mutex>
+#endif
 
 namespace Slic3r {
 namespace PreciseSeam {
@@ -24,6 +27,141 @@ static constexpr double MACHINE_PRECISION_SQUARED = 2.5;
 // Tolerance for checking proximity when inserting seam points into perimeter
 static const coord_t TOLERANCE_LINEAR = scale_(0.001);  // 1.0 micrometers
 static const coord_t TOLERANCE_SQUARED = TOLERANCE_LINEAR * TOLERANCE_LINEAR;
+
+#ifdef PS_DEBUG
+// ============================================================
+// Debug utilities for PreciseSeam module
+// ============================================================
+
+// Thread-safe state for weak modifier logging (called from tbb::parallel_for)
+static std::mutex                              g_debug_mutex;
+static std::unordered_map<size_t, bool>        g_layer_headers_written;  // tracks which layers already have headers
+static std::unordered_map<size_t, int>         g_perimeter_counter;      // per-layer perimeter counter
+
+// Helper: convert EnforcedBlockedSeamPoint to string
+static std::string type_to_string(EnforcedBlockedSeamPoint type) {
+    switch (type) {
+        case EnforcedBlockedSeamPoint::Enforced: return "ENFORCED";
+        case EnforcedBlockedSeamPoint::Blocked:  return "BLOCKED";
+        case EnforcedBlockedSeamPoint::Neutral:  return "NEUTRAL";
+        default: return "UNKNOWN";
+    }
+}
+
+// Helper: convert ModelVolumeType to string
+static std::string volume_type_to_string(ModelVolumeType type) {
+    switch (type) {
+        case ModelVolumeType::PRECISE_SEAM_CENTER:   return "CENTER";
+        case ModelVolumeType::PRECISE_SEAM_LEFT:     return "LEFT";
+        case ModelVolumeType::PRECISE_SEAM_RIGHT:    return "RIGHT";
+        case ModelVolumeType::PRECISE_SEAM_ENFORCED: return "ENFORCED";
+        case ModelVolumeType::PRECISE_SEAM_BLOCKED:  return "BLOCKED";
+        case ModelVolumeType::PRECISE_SEAM_NEUTRAL:  return "NEUTRAL";
+        default: return "UNKNOWN";
+    }
+}
+
+// Helper: write file header with strong/weak modifier lists
+static void write_debug_header(std::ofstream &file, size_t layer_id,
+                               const std::vector<const ModelVolume*> &strong_volumes,
+                               const std::vector<const ModelVolume*> &weak_volumes) {
+    file << "=== Weak Modifiers Debug - Layer " << layer_id << " ===\n\n";
+
+    file << "Strong modifiers (" << strong_volumes.size() << " total):\n";
+    if (strong_volumes.empty()) {
+        file << "  (none)\n";
+    } else {
+        for (size_t i = 0; i < strong_volumes.size(); ++i)
+            file << "  " << (i + 1) << ". '" << strong_volumes[i]->name
+                 << "' (type: " << volume_type_to_string(strong_volumes[i]->type()) << ")\n";
+    }
+    file << "\n";
+
+    file << "Weak modifiers (" << weak_volumes.size() << " total):\n";
+    if (weak_volumes.empty()) {
+        file << "  (none)\n";
+    } else {
+        for (size_t i = 0; i < weak_volumes.size(); ++i)
+            file << "  " << (i + 1) << ". '" << weak_volumes[i]->name
+                 << "' (type: " << volume_type_to_string(weak_volumes[i]->type()) << ")\n";
+    }
+    file << "\n=====================================\n\n";
+}
+
+// Debug: dump strong modifier geometries (perimeter, modifier, intersection, segment, center)
+static void debug_insert_strong_seam_point(
+    const Polygon &perimeter,
+    const Polygon &modifier,
+    const Polygon &intersection_poly,
+    const Polyline &segment,
+    const std::optional<std::pair<Point, size_t>> &center,
+    size_t layer_id)
+{
+    // TODO: dump_points_to_file uses scaled units; consider unifying with mm-based weak log
+    const std::string suffix = "_" + std::to_string(layer_id);
+    dump_points_to_file(perimeter,         "debug_perimeter"     + suffix + ".txt");
+    dump_points_to_file(modifier,          "debug_modifier"      + suffix + ".txt");
+    dump_points_to_file(intersection_poly, "debug_intersection"  + suffix + ".txt");
+    dump_points_to_file(segment,           "debug_segment"       + suffix + ".txt");
+
+    if (center.has_value()) {
+        Polyline center_pl;
+        center_pl.points.push_back(center->first);
+        dump_points_to_file(center_pl, "debug_match_point" + suffix + ".txt");
+        BOOST_LOG_TRIVIAL(warning) << "PreciseSeam: Calculated CENTER point at ("
+                                   << center->first.x() << ", " << center->first.y() << ")";
+    }
+}
+
+// Debug: dump perimeter points with weak modifier types
+void debug_weak_modifiers(
+    const PrintObjectSeamData::LayerSeams &result,
+    const SeamPlacerImpl::Perimeter &perimeter,
+    size_t layer_id)
+{
+    const std::string filename = "debug_weak_" + std::to_string(layer_id) + ".txt";
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        BOOST_LOG_TRIVIAL(warning) << "Dump weak modifiers FAIL (cannot open file): \"" << filename << "\"";
+        return;
+    }
+
+    // Dump all perimeter points: x\ty\ttype (scaled units, consistent with dump_points_to_file)
+    size_t count = 0;
+    for (size_t i = perimeter.start_index; i < perimeter.end_index; ++i) {
+        const auto &pt = result.points[i];
+        file << static_cast<coord_t>(scale_(pt.position.x())) << "\t"
+             << static_cast<coord_t>(scale_(pt.position.y())) << "\t"
+             << static_cast<int>(pt.type) << "\n";
+        ++count;
+    }
+    file.close();
+    BOOST_LOG_TRIVIAL(warning) << "Dump weak modifiers OK (" << count << " points): \"" << filename << "\"";
+}
+
+// Debug: dump polygon/polyline points to file (scaled coordinates)
+template<typename PolyType>
+void dump_points_to_file(const PolyType &poly, const std::string &filename)
+{
+    if (poly.points.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "Dump Poly FAIL (empty): \"" << filename << "\"";
+        return;
+    }
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        BOOST_LOG_TRIVIAL(warning) << "Dump Poly FAIL (cannot open): \"" << filename << "\"";
+        return;
+    }
+    for (const Point &pt : poly.points)
+        file << pt.x() << "\t" << pt.y() << "\n";
+    file.close();
+    BOOST_LOG_TRIVIAL(warning) << "Dump Poly OK (" << poly.points.size() << " points): \"" << filename << "\"";
+}
+// Explicit template instantiations
+template void dump_points_to_file<Polygon>(const Polygon &, const std::string &);
+template void dump_points_to_file<Polyline>(const Polyline &, const std::string &);
+
+#endif // PS_DEBUG
 
 // Finds the closest point of a polygon to the query point.
 // Returns the foot point, the squared distance to it, and the index of the edge
@@ -947,6 +1085,10 @@ std::optional<Point> insert_strong_seam_point(
         if (has_holes) {
             if (warnings)
                 warnings->multiply_connected.store(true, std::memory_order_relaxed);
+#ifdef PS_DEBUG
+            BOOST_LOG_TRIVIAL(warning) << "PreciseSeam [strong] layer " << layer_id
+                << ": multiply-connected modifier '" << modifier_volume->name << "'";
+#endif
             continue;
         }
 
@@ -959,6 +1101,10 @@ std::optional<Point> insert_strong_seam_point(
                 for (size_t j = current_idx + 1; j < modifier_polygons.size(); ++j) {
                     if (!intersection(Polygons{polygon}, Polygons{modifier_polygons[j]}).empty()) {
                         warnings->multiple_intersections.store(true, std::memory_order_relaxed);
+#ifdef PS_DEBUG
+                        BOOST_LOG_TRIVIAL(warning) << "PreciseSeam [strong] layer " << layer_id
+                            << ": extra modifier polygon intersects perimeter";
+#endif
                         break;  // one extra intersection is enough to trigger the warning
                     }
                 }
@@ -970,8 +1116,13 @@ std::optional<Point> insert_strong_seam_point(
             Polygons intersection_polygons = intersection(Polygons{polygon}, Polygons{modifier_polygon});
 
             // Multiple intersection polygons = modifier crosses perimeter in several places
-            if (warnings && intersection_polygons.size() > 1)
+            if (warnings && intersection_polygons.size() > 1) {
                 warnings->multiple_intersections.store(true, std::memory_order_relaxed);
+#ifdef PS_DEBUG
+                BOOST_LOG_TRIVIAL(warning) << "PreciseSeam [strong] layer " << layer_id
+                    << ": multiple intersection polygons (" << intersection_polygons.size() << ")";
+#endif
+            }
             // Diff check: modifier minus perimeter yields >1 polygon = through-body intersection.
             // However, if any diff polygon is CW, it is a hole left by full containment
             // (modifier fully covers perimeter), not a real through-body case.
@@ -981,8 +1132,13 @@ std::optional<Point> insert_strong_seam_point(
                 if (diff_polygons.size() > 1) {
                     bool has_cw = std::any_of(diff_polygons.begin(), diff_polygons.end(),
                         [](const Polygon &p) { return p.is_clockwise(); });
-                    if (!has_cw)
+                    if (!has_cw) {
                         warnings->through_body.store(true, std::memory_order_relaxed);
+#ifdef PS_DEBUG
+                        BOOST_LOG_TRIVIAL(warning) << "PreciseSeam [strong] layer " << layer_id
+                            << ": through-body detected (" << diff_polygons.size() << " diff polygons)";
+#endif
+                    }
                 }
             }
 
@@ -1010,6 +1166,11 @@ std::optional<Point> insert_strong_seam_point(
                     case ModelVolumeType::PRECISE_SEAM_RIGHT:  target = segment_right(segment.value(), polygon);  break;
                     default: continue;
                 }
+
+#ifdef PS_DEBUG
+                debug_insert_strong_seam_point(polygon, modifier_polygon, intersection_polygon,
+                                               segment->segment, target, layer_id);
+#endif
 
                 if (!target.has_value())
                     continue;
@@ -1092,6 +1253,41 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
     size_t layer_id = layer->id() - raft_layers;
 
+#ifdef PS_DEBUG
+    // Debug: open per-layer log file (thread-safe)
+    std::string log_path = "weak_layer_" + std::to_string(layer_id) + ".log";
+    std::ofstream debug_file;
+    int current_perimeter;
+    {
+        std::lock_guard<std::mutex> lock(g_debug_mutex);
+        bool need_header = g_layer_headers_written.find(layer_id) == g_layer_headers_written.end();
+        if (need_header) {
+            // First call for this layer — create file and write header
+            debug_file.open(log_path, std::ios::out | std::ios::trunc);
+            if (debug_file.is_open()) {
+                write_debug_header(debug_file, layer_id, strong_volumes, weak_volumes);
+                g_layer_headers_written[layer_id] = true;
+                g_perimeter_counter[layer_id] = 0;
+            }
+        } else {
+            // Subsequent calls — append
+            debug_file.open(log_path, std::ios::out | std::ios::app);
+        }
+        current_perimeter = g_perimeter_counter[layer_id]++;
+    }
+    if (debug_file.is_open()) {
+        debug_file << "--- Perimeter " << current_perimeter << " ---\n";
+        // Dump perimeter vertices (unscaled, mm)
+        debug_file << std::fixed << std::setprecision(6);
+        debug_file << "Perimeter vertices (" << polygon.points.size() << " points):\n";
+        for (size_t i = 0; i < polygon.points.size(); ++i) {
+            Vec2d pt_mm = unscale(polygon.points[i]);
+            debug_file << pt_mm.x() << "\t" << pt_mm.y() << "\n";
+        }
+        debug_file << "\n";
+    }
+#endif // PS_DEBUG
+
     // Iterate through all weak modifiers in hierarchy order
     for (const ModelVolume* modifier_volume : weak_volumes) {
         // Look up pre-sliced polygons from cache (sliced once in SeamPlacer::init).
@@ -1121,6 +1317,10 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         if (has_holes) {
             if (warnings)
                 warnings->multiply_connected.store(true, std::memory_order_relaxed);
+#ifdef PS_DEBUG
+            BOOST_LOG_TRIVIAL(warning) << "PreciseSeam [weak] layer " << layer_id
+                << ": multiply-connected modifier '" << modifier_volume->name << "'";
+#endif
             continue;
         }
 
@@ -1143,8 +1343,13 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
                 if (diff_polygons.size() > 1) {
                     bool has_cw = std::any_of(diff_polygons.begin(), diff_polygons.end(),
                         [](const Polygon &p) { return p.is_clockwise(); });
-                    if (!has_cw)
+                    if (!has_cw) {
                         warnings->through_body.store(true, std::memory_order_relaxed);
+#ifdef PS_DEBUG
+                        BOOST_LOG_TRIVIAL(warning) << "PreciseSeam [weak] layer " << layer_id
+                            << ": through-body detected (" << diff_polygons.size() << " diff polygons)";
+#endif
+                    }
                 }
             }
 
@@ -1152,6 +1357,19 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
             for (Polygon &intersection_polygon : intersection_polygons) {
                 // Convert intersection_polygon to CCW to guarantee same traversal direction as perimeter
                 intersection_polygon.make_counter_clockwise();
+
+#ifdef PS_DEBUG
+                // Debug: dump intersection polygon coordinates (unscaled, mm)
+                if (debug_file.is_open()) {
+                    debug_file << "Processing modifier '" << modifier_volume->name << "':\n";
+                    debug_file << "Intersection polygon (" << intersection_polygon.points.size() << " points):\n";
+                    for (size_t i = 0; i < intersection_polygon.points.size(); ++i) {
+                        Vec2d pt_mm = unscale(intersection_polygon.points[i]);
+                        debug_file << pt_mm.x() << "\t" << pt_mm.y() << "\n";
+                    }
+                    debug_file << "\n";
+                }
+#endif
 
                 // Search for perimeter segment in this intersection
                 std::optional<SegmentData> segment = common_segment_in_intersection_fast(
@@ -1169,6 +1387,34 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
 
                 // Get right (last) point of segment
                 std::optional<std::pair<Point, size_t>> right = segment_right(segment.value(), polygon);
+
+#ifdef PS_DEBUG
+                // Debug: dump found segment and boundary points (unscaled, mm)
+                if (debug_file.is_open()) {
+                    debug_file << "Found segment with " << segment->segment.points.size() << " points\n";
+                    debug_file << "Segment points:\n";
+                    for (size_t i = 0; i < segment->segment.points.size(); ++i) {
+                        Vec2d pt_mm = unscale(segment->segment.points[i]);
+                        debug_file << pt_mm.x() << "\t" << pt_mm.y() << "\n";
+                    }
+                    debug_file << "\n";
+                    if (left.has_value()) {
+                        Vec2d l_mm = unscale(left->first);
+                        debug_file << "Left boundary: [" << l_mm.x() << ", " << l_mm.y()
+                                   << "] at perimeter index " << left->second << "\n";
+                    } else {
+                        debug_file << "Left boundary: NOT FOUND\n";
+                    }
+                    if (right.has_value()) {
+                        Vec2d r_mm = unscale(right->first);
+                        debug_file << "Right boundary: [" << r_mm.x() << ", " << r_mm.y()
+                                   << "] at perimeter index " << right->second << "\n";
+                    } else {
+                        debug_file << "Right boundary: NOT FOUND\n";
+                    }
+                    debug_file << "\n";
+                }
+#endif
 
                 // If both boundaries found, add segment to result
                 if (left.has_value() && right.has_value()) {
@@ -1368,6 +1614,12 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     // Replace polygon points with new ones (with split enforced edges)
     polygon.points = std::move(new_points);
 
+#ifdef PS_DEBUG
+    // Debug: close per-layer log file
+    if (debug_file.is_open())
+        debug_file.close();
+#endif
+
     return result;
 }
 
@@ -1398,6 +1650,17 @@ void apply_weak_modifiers_to_perimeter(
         return std::nullopt;
     };
 
+#ifdef PS_DEBUG
+    // Debug: open per-layer log file to append boundary point search results
+    std::ofstream debug_file;
+    if (weak_volumes != nullptr && !weak_segments.empty()) {
+        std::string log_path = "weak_layer_" + std::to_string(layer_id) + ".log";
+        debug_file.open(log_path, std::ios::out | std::ios::app);
+        if (debug_file.is_open())
+            debug_file << "  [Apply to perimeter - searching boundary points]\n";
+    }
+#endif
+
     // Apply weak modifiers sequentially: sorted low-priority-first,
     // so higher-priority modifiers (higher in object tree) overwrite via last-write-wins.
     for (size_t seg_idx = 0; seg_idx < weak_segments.size(); ++seg_idx) {
@@ -1406,6 +1669,17 @@ void apply_weak_modifiers_to_perimeter(
         // Find boundary point indices in result.points
         std::optional<size_t> left_idx = find_point_index(segment.left_point);
         std::optional<size_t> right_idx = find_point_index(segment.right_point);
+
+#ifdef PS_DEBUG
+        // Debug: log search results for this modifier
+        if (debug_file.is_open() && weak_volumes != nullptr && seg_idx < weak_volumes->size()) {
+            const ModelVolume* vol = (*weak_volumes)[seg_idx];
+            debug_file << "    Modifier '" << vol->name << "': "
+                       << "left_idx=" << (left_idx.has_value() ? std::to_string(left_idx.value()) : "NOT FOUND!")
+                       << ", right_idx=" << (right_idx.has_value() ? std::to_string(right_idx.value()) : "NOT FOUND!")
+                       << "\n";
+        }
+#endif
 
         if (!left_idx.has_value() || !right_idx.has_value()) {
             BOOST_LOG_TRIVIAL(error) << "PreciseSeam: boundary point not found in perimeter, skipping segment";
@@ -1422,6 +1696,13 @@ void apply_weak_modifiers_to_perimeter(
             some_point_enforced = true;
         }
     }
+
+#ifdef PS_DEBUG
+    if (debug_file.is_open()) {
+        debug_file << "\n";
+        debug_file.close();
+    }
+#endif
 }
 
 // Nudge duplicate last vertex toward previous vertex to avoid zero-length edge.

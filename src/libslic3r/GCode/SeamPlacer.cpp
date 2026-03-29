@@ -583,6 +583,12 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
         &weak_volumes, layer ? layer->id() : 0);
   }
 
+#ifdef PS_DEBUG
+  // Debug: dump perimeter points with weak modifier types
+  if (!weak_segments.empty())
+    PreciseSeam::debug_weak_modifiers(result, perimeter, layer ? layer->id() : 0);
+#endif
+
   if (some_point_enforced) {
     // We will patches of enforced points (patch: continuous section of enforced points), choose
     // the longest patch, and select the middle point or sharp point (depending on the angle)
