@@ -9,6 +9,7 @@
 #include <random>
 #include <algorithm>
 #include <queue>
+#include <unordered_map>
 
 #include "libslic3r/AABBTreeLines.hpp"
 #include "libslic3r/KDTreeIndirect.hpp"
@@ -309,6 +310,11 @@ struct GlobalModelInfo {
   // Precise Seam modifiers: weak modifiers (ENFORCED/BLOCKED/NEUTRAL) provide hints for seam placement
   std::vector<const ModelVolume*> precise_seam_weak_volumes;
 
+  // Pre-sliced modifier polygons, keyed by ModelVolume pointer.
+  // Populated once in SeamPlacer::init() to avoid re-slicing on every perimeter.
+  // Each value is a per-layer vector of Polygons for that modifier volume.
+  std::unordered_map<const ModelVolume*, std::vector<Polygons>> precise_seam_slices;
+
   bool is_enforced(const Vec3f &position, float radius) const {
     if (enforcers.empty()) {
       return false;
@@ -476,7 +482,6 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
 
   // Process Precise Seam modifiers to find seam placement
   const Layer* layer = region ? region->layer() : nullptr;
-  const PrintObject* print_object = layer ? layer->object() : nullptr;
 
   // Use pre-computed Precise Seam volumes from global_model_info (computed once in init)
   const auto& strong_volumes = global_model_info.precise_seam_strong_volumes;
@@ -487,7 +492,8 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
       PreciseSeam::nudge_duplicate_vertex(polygon);
   }
 
-  auto seam_point = PreciseSeam::insert_strong_seam_point(strong_volumes, polygon, layer, print_object, warnings);
+  // Use pre-sliced cache from global_model_info instead of re-slicing on every call
+  auto seam_point = PreciseSeam::insert_strong_seam_point(strong_volumes, polygon, layer, global_model_info.precise_seam_slices, warnings);
 
   // Store the inserted point position for marking as central_enforcer later
   std::optional<Vec3f> inserted_seam_position;
@@ -499,7 +505,7 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   // Process weak modifiers (ENFORCED/BLOCKED/NEUTRAL) only if no strong modifier was inserted
   std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
   if (!inserted_seam_position.has_value()) {
-    weak_segments = PreciseSeam::collect_weak_modifier_segments(strong_volumes, weak_volumes, polygon, layer, print_object, warnings);
+    weak_segments = PreciseSeam::collect_weak_modifier_segments(strong_volumes, weak_volumes, polygon, layer, global_model_info.precise_seam_slices, warnings);
   }
 
   float angle_arm_len = region != nullptr ? region->flow(FlowRole::frExternalPerimeter).nozzle_diameter() : 0.5f;
@@ -1513,6 +1519,15 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
           global_model_info.precise_seam_weak_volumes,
           m_seam_per_object[po].has_precise_seam_strong_volumes,
           po->model_object());
+
+      // Pre-slice all precise seam modifier volumes once per object.
+      // Without this cache, slice_single_volume() would be called for every
+      // modifier × every perimeter × every layer — thousands of redundant slicing operations.
+      for (const ModelVolume* vol : global_model_info.precise_seam_strong_volumes)
+          global_model_info.precise_seam_slices[vol] = po->slice_single_volume(vol);
+      for (const ModelVolume* vol : global_model_info.precise_seam_weak_volumes)
+          global_model_info.precise_seam_slices[vol] = po->slice_single_volume(vol);
+
       throw_if_canceled_func();
       if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {
         compute_global_occlusion(global_model_info, po, throw_if_canceled_func, configured_seam_preference);

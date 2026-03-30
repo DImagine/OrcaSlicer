@@ -6,6 +6,7 @@
 #include <limits>
 #include <string>
 #include <fstream>
+#include <unordered_map>
 #include <boost/log/trivial.hpp>
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
@@ -50,6 +51,10 @@ namespace PreciseSeam {
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
+// Pre-sliced modifier cache: ModelVolume pointer → per-layer Polygons.
+// Built once in SeamPlacer::init(), then passed read-only into per-perimeter functions.
+using ModifierSlicesCache = std::unordered_map<const ModelVolume*, std::vector<Polygons>>;
+
 // Warning flags set during Precise Seam processing (thread-safe)
 struct PreciseSeamWarnings {
     std::atomic<bool> multiple_intersections{false};  // multiple or through-body intersections detected
@@ -91,14 +96,14 @@ void init_precise_seam_data(
 //   strong_volumes    - list of strong precise seam modifiers
 //   polygon           - perimeter polygon (will be modified if point inserted)
 //   layer             - current layer
-//   print_object      - print object for slicing
+//   slices_cache      - pre-sliced modifier polygons (built once in SeamPlacer::init)
 // Returns:
 //   Coordinates of inserted point (internal units) or std::nullopt if nothing inserted
 std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
     const Layer *layer,
-    const PrintObject *print_object,
+    const ModifierSlicesCache &slices_cache,
     PreciseSeamWarnings* warnings = nullptr);
 
 // Collect all weak modifier segments for a perimeter polygon
@@ -110,7 +115,7 @@ std::optional<Point> insert_strong_seam_point(
 //   weak_volumes      - list of weak precise seam modifiers
 //   polygon           - perimeter polygon (will be modified with inserted points and refined edges)
 //   layer             - current layer
-//   print_object      - print object for slicing
+//   slices_cache      - pre-sliced modifier polygons (built once in SeamPlacer::init)
 // Returns:
 //   Ordered vector of segments with updated coordinates (same order as weak_volumes list)
 std::vector<WeakModifierSegment> collect_weak_modifier_segments(
@@ -118,7 +123,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
     const Layer *layer,
-    const PrintObject *print_object,
+    const ModifierSlicesCache &slices_cache,
     PreciseSeamWarnings* warnings = nullptr);
 
 // Apply weak modifier types to perimeter points based on segment boundaries

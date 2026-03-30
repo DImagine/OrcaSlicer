@@ -897,10 +897,10 @@ std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
     const Layer *layer,
-    const PrintObject *print_object,
+    const ModifierSlicesCache &slices_cache,
     PreciseSeamWarnings* warnings)
 {
-    if (strong_volumes.empty() || layer == nullptr || print_object == nullptr) {
+    if (strong_volumes.empty() || layer == nullptr) {
         return std::nullopt;
     }
 
@@ -908,13 +908,16 @@ std::optional<Point> insert_strong_seam_point(
 
     // Iterate through strong modifiers in hierarchy order
     for (const ModelVolume* modifier_volume : strong_volumes) {
-        // Get slices for this specific modifier volume
+        // Look up pre-sliced polygons from cache (sliced once in SeamPlacer::init).
         // TODO: slice_single_volume() converts ExPolygons to flat Polygons, losing
         // the association between outer contours and their holes. This makes correct
         // handling of multiply-connected modifier regions (e.g. a torus cross-section)
         // impossible. Consider a variant returning std::vector<ExPolygons> and adapting
         // the algorithm to work with multiply-connected domains.
-        std::vector<Polygons> modifier_slices = print_object->slice_single_volume(modifier_volume);
+        auto it = slices_cache.find(modifier_volume);
+        if (it == slices_cache.end())
+            continue; // modifier not in cache (should not happen)
+        const std::vector<Polygons> &modifier_slices = it->second;
 
         // Check if this layer has slices for this modifier
         if (layer_id >= modifier_slices.size()) {
@@ -1108,13 +1111,13 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
     const Layer *layer,
-    const PrintObject *print_object,
+    const ModifierSlicesCache &slices_cache,
     PreciseSeamWarnings* warnings)
 {
     std::vector<WeakModifierSegment> result;
 
     // Check input parameters
-    if (weak_volumes.empty() || layer == nullptr || print_object == nullptr) {
+    if (weak_volumes.empty() || layer == nullptr) {
         return result; // Empty vector
     }
 
@@ -1122,13 +1125,16 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
 
     // Iterate through all weak modifiers in hierarchy order
     for (const ModelVolume* modifier_volume : weak_volumes) {
-        // Get slices for given modifier
+        // Look up pre-sliced polygons from cache (sliced once in SeamPlacer::init).
         // TODO: slice_single_volume() converts ExPolygons to flat Polygons, losing
         // the association between outer contours and their holes. This makes correct
         // handling of multiply-connected modifier regions (e.g. a torus cross-section)
         // impossible. Consider a variant returning std::vector<ExPolygons> and adapting
         // the algorithm to work with multiply-connected domains.
-        std::vector<Polygons> modifier_slices = print_object->slice_single_volume(modifier_volume);
+        auto it = slices_cache.find(modifier_volume);
+        if (it == slices_cache.end())
+            continue; // modifier not in cache (should not happen)
+        const std::vector<Polygons> &modifier_slices = it->second;
 
         // Check if slices exist for given layer
         if (layer_id >= modifier_slices.size()) {
