@@ -3,11 +3,7 @@
 
 #include <optional>
 #include <vector>
-#include <limits>
-#include <string>
-#include <fstream>
 #include <unordered_map>
-#include <boost/log/trivial.hpp>
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Model.hpp"

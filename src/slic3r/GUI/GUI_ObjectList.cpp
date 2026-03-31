@@ -39,8 +39,6 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
-#include <functional>
-
 #ifdef __WXMSW__
 #include "wx/uiaction.h"
 #include <wx/renderer.h>
@@ -5492,16 +5490,17 @@ void ObjectList::change_part_type()
     names.Add(_L("Part"));
     names.Add(_L("Negative Part"));
     names.Add(_L("Modifier"));
+    int precise_seam_index = -1;
     if (!volume->is_svg() && !volume->is_text()) {
       names.Add(_L("Support Blocker"));
       names.Add(_L("Support Enforcer"));
+      precise_seam_index = names.GetCount();
       names.Add(_L("Precise Seam"));  // Defaults to PRECISE_SEAM_CENTER subtype
     }
 
-    // Map all Precise Seam subtypes to "Precise Seam" item (index 5 in names array)
     int type_index = int(type);
-    if (volume->is_precise_seam())
-        type_index = 5;  // "Precise Seam" is at index 5 in names array
+    if (volume->is_precise_seam() && precise_seam_index >= 0)
+        type_index = precise_seam_index;
 
     SingleChoiceDialog dlg(_L("Type:"), _L("Choose part type"), names, type_index);
     auto new_type = ModelVolumeType(dlg.GetSingleChoiceIndex());

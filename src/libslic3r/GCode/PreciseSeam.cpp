@@ -938,13 +938,12 @@ std::optional<Point> insert_strong_seam_point(
         }
 
         // Iterate through all polygons of the modifier on this layer
-        size_t modifier_polygon_idx = 0;
         // After finding a match, check if remaining modifier polygons also intersect the perimeter.
         // Strong modifiers process only one intersection (one seam per perimeter), so any additional
         // intersections from unprocessed polygons indicate a multiple-intersection situation.
-        auto check_remaining_polygons = [&]() {
+        auto check_remaining_polygons = [&](size_t current_idx) {
             if (warnings && !warnings->multiple_intersections.load(std::memory_order_relaxed)) {
-                for (size_t j = modifier_polygon_idx + 1; j < modifier_polygons.size(); ++j) {
+                for (size_t j = current_idx + 1; j < modifier_polygons.size(); ++j) {
                     if (!intersection(Polygons{polygon}, Polygons{modifier_polygons[j]}).empty()) {
                         warnings->multiple_intersections.store(true, std::memory_order_relaxed);
                         break;  // one extra intersection is enough to trigger the warning
@@ -952,7 +951,8 @@ std::optional<Point> insert_strong_seam_point(
                 }
             }
         };
-        for (const Polygon &modifier_polygon : modifier_polygons) {
+        for (size_t modifier_polygon_idx = 0; modifier_polygon_idx < modifier_polygons.size(); ++modifier_polygon_idx) {
+            const Polygon &modifier_polygon = modifier_polygons[modifier_polygon_idx];
             // Find intersection with perimeter
             Polygons intersection_polygons = intersection(Polygons{polygon}, Polygons{modifier_polygon});
 
@@ -1004,14 +1004,14 @@ std::optional<Point> insert_strong_seam_point(
                 if (!result.has_value())
                     continue;
 
-                // Add additional points on both sides to create transition zone
+                // Add additional points on both sides to create transition zone.
+                // +1 must be called before -1: reverse order shifts result->second and breaks insertion.
                 refine_at_vertex(result->second, +1, polygon);
                 refine_at_vertex(result->second, -1, polygon);
 
-                check_remaining_polygons();
+                check_remaining_polygons(modifier_polygon_idx);
                 return result->first;
             }
-            modifier_polygon_idx++;
         }
     }
 

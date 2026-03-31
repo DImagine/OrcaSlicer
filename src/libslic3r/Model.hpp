@@ -345,7 +345,8 @@ enum class ModelVolumeType : int {
     PARAMETER_MODIFIER,
     SUPPORT_BLOCKER,
     SUPPORT_ENFORCER,
-    // Precise seam modifiers (6 subtypes for seam placement control)
+    // Precise seam modifiers (6 subtypes for seam placement control).
+    // Order is critical: strong types first, then weak. Range checks in is_precise_seam*() depend on it.
     PRECISE_SEAM_CENTER,
     PRECISE_SEAM_LEFT,
     PRECISE_SEAM_RIGHT,
