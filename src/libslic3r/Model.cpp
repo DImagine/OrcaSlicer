@@ -1146,19 +1146,6 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
         this->volumes.back()->set_model_object(this);
     }
 
-    // Copy ui_volume_order with pointer remapping (Frontend → Backend)
-    this->ui_volume_order.clear();
-    this->ui_volume_order.reserve(rhs.ui_volume_order.size());
-    for (const ModelVolume* old_vol : rhs.ui_volume_order) {
-        // Find index of old_vol in rhs.volumes
-        auto it = std::find_if(rhs.volumes.begin(), rhs.volumes.end(),
-            [old_vol](const ModelVolume* v) { return v == old_vol; });
-        if (it != rhs.volumes.end()) {
-            size_t idx = std::distance(rhs.volumes.begin(), it);
-            this->ui_volume_order.push_back(this->volumes[idx]);
-        }
-    }
-
     this->clear_instances();
 	this->instances.reserve(rhs.instances.size());
     for (const ModelInstance *model_instance : rhs.instances) {
@@ -1197,9 +1184,6 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
 	rhs.volumes.clear();
     for (ModelVolume *model_volume : this->volumes)
         model_volume->set_model_object(this);
-
-    // Move ui_volume_order (pointers remain valid after volumes moved)
-    this->ui_volume_order = std::move(rhs.ui_volume_order);
 
     this->clear_instances();
 	this->instances = std::move(rhs.instances);
@@ -1326,11 +1310,6 @@ void ModelObject::delete_volume(size_t idx)
     ModelVolumePtrs::iterator i = this->volumes.begin() + idx;
     ModelVolume* volume_to_delete = *i;
 
-    // Remove from ui_volume_order before deleting the volume to avoid dangling pointer
-    auto ui_it = std::find(ui_volume_order.begin(), ui_volume_order.end(), volume_to_delete);
-    if (ui_it != ui_volume_order.end())
-        ui_volume_order.erase(ui_it);
-
     delete volume_to_delete;
     this->volumes.erase(i);
 
@@ -1360,7 +1339,6 @@ void ModelObject::clear_volumes()
     for (ModelVolume *v : this->volumes)
         delete v;
     this->volumes.clear();
-    this->ui_volume_order.clear();
     this->invalidate_bounding_box();
     // BBS: backup: do not save
     // Slic3r::save_object_mesh(*this);
@@ -3669,24 +3647,6 @@ bool model_volume_list_changed(const ModelObject &model_object_old, const ModelO
     });
 }
 
-bool ui_volume_order_changed(const ModelObject &model_object_old, const ModelObject &model_object_new)
-{
-    // If new object has no ui_volume_order, nothing changed
-    if (model_object_new.ui_volume_order.empty())
-        return false;
-
-    // If sizes differ, order changed
-    if (model_object_old.ui_volume_order.size() != model_object_new.ui_volume_order.size())
-        return true;
-
-    // Compare volume IDs (not pointers - pointers change after assign_copy)
-    for (size_t i = 0; i < model_object_old.ui_volume_order.size(); ++i) {
-        if (model_object_old.ui_volume_order[i]->id() != model_object_new.ui_volume_order[i]->id())
-            return true;
-    }
-
-    return false;
-}
 
 template< typename TypeFilterFn, typename CompareFn>
 bool model_property_changed(const ModelObject &model_object_old, const ModelObject &model_object_new, TypeFilterFn type_filter, CompareFn compare)

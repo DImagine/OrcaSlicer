@@ -4247,51 +4247,6 @@ bool emboss_svg(Plater& plater, const wxString &svg_file, const Vec2d& mouse_dro
 }
 }
 
-namespace {
-// Populate UI hierarchy order for volumes to enable backend access to user-defined order.
-// Currently called only when precise seam modifiers exist (to minimize performance impact).
-// NOTE: This condition can be removed to populate ui_volume_order unconditionally,
-//       enabling other backend modules to access UI hierarchy as well.
-void populate_ui_order_precise_seam(Slic3r::Model& model, ObjectList* object_list)
-{
-    if (!object_list)
-        return;
-
-    // Check if any object has precise seam modifiers
-    // NOTE: Remove this check to populate ui_volume_order unconditionally for all backend modules
-    bool has_precise_seam = false;
-    for (const ModelObject* obj : model.objects) {
-        for (const ModelVolume* vol : obj->volumes) {
-            if (vol->is_precise_seam()) {
-                has_precise_seam = true;
-                break;
-            }
-        }
-        if (has_precise_seam)
-            break;
-    }
-
-    if (!has_precise_seam) {
-        // Clear ui_volume_order for all objects to prevent dangling pointers
-        for (ModelObject* obj : model.objects)
-            obj->ui_volume_order.clear();
-        return; // No precise seam modifiers - skip hierarchy population
-    }
-
-    // Collect UI tree hierarchy from ObjectList
-    auto hierarchy = object_list->collect_volume_hierarchy();
-
-    // Populate ui_volume_order for each object based on UI display order
-    for (ModelObject* obj : model.objects) {
-        obj->ui_volume_order.clear();
-        for (const auto& entry : hierarchy) {
-            if (entry.object == obj && entry.volume != nullptr) {
-                obj->ui_volume_order.push_back(entry.volume);
-            }
-        }
-    }
-}
-} // namespace
 
 // State to manage showing after export notifications and device ejecting
 enum ExportingStatus{
@@ -7851,9 +7806,6 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     }
 
     background_process.fff_print()->set_check_multi_filaments_compatibility(wxGetApp().app_config->get("enable_high_low_temp_mixed_printing") == "false");
-
-    // Populate UI hierarchy order for backend modules (e.g., Precise Seam)
-    populate_ui_order_precise_seam(this->model, this->sidebar->obj_list());
 
     Print::ApplyStatus invalidated;
     const auto& preset_bundle = wxGetApp().preset_bundle;

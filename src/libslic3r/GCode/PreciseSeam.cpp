@@ -613,32 +613,31 @@ void init_precise_seam_data(
 
     has_strong_out = !strong_volumes_out.empty();
 
-    // Sort modifiers by UI order if populated
-    if (!model_object->ui_volume_order.empty()) {
-        // Helper function: find volume position in UI tree
-        auto get_ui_position = [&](const ModelVolume* vol) -> size_t {
-            auto it = std::find(model_object->ui_volume_order.begin(),
-                               model_object->ui_volume_order.end(), vol);
-            return (it != model_object->ui_volume_order.end())
-                ? std::distance(model_object->ui_volume_order.begin(), it)
-                : SIZE_MAX;  // Not found - to end
-        };
+    // Sort modifiers by their position in model_object->volumes[].
+    // Drag & drop in GUI directly reorders volumes[], so this reflects user intent.
+    // Works identically for GUI and CLI (3MF preserves volumes[] order).
+    auto get_position = [&](const ModelVolume* vol) -> size_t {
+        auto it = std::find(model_object->volumes.begin(),
+                           model_object->volumes.end(), vol);
+        return (it != model_object->volumes.end())
+            ? std::distance(model_object->volumes.begin(), it)
+            : SIZE_MAX;
+    };
 
-        // Strong modifiers: top-down (higher in UI = higher priority)
-        if (!strong_volumes_out.empty()) {
-            std::stable_sort(strong_volumes_out.begin(), strong_volumes_out.end(),
-                [&](const ModelVolume* a, const ModelVolume* b) {
-                    return get_ui_position(a) < get_ui_position(b);
-                });
-        }
+    // Strong modifiers: top-down (earlier in volumes[] = higher priority)
+    if (!strong_volumes_out.empty()) {
+        std::stable_sort(strong_volumes_out.begin(), strong_volumes_out.end(),
+            [&](const ModelVolume* a, const ModelVolume* b) {
+                return get_position(a) < get_position(b);
+            });
+    }
 
-        // Weak modifiers: bottom-up (lower in UI = higher priority)
-        if (!weak_volumes_out.empty()) {
-            std::stable_sort(weak_volumes_out.begin(), weak_volumes_out.end(),
-                [&](const ModelVolume* a, const ModelVolume* b) {
-                    return get_ui_position(a) > get_ui_position(b);
-                });
-        }
+    // Weak modifiers: bottom-up (later in volumes[] = higher priority)
+    if (!weak_volumes_out.empty()) {
+        std::stable_sort(weak_volumes_out.begin(), weak_volumes_out.end(),
+            [&](const ModelVolume* a, const ModelVolume* b) {
+                return get_position(a) > get_position(b);
+            });
     }
 }
 

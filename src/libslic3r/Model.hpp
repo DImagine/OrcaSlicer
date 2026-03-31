@@ -409,12 +409,6 @@ public:
     // BBS: save for compare with new load volumes
     std::vector<ObjectID>   volume_ids;
 
-    // UI tree hierarchy order for volumes (populated from ObjectList in GUI layer).
-    // Used by backend modules (e.g., Precise Seam) to respect user-defined drag-and-drop order.
-    // Filled only when precise seam modifiers exist (see Plater::populate_ui_order_precise_seam).
-    // Each entry points to a volume from this object's volumes vector in UI display order.
-    std::vector<const ModelVolume*> ui_volume_order;
-
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors cut_connectors;
     CutObjectBase cut_id;
@@ -1767,10 +1761,6 @@ bool model_object_list_extended(const Model &model_old, const Model &model_new);
 // than the old ModelObject.
 bool model_volume_list_changed(const ModelObject &model_object_old, const ModelObject &model_object_new, const ModelVolumeType type);
 bool model_volume_list_changed(const ModelObject &model_object_old, const ModelObject &model_object_new, const std::initializer_list<ModelVolumeType> &types);
-
-// Test whether ui_volume_order has changed between old and new ModelObject.
-// Used to detect drag&drop reordering of volumes in UI (which doesn't change volume IDs or types).
-bool ui_volume_order_changed(const ModelObject &model_object_old, const ModelObject &model_object_new);
 
 // Test whether the now ModelObject has newer custom supports data than the old one.
 // The function assumes that volumes list is synchronized.
