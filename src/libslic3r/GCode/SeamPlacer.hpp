@@ -149,7 +149,7 @@ public:
   //The following data structures hold all perimeter points for all PrintObject.
   std::unordered_map<const PrintObject*, PrintObjectSeamData> m_seam_per_object;
 
-  void init(const Print &print, std::function<void(void)> throw_if_canceled_func);
+  void init(Print &print, std::function<void(void)> throw_if_canceled_func);
 
   void place_seam(const Layer *layer, ExtrusionLoop &loop, const Point &last_pos, float& overhang) const;
 private:

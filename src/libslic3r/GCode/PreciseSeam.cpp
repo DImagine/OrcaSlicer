@@ -396,7 +396,7 @@ static std::optional<SegmentData> common_segment_in_intersection_fast(
     size_t first_perim_idx = 0;   // index of first matching point in perimeter_polygon (also edge_index)
     bool found_first = false;
 
-    // Search for first exact match
+    // Search for first exact match (not optimized — expected gain is negligible)
     for (size_t i = 0; i < isect_n; ++i) {
         const Point &isect_pt = intersection_polygon.points[i];
 
@@ -1317,7 +1317,8 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     // Determine type pattern for each polygon edge (sequential application of hierarchy)
     std::vector<EnforcedBlockedSeamPoint> edge_types(polygon.size(), EnforcedBlockedSeamPoint::Neutral);
 
-    // Helper lambda: search for point index in modified polygon by coordinates
+    // Helper lambda: search for point index in modified polygon by coordinates.
+    // Linear scan is intentional — O(N×M) is acceptable for typical M ≤ 5 weak segments.
     auto find_point_index = [&](const Point &pt) -> std::optional<size_t> {
         for (size_t i = 0; i < polygon.size(); ++i) {
             if (polygon[i] == pt) return i;
@@ -1348,7 +1349,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
 
     // Collect new list of polygon points with split enforced edges
     Points new_points;
-    new_points.reserve(polygon.size() * 50); // Approximate estimate
+    new_points.reserve(polygon.size() * 10); // Approximate estimate
 
     for (size_t i = 0; i < polygon.size(); ++i) {
         size_t next_i = (i + 1) % polygon.size();
@@ -1408,7 +1409,8 @@ void apply_weak_modifiers_to_perimeter(
     const float z_coord = result.points[perimeter.start_index].position.z();
     const size_t perimeter_size = perimeter.end_index - perimeter.start_index;
 
-    // Helper lambda: search for point index in result.points by unscaled coordinates
+    // Helper lambda: search for point index in result.points by unscaled coordinates.
+    // Linear scan is intentional — O(N×M) is acceptable for typical M ≤ 5 weak segments.
     auto find_point_index = [&](const Point &pt) -> std::optional<size_t> {
         Vec2f unscaled_pt = unscale(pt).cast<float>();
         Vec3f target(unscaled_pt.x(), unscaled_pt.y(), z_coord);

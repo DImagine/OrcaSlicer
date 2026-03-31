@@ -1499,7 +1499,7 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
 
 }
 
-void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_canceled_func) {
+void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_func) {
   using namespace SeamPlacerImpl;
   m_seam_per_object.clear();
 
@@ -1618,7 +1618,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
                            "(e.g. a hollow shape) which is ignored. "
                            "Use a solid modifier shape instead.");
       if (!warning_text.empty())
-          const_cast<Print&>(print).active_step_add_warning(
+          print.active_step_add_warning(
               PrintStateBase::WarningLevel::NON_CRITICAL,
               warning_text,
               PrintStateBase::SlicingPreciseSeamWarning);
