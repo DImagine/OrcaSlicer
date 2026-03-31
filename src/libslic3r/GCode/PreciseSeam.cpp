@@ -983,101 +983,34 @@ std::optional<Point> insert_strong_seam_point(
                     continue;
                 }
 
-                // Process based on modifier type
+                // Select target point finder based on modifier type
+                std::optional<std::pair<Point, size_t>> target;
                 switch (modifier_volume->type()) {
-                    case ModelVolumeType::PRECISE_SEAM_CENTER: {
-                        // Calculate geometric center of segment
-                        std::optional<std::pair<Point, size_t>> center = segment_center(segment.value(), polygon);
-
-                        if (!center.has_value()) {
-                            continue;
-                        }
-
-                        // Insert center point into perimeter with tolerance check
-                        std::optional<std::pair<Point, size_t>> result = insert_point_into_perimeter(
-                            center->first,  // center_point
-                            center->second, // insert_idx
-                            polygon
-                        );
-
-                        if (!result.has_value()) {
-                            continue;
-                        }
-
-                        Point inserted_point_coords = result->first;
-                        size_t point_idx = result->second;
-
-                        // Add additional points on both sides to create transition zone
-                        refine_at_vertex(point_idx, +1, polygon);
-                        refine_at_vertex(point_idx, -1, polygon);
-
-                        check_remaining_polygons();
-                        return inserted_point_coords;
-                    }
-
-                    case ModelVolumeType::PRECISE_SEAM_LEFT: {
-                        // Calculate left (first) point of segment
-                        std::optional<std::pair<Point, size_t>> left = segment_left(segment.value(), polygon);
-
-                        if (!left.has_value()) {
-                            continue;
-                        }
-
-                        // Insert left point into perimeter with tolerance check
-                        std::optional<std::pair<Point, size_t>> result = insert_point_into_perimeter(
-                            left->first,  // left_point
-                            left->second, // insert_idx
-                            polygon
-                        );
-
-                        if (!result.has_value()) {
-                            continue;
-                        }
-
-                        Point inserted_point_coords = result->first;
-                        size_t point_idx = result->second;
-
-                        // Add additional points on both sides to create transition zone
-                        refine_at_vertex(point_idx, +1, polygon);
-                        refine_at_vertex(point_idx, -1, polygon);
-
-                        check_remaining_polygons();
-                        return inserted_point_coords;
-                    }
-
-                    case ModelVolumeType::PRECISE_SEAM_RIGHT: {
-                        // Calculate right (last) point of segment
-                        std::optional<std::pair<Point, size_t>> right = segment_right(segment.value(), polygon);
-
-                        if (!right.has_value()) {
-                            continue;
-                        }
-
-                        // Insert right point into perimeter with tolerance check
-                        std::optional<std::pair<Point, size_t>> result = insert_point_into_perimeter(
-                            right->first,  // right_point
-                            right->second, // insert_idx
-                            polygon
-                        );
-
-                        if (!result.has_value()) {
-                            continue;
-                        }
-
-                        Point inserted_point_coords = result->first;
-                        size_t point_idx = result->second;
-
-                        // Add additional points on both sides to create transition zone
-                        refine_at_vertex(point_idx, +1, polygon);
-                        refine_at_vertex(point_idx, -1, polygon);
-
-                        check_remaining_polygons();
-                        return inserted_point_coords;
-                    }
-
-                    default:
-                        continue;
+                    case ModelVolumeType::PRECISE_SEAM_CENTER: target = segment_center(segment.value(), polygon); break;
+                    case ModelVolumeType::PRECISE_SEAM_LEFT:   target = segment_left(segment.value(), polygon);   break;
+                    case ModelVolumeType::PRECISE_SEAM_RIGHT:  target = segment_right(segment.value(), polygon);  break;
+                    default: continue;
                 }
+
+                if (!target.has_value())
+                    continue;
+
+                // Insert target point into perimeter with tolerance check
+                std::optional<std::pair<Point, size_t>> result = insert_point_into_perimeter(
+                    target->first,  // target_point
+                    target->second, // insert_idx
+                    polygon
+                );
+
+                if (!result.has_value())
+                    continue;
+
+                // Add additional points on both sides to create transition zone
+                refine_at_vertex(result->second, +1, polygon);
+                refine_at_vertex(result->second, -1, polygon);
+
+                check_remaining_polygons();
+                return result->first;
             }
             modifier_polygon_idx++;
         }
