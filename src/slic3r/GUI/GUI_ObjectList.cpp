@@ -1953,9 +1953,13 @@ bool ObjectList::can_drop(const wxDataViewItem& item, int& src_obj_id, int& src_
         const int dragged_vol_idx = m_dragged_data.sub_obj_idx();
         const int target_vol_idx = m_objects_model->GetVolumeIdByItem(item);
 
-        if (obj_idx >= 0 && dragged_vol_idx >= 0 && target_vol_idx >= 0) {
-            ModelVolume* dragged_vol = (*m_objects)[obj_idx]->volumes[dragged_vol_idx];
-            ModelVolume* target_vol  = (*m_objects)[obj_idx]->volumes[target_vol_idx];
+        if (obj_idx >= 0 && obj_idx < int(m_objects->size()) &&
+            dragged_vol_idx >= 0 && target_vol_idx >= 0) {
+            const auto& volumes = (*m_objects)[obj_idx]->volumes;
+            if (dragged_vol_idx >= int(volumes.size()) || target_vol_idx >= int(volumes.size()))
+                return false;
+            ModelVolume* dragged_vol = volumes[dragged_vol_idx];
+            ModelVolume* target_vol  = volumes[target_vol_idx];
 
             if (dragged_vol->is_precise_seam() && target_vol->is_precise_seam()) {
                 // Allow drop only if both volumes are in the same group (strong or weak)

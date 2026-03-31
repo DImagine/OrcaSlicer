@@ -92,7 +92,7 @@ public:
         const ModelObject* object { nullptr };       // Owning object node.
         const ModelVolume* volume { nullptr };       // Current volume entry.
         const ModelVolume* parent_volume { nullptr };// Direct parent volume, null when attached to object.
-        int                order_within_parent { -1 }; // Position among siblings matching UI order.
+        int                order_within_parent { -1 }; // Volume index in ModelObject::volumes; monotonic within siblings, mirrors UI order.
     };
 
     enum SELECTION_MODE

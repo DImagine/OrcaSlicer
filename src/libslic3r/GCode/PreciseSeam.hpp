@@ -1,6 +1,7 @@
 #ifndef slic3r_PreciseSeam_hpp_
 #define slic3r_PreciseSeam_hpp_
 
+#include <atomic>
 #include <optional>
 #include <vector>
 #include <unordered_map>
