@@ -1443,7 +1443,6 @@ void restore_precise_seam_positions(std::vector<PrintObjectSeamData::LayerSeams>
           if (perimeter.precise_seam_point.has_value()) {
             perimeter.final_seam_position = perimeter.precise_seam_point.value();
             perimeter.seam_index = perimeter.precise_seam_index;
-            //perimeter.finalized = true; // Probably shouldn't redefine this variable at this location.
           }
         }
       }
