@@ -5523,18 +5523,15 @@ void ObjectList::change_part_type()
     bool group_changed = true; // Default: reorder for non-Precise Seam types
 
     // If switching to/from Precise Seam with group change, move to end of volumes array
-    if (volume->is_precise_seam() || (old_type >= ModelVolumeType::PRECISE_SEAM_CENTER &&
-                                      old_type <= ModelVolumeType::PRECISE_SEAM_NEUTRAL)) {
+    if (volume->is_precise_seam() || is_precise_seam(old_type)) {
         // Determine if group changed (strong ↔ weak or non-PS ↔ PS)
-        bool old_is_ps = (old_type >= ModelVolumeType::PRECISE_SEAM_CENTER &&
-                          old_type <= ModelVolumeType::PRECISE_SEAM_NEUTRAL);
+        bool old_is_ps = is_precise_seam(old_type);
         bool new_is_ps = volume->is_precise_seam();
 
         group_changed = false; // Reset for Precise Seam types
         if (old_is_ps && new_is_ps) {
             // Both Precise Seam: check if strong ↔ weak change occurred
-            bool old_strong = (old_type >= ModelVolumeType::PRECISE_SEAM_CENTER &&
-                               old_type <= ModelVolumeType::PRECISE_SEAM_RIGHT);
+            bool old_strong = is_precise_seam_strong(old_type);
             bool new_strong = volume->is_precise_seam_strong();
             group_changed = (old_strong != new_strong);
         } else if (old_is_ps != new_is_ps) {

@@ -1301,8 +1301,7 @@ void MenuFactory::append_menu_item_precise_seam_submenu(wxMenu* menu)
 
                 // Check if group change occurred (strong ↔ weak)
                 bool old_strong = volume->is_precise_seam_strong();
-                bool new_strong = (new_type >= ModelVolumeType::PRECISE_SEAM_CENTER &&
-                                   new_type <= ModelVolumeType::PRECISE_SEAM_RIGHT);
+                bool new_strong = is_precise_seam_strong(new_type);
 
                 bool group_changed = (old_strong != new_strong);
 
