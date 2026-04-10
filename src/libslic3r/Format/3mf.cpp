@@ -3123,7 +3123,10 @@ ModelVolumeType type_from_string(const std::string &s)
                                 stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << NAME_KEY << "\" " << VALUE_ATTR << "=\"" << xml_escape(volume->name) << "\"/>\n";
 
                             // stores volume's modifier field (legacy, to support old slicers)
-                            if (volume->is_modifier())
+                            // Precise Seam volumes are non-printing helper geometry, so mark
+                            // them as modifiers too — prevents older slicers from treating
+                            // them as printable bodies.
+                            if (volume->is_modifier() || volume->is_precise_seam())
                                 stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << MODIFIER_KEY << "\" " << VALUE_ATTR << "=\"1\"/>\n";
                             // stores volume's type (overrides the modifier field above)
                             stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << VOLUME_TYPE_KEY << "\" " <<

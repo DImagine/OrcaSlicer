@@ -632,7 +632,11 @@ void init_precise_seam_data(
             });
     }
 
-    // Weak modifiers: bottom-up (later in volumes[] = higher priority)
+    // Weak modifiers: sorted low-priority-first (bottom of tree first).
+    // Earlier in volumes[] = higher in object tree = higher priority.
+    // Application uses "last write wins", so higher-priority modifiers
+    // (earlier in volumes[], placed last in this sorted order) overwrite
+    // lower-priority ones, producing the correct hierarchy.
     if (!weak_volumes_out.empty()) {
         std::stable_sort(weak_volumes_out.begin(), weak_volumes_out.end(),
             [&](const ModelVolume* a, const ModelVolume* b) {
@@ -903,7 +907,11 @@ std::optional<Point> insert_strong_seam_point(
         return std::nullopt;
     }
 
-    size_t layer_id = layer->id();
+    // layer->id() is offset by raft layer count, but modifier_slices is 0-based
+    // (built from PrintObject::layers() via slice_single_volume). Subtract raft
+    // offset to get the correct index into the cache.
+    const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
+    size_t layer_id = layer->id() - raft_layers;
 
     // Iterate through strong modifiers in hierarchy order
     for (const ModelVolume* modifier_volume : strong_volumes) {
@@ -1053,7 +1061,11 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         return result; // Empty vector
     }
 
-    size_t layer_id = layer->id();
+    // layer->id() is offset by raft layer count, but modifier_slices is 0-based
+    // (built from PrintObject::layers() via slice_single_volume). Subtract raft
+    // offset to get the correct index into the cache.
+    const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
+    size_t layer_id = layer->id() - raft_layers;
 
     // Iterate through all weak modifiers in hierarchy order
     for (const ModelVolume* modifier_volume : weak_volumes) {
@@ -1258,7 +1270,9 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         return std::nullopt;
     };
 
-    // Apply types sequentially (last overwrites first - modifier hierarchy)
+    // Apply types sequentially: segments are sorted low-priority-first
+    // (bottom of object tree first), so higher-priority modifiers overwrite
+    // lower-priority ones via last-write-wins.
     for (const auto &segment : result) {
         // Find boundary point indices in modified polygon
         std::optional<size_t> left_idx = find_point_index(segment.left_point);
@@ -1352,7 +1366,8 @@ void apply_weak_modifiers_to_perimeter(
         return std::nullopt;
     };
 
-    // Apply each weak modifier to corresponding range of perimeter points
+    // Apply weak modifiers sequentially: sorted low-priority-first,
+    // so higher-priority modifiers (higher in object tree) overwrite via last-write-wins.
     for (size_t seg_idx = 0; seg_idx < weak_segments.size(); ++seg_idx) {
         const auto &segment = weak_segments[seg_idx];
 
