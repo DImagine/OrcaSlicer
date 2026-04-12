@@ -368,7 +368,14 @@ ModelVolumeType type_from_string(const std::string &s)
     if (s == "ParameterModifier") return ModelVolumeType::PARAMETER_MODIFIER;
     if (s == "SupportEnforcer") return ModelVolumeType::SUPPORT_ENFORCER;
     if (s == "SupportBlocker") return ModelVolumeType::SUPPORT_BLOCKER;
-    // Default value if invalud type string received.
+    // Precise Seam types (snake_case strings from ModelVolume::type_to_string)
+    if (s == "precise_seam_center")   return ModelVolumeType::PRECISE_SEAM_CENTER;
+    if (s == "precise_seam_left")     return ModelVolumeType::PRECISE_SEAM_LEFT;
+    if (s == "precise_seam_right")    return ModelVolumeType::PRECISE_SEAM_RIGHT;
+    if (s == "precise_seam_enforced") return ModelVolumeType::PRECISE_SEAM_ENFORCED;
+    if (s == "precise_seam_blocked")  return ModelVolumeType::PRECISE_SEAM_BLOCKED;
+    if (s == "precise_seam_neutral")  return ModelVolumeType::PRECISE_SEAM_NEUTRAL;
+    // Default value if invalid type string received.
     return ModelVolumeType::MODEL_PART;
 }
 

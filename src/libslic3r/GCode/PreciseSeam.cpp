@@ -874,7 +874,11 @@ static bool refine_at_vertex(
 
     // Calculate new point coordinates: edge_start + TOLERANCE_LINEAR * direction_normalized
     Vec2d direction_normalized = edge_vector / edge_length;
-    Point new_point = edge_start + (TOLERANCE_LINEAR * direction_normalized).cast<coord_t>();
+    // Place helper point near point_idx: after it for +1, before it for -1
+    auto offset = (TOLERANCE_LINEAR * direction_normalized).cast<coord_t>();
+    Point new_point = (direction == 1)
+        ? Point(edge_start + offset)
+        : Point(edge_end   - offset);
 
     // Insert point into perimeter
     // IMPORTANT: Special handling of last edge to preserve indexing for subsequent insertions.
