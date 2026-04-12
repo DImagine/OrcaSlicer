@@ -3811,7 +3811,8 @@ wxDataViewItem ObjectList::add_settings_item(wxDataViewItem parent_item, const D
     const bool is_layer_settings = m_objects_model->GetItemType(parent_item) == itLayer;
     if (!is_object_settings) {
         ModelVolumeType volume_type = m_objects_model->GetVolumeType(parent_item);
-        if (volume_type == ModelVolumeType::NEGATIVE_VOLUME || volume_type == ModelVolumeType::SUPPORT_BLOCKER || volume_type == ModelVolumeType::SUPPORT_ENFORCER)
+        // Precise Seam is non-printing helper geometry — no per-volume settings
+        if (volume_type == ModelVolumeType::NEGATIVE_VOLUME || volume_type == ModelVolumeType::SUPPORT_BLOCKER || volume_type == ModelVolumeType::SUPPORT_ENFORCER || is_precise_seam(volume_type))
             return ret;
     }
 
@@ -5607,14 +5608,21 @@ void ObjectList::change_part_type()
   names.Add(_L("Part"));
   names.Add(_L("Negative Part"));
   names.Add(_L("Modifier"));
+  int precise_seam_index = -1;
   if (!any_text_or_svg) {
     names.Add(_L("Support Blocker"));
     names.Add(_L("Support Enforcer"));
+    precise_seam_index = names.GetCount();
+    names.Add(_L("Precise Seam"));
   }
 
   // Preselect current type of the first selected volume
   ModelVolumeType initial_type = targets.front().vol->type();
-  SingleChoiceDialog dlg(_L("Type:"), _L("Choose part type"), names, int(initial_type));
+  int type_index = int(initial_type);
+  // Precise Seam subtypes map to a single dialog entry
+  if (targets.front().vol->is_precise_seam() && precise_seam_index >= 0)
+      type_index = precise_seam_index;
+  SingleChoiceDialog dlg(_L("Type:"), _L("Choose part type"), names, type_index);
   auto new_type = ModelVolumeType(dlg.GetSingleChoiceIndex());
   if (new_type == ModelVolumeType::INVALID) {
     return;
@@ -5663,6 +5671,11 @@ void ObjectList::change_part_type()
   std::unordered_map<int, std::vector<ModelVolume*>> changed_per_object;
   for (const auto& t : targets) {
     const auto current = t.vol->type();
+    // If target is "Precise Seam" and volume is already a Precise Seam subtype, keep it
+    if (new_type == ModelVolumeType::PRECISE_SEAM_CENTER && t.vol->is_precise_seam()) {
+        ++skipped_same;
+        continue;
+    }
     if (current == new_type) {
         ++skipped_same;
         continue;
