@@ -5622,6 +5622,9 @@ void ObjectList::change_part_type()
   // Precise Seam subtypes map to a single dialog entry
   if (targets.front().vol->is_precise_seam() && precise_seam_index >= 0)
       type_index = precise_seam_index;
+  // Clamp to valid range (mixed selection of Precise Seam + text/svg can push index out of bounds)
+  if (type_index >= (int)names.GetCount())
+      type_index = 0;
   SingleChoiceDialog dlg(_L("Type:"), _L("Choose part type"), names, type_index);
   auto new_type = ModelVolumeType(dlg.GetSingleChoiceIndex());
   if (new_type == ModelVolumeType::INVALID) {

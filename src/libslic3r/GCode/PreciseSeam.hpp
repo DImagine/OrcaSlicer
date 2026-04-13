@@ -54,8 +54,10 @@ using ModifierSlicesCache = std::unordered_map<const ModelVolume*, std::vector<P
 
 // Warning flags set during Precise Seam processing (thread-safe)
 struct PreciseSeamWarnings {
-    std::atomic<bool> multiple_intersections{false};  // multiple or through-body intersections detected
+    std::atomic<bool> multiple_intersections{false};  // modifier intersects perimeter in multiple separate places (strong only)
+    std::atomic<bool> through_body{false};            // modifier passes through the model body entirely
     std::atomic<bool> multiply_connected{false};      // modifier has holes (multiply-connected cross-section)
+    std::atomic<bool> full_containment{false};        // modifier fully contains perimeter, no intersection edges
 };
 
 // Result of finding common segment between perimeter and intersection

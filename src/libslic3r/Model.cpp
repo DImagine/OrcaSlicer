@@ -2505,7 +2505,8 @@ std::vector<int> ModelVolume::get_extruders() const
     if (m_type == ModelVolumeType::INVALID
         || m_type == ModelVolumeType::NEGATIVE_VOLUME
         || m_type == ModelVolumeType::SUPPORT_BLOCKER
-        || m_type == ModelVolumeType::SUPPORT_ENFORCER)
+        || m_type == ModelVolumeType::SUPPORT_ENFORCER
+        || this->is_precise_seam()) // Precise Seam is non-printing helper geometry
         return std::vector<int>();
 
     if (mmu_segmentation_facets.timestamp() != mmuseg_ts) {

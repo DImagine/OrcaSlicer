@@ -108,7 +108,8 @@ project_point_onto_polygon(const Polygon &poly, const Point &point)
 //
 static std::optional<SegmentData> common_segment_in_intersection(
     const Polygon &intersection_polygon,
-    const Polygon &perimeter_polygon)
+    const Polygon &perimeter_polygon,
+    PreciseSeamWarnings* warnings = nullptr)
 {
     const size_t isect_n = intersection_polygon.points.size();
     const size_t perim_n = perimeter_polygon.points.size();
@@ -281,7 +282,9 @@ static std::optional<SegmentData> common_segment_in_intersection(
 
         // Analyze results
         if (edges_not_on_perim_indices.empty()) {
-            // All edges on perimeter → complete polygon match → not suitable for seam placement
+            // All edges on perimeter → modifier fully contains perimeter → not suitable for seam placement
+            if (warnings)
+                warnings->full_containment.store(true, std::memory_order_relaxed);
             return std::nullopt;
         }
 
@@ -359,7 +362,8 @@ static std::optional<SegmentData> common_segment_in_intersection(
 //
 static std::optional<SegmentData> common_segment_in_intersection_fast(
     const Polygon &intersection_polygon,
-    const Polygon &perimeter_polygon)
+    const Polygon &perimeter_polygon,
+    PreciseSeamWarnings* warnings = nullptr)
 {
     const size_t isect_n = intersection_polygon.points.size();
     const size_t perim_n = perimeter_polygon.points.size();
@@ -418,7 +422,7 @@ static std::optional<SegmentData> common_segment_in_intersection_fast(
 
     // If no matching point found - use full geometric algorithm
     if (!found_first) {
-        return common_segment_in_intersection(intersection_polygon, perimeter_polygon);
+        return common_segment_in_intersection(intersection_polygon, perimeter_polygon, warnings);
     }
 
     // Sentinel value for invalid edge_index (returned by project_point_onto_polygon on error)
@@ -506,7 +510,7 @@ static std::optional<SegmentData> common_segment_in_intersection_fast(
     // Use full geometric algorithm (rare case but requires special handling)
     size_t total_points = forward_intersection_indices.size() + backward_intersection_indices.size();
     if (total_points == isect_n) {
-        return common_segment_in_intersection(intersection_polygon, perimeter_polygon);
+        return common_segment_in_intersection(intersection_polygon, perimeter_polygon, warnings);
     }
 
     // ============================================================
@@ -971,12 +975,18 @@ std::optional<Point> insert_strong_seam_point(
             // Multiple intersection polygons = modifier crosses perimeter in several places
             if (warnings && intersection_polygons.size() > 1)
                 warnings->multiple_intersections.store(true, std::memory_order_relaxed);
-            // Diff check: normal case gives 1 polygon, >1 means multiple intersections
-            // This Clipper call is only for warning detection, not required for algorithm
-            if (warnings && !warnings->multiple_intersections.load(std::memory_order_relaxed)) {
+            // Diff check: modifier minus perimeter yields >1 polygon = through-body intersection.
+            // However, if any diff polygon is CW, it is a hole left by full containment
+            // (modifier fully covers perimeter), not a real through-body case.
+            // Full containment is detected separately in common_segment_in_intersection().
+            if (warnings && !warnings->through_body.load(std::memory_order_relaxed)) {
                 Polygons diff_polygons = diff(Polygons{modifier_polygon}, Polygons{polygon});
-                if (diff_polygons.size() > 1)
-                    warnings->multiple_intersections.store(true, std::memory_order_relaxed);
+                if (diff_polygons.size() > 1) {
+                    bool has_cw = std::any_of(diff_polygons.begin(), diff_polygons.end(),
+                        [](const Polygon &p) { return p.is_clockwise(); });
+                    if (!has_cw)
+                        warnings->through_body.store(true, std::memory_order_relaxed);
+                }
             }
 
             // Process each intersection polygon
@@ -987,7 +997,8 @@ std::optional<Point> insert_strong_seam_point(
                 // Try to find perimeter segment in this intersection
                 std::optional<SegmentData> segment = common_segment_in_intersection_fast(
                     intersection_polygon,
-                    polygon
+                    polygon,
+                    warnings
                 );
 
                 if (!segment.has_value()) {
@@ -1114,11 +1125,17 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
             // Only through-body intersections (detected by diff below) are abnormal.
 
             // Diff check: if modifier minus perimeter yields >1 polygon, the modifier
-            // passes through the model body, creating a through-body intersection
-            if (warnings && !warnings->multiple_intersections.load(std::memory_order_relaxed)) {
+            // passes through the model body, creating a through-body intersection.
+            // CW polygon in diff = hole from full containment, not through-body.
+            // Full containment is detected separately in common_segment_in_intersection().
+            if (warnings && !warnings->through_body.load(std::memory_order_relaxed)) {
                 Polygons diff_polygons = diff(Polygons{modifier_polygon}, Polygons{polygon});
-                if (diff_polygons.size() > 1)
-                    warnings->multiple_intersections.store(true, std::memory_order_relaxed);
+                if (diff_polygons.size() > 1) {
+                    bool has_cw = std::any_of(diff_polygons.begin(), diff_polygons.end(),
+                        [](const Polygon &p) { return p.is_clockwise(); });
+                    if (!has_cw)
+                        warnings->through_body.store(true, std::memory_order_relaxed);
+                }
             }
 
             // Process each intersection polygon
@@ -1129,7 +1146,8 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
                 // Search for perimeter segment in this intersection
                 std::optional<SegmentData> segment = common_segment_in_intersection_fast(
                     intersection_polygon,
-                    polygon
+                    polygon,
+                    warnings
                 );
 
                 if (!segment.has_value()) {

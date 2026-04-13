@@ -1605,28 +1605,34 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
   // to duplicate text within each popup.
   {
       const bool mi = precise_seam_warnings.multiple_intersections.load(std::memory_order_relaxed);
+      const bool tb = precise_seam_warnings.through_body.load(std::memory_order_relaxed);
       const bool mc = precise_seam_warnings.multiply_connected.load(std::memory_order_relaxed);
-      std::string warning_text;
+      const bool fc = precise_seam_warnings.full_containment.load(std::memory_order_relaxed);
+      // Build warning from independent parts, joined by "; ".
       // NOTE: Russian translations exist in localization/i18n/ru/OrcaSlicer_ru.po
       // and must be updated when these messages change.
-      if (mi && mc)
-          warning_text = L("Precise Seam: Modifier creates multiple or through-body intersections "
-                           "with a perimeter, and has a multiply-connected cross-section "
-                           "(e.g. a hollow shape) which is ignored. "
-                           "Consider repositioning the modifier and using a solid shape instead.");
-      else if (mi)
-          warning_text = L("Precise Seam: Modifier creates multiple or through-body intersections "
-                           "with a perimeter, which may lead to unpredictable results. "
-                           "Consider repositioning the modifier to avoid such intersections.");
-      else if (mc)
-          warning_text = L("Precise Seam: Modifier has a multiply-connected cross-section "
-                           "(e.g. a hollow shape) which is ignored. "
-                           "Use a solid modifier shape instead.");
-      if (!warning_text.empty())
+      std::vector<std::string> parts;
+      if (mi)
+          parts.push_back(L("multiple intersections with a perimeter detected"));
+      if (tb)
+          parts.push_back(L("modifier passes through the model body"));
+      if (mc)
+          parts.push_back(L("modifier shape is not solid (has holes inside) and was ignored"));
+      if (fc)
+          parts.push_back(L("perimeter is fully contained inside modifier and was ignored"));
+      if (!parts.empty()) {
+          std::string warning_text = "Precise Seam: ";
+          for (size_t i = 0; i < parts.size(); ++i) {
+              if (i > 0) warning_text += "; ";
+              warning_text += parts[i];
+          }
+          warning_text += ". ";
+          warning_text += L("Seam placement may differ from expected.");
           print.active_step_add_warning(
               PrintStateBase::WarningLevel::NON_CRITICAL,
               warning_text,
               PrintStateBase::SlicingPreciseSeamWarning);
+      }
   }
 }
 
