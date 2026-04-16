@@ -108,7 +108,7 @@ struct PrintObjectSeamData
   // tree of all points of the given layer
 
   // Indicates presence of strong Precise Seam modifiers (CENTER/LEFT/RIGHT) for this object
-  bool has_precise_seam_strong_volumes;
+  bool has_precise_seam_strong_volumes = false;
 
   void clear()
   {

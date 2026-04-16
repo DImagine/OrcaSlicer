@@ -1269,14 +1269,15 @@ void MenuFactory::append_menu_item_precise_seam_submenu(wxMenu* menu)
     if (!ps_menu)
         return;
 
-    // Array of all 6 Precise Seam subtypes with labels
+    // Array of all 6 Precise Seam subtypes with labels.
+    // "Seam ..." prefix disambiguates from other i18n contexts (extruder Left/Right, "Center on bed", etc.)
     static const std::array<std::pair<const char*, ModelVolumeType>, 6> PS_TYPES = {{
-        {L("Center"),   ModelVolumeType::PRECISE_SEAM_CENTER},
-        {L("Left"),     ModelVolumeType::PRECISE_SEAM_LEFT},
-        {L("Right"),    ModelVolumeType::PRECISE_SEAM_RIGHT},
-        {L("Enforced"), ModelVolumeType::PRECISE_SEAM_ENFORCED},
-        {L("Blocked"),  ModelVolumeType::PRECISE_SEAM_BLOCKED},
-        {L("Neutral"),  ModelVolumeType::PRECISE_SEAM_NEUTRAL},
+        {L("Seam Center"),   ModelVolumeType::PRECISE_SEAM_CENTER},
+        {L("Seam Left"),     ModelVolumeType::PRECISE_SEAM_LEFT},
+        {L("Seam Right"),    ModelVolumeType::PRECISE_SEAM_RIGHT},
+        {L("Seam Enforced"), ModelVolumeType::PRECISE_SEAM_ENFORCED},
+        {L("Seam Blocked"),  ModelVolumeType::PRECISE_SEAM_BLOCKED},
+        {L("Seam Neutral"),  ModelVolumeType::PRECISE_SEAM_NEUTRAL},
     }};
 
     // Add radio button menu items for Precise Seam type selection

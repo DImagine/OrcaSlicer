@@ -346,66 +346,6 @@ ObjectList::~ObjectList()
             m_objects_model->DecRef();
 }
 
-std::vector<ObjectList::VolumeHierarchyEntry> ObjectList::collect_volume_hierarchy() const
-{
-    std::vector<VolumeHierarchyEntry> entries;
-    if (m_objects_model == nullptr || m_objects == nullptr)
-        return entries;
-
-    // Walk the UI tree to reflect the exact hierarchy as seen by the user.
-    std::function<void(const wxDataViewItem&, const ModelObject*, const ModelVolume*)> traverse;
-    traverse = [this, &entries, &traverse](const wxDataViewItem& parent_item,
-                                           const ModelObject* owner,
-                                           const ModelVolume* parent_volume)
-    {
-        if (!parent_item.IsOk() || owner == nullptr)
-            return;
-
-        wxDataViewItemArray children;
-        m_objects_model->GetChildren(parent_item, children);
-        for (const wxDataViewItem& child : children) {
-            if (!child.IsOk())
-                continue;
-
-            auto* node = static_cast<ObjectDataViewModelNode*>(child.GetID());
-            if (node == nullptr)
-                continue;
-
-            const bool is_volume_node = (node->GetType() & itVolume) != 0;
-            const ModelVolume* child_volume = nullptr;
-            if (is_volume_node) {
-                const int volume_idx = m_objects_model->GetVolumeIdByItem(child);
-                if (volume_idx >= 0 && volume_idx < int(owner->volumes.size())) {
-                    child_volume = owner->volumes[volume_idx];
-                    entries.push_back(VolumeHierarchyEntry{
-                        owner,
-                        child_volume,
-                        parent_volume,
-                        volume_idx // Use existing ModelObject order as the UI ordering key.
-                    });
-                }
-            }
-
-            const ModelVolume* next_parent = (is_volume_node && child_volume != nullptr) ? child_volume : parent_volume;
-            traverse(child, owner, next_parent);
-        }
-    };
-
-    for (size_t obj_idx = 0; obj_idx < m_objects->size(); ++obj_idx) {
-        const ModelObject* object = (*m_objects)[obj_idx];
-        if (object == nullptr)
-            continue;
-
-        wxDataViewItem object_item = m_objects_model->GetItemById(int(obj_idx));
-        if (!object_item.IsOk())
-            continue;
-
-        traverse(object_item, object, nullptr);
-    }
-
-    return entries;
-}
-
 void ObjectList::set_min_height()
 {
     // BBS
@@ -5622,9 +5562,14 @@ void ObjectList::change_part_type()
   // Precise Seam subtypes map to a single dialog entry
   if (targets.front().vol->is_precise_seam() && precise_seam_index >= 0)
       type_index = precise_seam_index;
-  // Clamp to valid range (mixed selection of Precise Seam + text/svg can push index out of bounds)
-  if (type_index >= (int)names.GetCount())
-      type_index = 0;
+  // Abort on incompatible mix (e.g. Precise Seam + text/svg): silently defaulting to "Part"
+  // would convert non-printing helpers (text, SVG, seam modifiers) into printed geometry.
+  if (type_index >= (int)names.GetCount()) {
+      Slic3r::GUI::show_error(nullptr,
+          _L("Cannot change type: the current selection mixes incompatible volume types.\n"
+             "Please change type separately for each group."));
+      return;
+  }
   SingleChoiceDialog dlg(_L("Type:"), _L("Choose part type"), names, type_index);
   auto new_type = ModelVolumeType(dlg.GetSingleChoiceIndex());
   if (new_type == ModelVolumeType::INVALID) {
