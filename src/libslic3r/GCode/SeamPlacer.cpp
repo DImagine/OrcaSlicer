@@ -461,10 +461,10 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
   return polygons;
 }
 
-// Insert SeamCandidates created from perimeter polygons in to the result vector.
-// Compute its type (Enfrocer,Blocker), angle, and position
-//each SeamCandidate also contains pointer to shared Perimeter structure representing the polygon
-// if Custom Seam modifiers are present, oversamples the polygon if necessary to better fit user intentions
+// Build SeamCandidates for each vertex of the perimeter polygon and attach them to a shared Perimeter.
+// For each vertex: computes position, angle, and type (Enforcer / Blocker / Neutral).
+// When Precise Seam modifiers are present: nudges duplicate vertex, inserts strong seam point,
+// oversamples enforcer edges, applies weak modifiers, marks one enforced point as central for alignment.
 void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const LayerRegion *region,
                                const GlobalModelInfo &global_model_info, PrintObjectSeamData::LayerSeams &result,
                                PreciseSeam::PreciseSeamWarnings* warnings = nullptr) {
@@ -668,30 +668,6 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     }
   }
 
-}
-
-// Get index of previous and next perimeter point of the layer. Because SeamCandidates of all polygons of the given layer
-// are sequentially stored in the vector, each perimeter contains info about start and end index. These vales are used to
-// deduce index of previous and next neigbour in the corresponding perimeter.
-std::pair<size_t, size_t> find_previous_and_next_perimeter_point(const std::vector<SeamCandidate> &perimeter_points,
-                                                                 size_t point_index) {
-  const SeamCandidate &current = perimeter_points[point_index];
-  int prev = point_index - 1; //for majority of points, it is true that neighbours lie behind and in front of them in the vector
-  int next = point_index + 1;
-
-  if (point_index == current.perimeter.start_index) {
-    // if point_index is equal to start, it means that the previous neighbour is at the end
-    prev = current.perimeter.end_index - 1;
-  }
-
-  if (point_index == current.perimeter.end_index - 1) {
-    // if point_index is equal to end, than next neighbour is at the start
-    next = current.perimeter.start_index;
-  }
-
-  assert(prev >= 0);
-  assert(next >= 0);
-  return {size_t(prev),size_t(next)};
 }
 
 // Computes all global model info - transforms object, performs raycasting

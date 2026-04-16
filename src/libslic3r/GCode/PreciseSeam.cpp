@@ -581,9 +581,6 @@ static std::optional<SegmentData> common_segment_in_intersection_fast(
     return result;
 }
 
-// Initialize Precise Seam data - collect and categorize modifiers
-// Collects precise seam modifiers from model_object and fills output parameters
-// Called in SeamPlacer::init()
 void init_precise_seam_data(
     std::vector<const ModelVolume*>& strong_volumes_out,
     std::vector<const ModelVolume*>& weak_volumes_out,
@@ -1042,7 +1039,9 @@ std::optional<Point> insert_strong_seam_point(
     return std::nullopt;
 }
 
-// Convert ModelVolumeType of weak modifier to EnforcedBlockedSeamPoint
+// Convert ModelVolumeType of weak modifier to EnforcedBlockedSeamPoint.
+// Precondition: called only with weak precise-seam types (filtered via is_precise_seam_weak()).
+// Exhaustive switch (no default) so -Wswitch flags any future PRECISE_SEAM_* additions.
 static EnforcedBlockedSeamPoint convert_weak_modifier_type(ModelVolumeType type) {
     switch (type) {
         case ModelVolumeType::PRECISE_SEAM_ENFORCED:
@@ -1051,9 +1050,20 @@ static EnforcedBlockedSeamPoint convert_weak_modifier_type(ModelVolumeType type)
             return EnforcedBlockedSeamPoint::Blocked;
         case ModelVolumeType::PRECISE_SEAM_NEUTRAL:
             return EnforcedBlockedSeamPoint::Neutral;
-        default:
-            return EnforcedBlockedSeamPoint::Neutral; // Fallback
+        // Non-weak types are unreachable by precondition; listed to keep the switch exhaustive.
+        case ModelVolumeType::INVALID:
+        case ModelVolumeType::MODEL_PART:
+        case ModelVolumeType::NEGATIVE_VOLUME:
+        case ModelVolumeType::PARAMETER_MODIFIER:
+        case ModelVolumeType::SUPPORT_BLOCKER:
+        case ModelVolumeType::SUPPORT_ENFORCER:
+        case ModelVolumeType::PRECISE_SEAM_CENTER:
+        case ModelVolumeType::PRECISE_SEAM_LEFT:
+        case ModelVolumeType::PRECISE_SEAM_RIGHT:
+            break;
     }
+    assert(false && "convert_weak_modifier_type called with non-weak type");
+    return EnforcedBlockedSeamPoint::Neutral;
 }
 
 // Collect all weak modifier segments for given perimeter
