@@ -21,7 +21,6 @@
 #include "NotificationManager.hpp"
 #include "MsgDialog.hpp"
 #include "Widgets/ProgressDialog.hpp"
-#include "SingleChoiceDialog.hpp"
 #include "StepMeshDialog.hpp"
 
 
@@ -5400,277 +5399,6 @@ ModelVolume* ObjectList::get_selected_model_volume()
     return (*m_objects)[obj_idx]->volumes[vol_idx];
 }
 
-void ObjectList::change_part_type()
-{
-  wxDataViewItemArray selections;
-  GetSelections(selections);
-
-  if (selections.size() <= 1) {
-    int obj_idx = get_selected_obj_idx();
-    if (obj_idx < 0) {
-      return;
-    }
-
-    ModelVolume* volume = get_selected_model_volume();
-    if (!volume) {
-      return;
-    }
-
-    const ModelVolumeType type = volume->type();
-    if (type == ModelVolumeType::MODEL_PART) {
-      int model_part_cnt = 0;
-      for (auto vol : (*m_objects)[obj_idx]->volumes) {
-        if (vol->type() == ModelVolumeType::MODEL_PART)
-          ++model_part_cnt;
-      }
-
-      if (model_part_cnt == 1) {
-        Slic3r::GUI::show_error(nullptr, _(L("The type of the last solid object part is not to be changed.")));
-        return;
-      }
-    }
-
-    // ORCA: Fix crash when changing type of svg / text modifier
-    wxArrayString names;
-    names.Add(_L("Part"));
-    names.Add(_L("Negative Part"));
-    names.Add(_L("Modifier"));
-    int precise_seam_index = -1;
-    if (!volume->is_svg() && !volume->is_text()) {
-      names.Add(_L("Support Blocker"));
-      names.Add(_L("Support Enforcer"));
-      precise_seam_index = names.GetCount();
-      names.Add(_L("Precise Seam"));  // Defaults to PRECISE_SEAM_CENTER subtype
-    }
-
-    int type_index = int(type);
-    if (volume->is_precise_seam() && precise_seam_index >= 0)
-        type_index = precise_seam_index;
-
-    SingleChoiceDialog dlg(_L("Type:"), _L("Choose part type"), names, type_index);
-    auto new_type = ModelVolumeType(dlg.GetSingleChoiceIndex());
-
-    // If user selected "Precise Seam" and volume was already Precise Seam, keep original subtype
-    if (new_type == ModelVolumeType::PRECISE_SEAM_CENTER && volume->is_precise_seam())
-        new_type = type;  // Preserve original subtype (LEFT, RIGHT, etc.)
-
-    if (new_type == type || new_type == ModelVolumeType::INVALID) {
-      return;
-    }
-
-    take_snapshot("Change part type");
-
-    ModelVolumeType old_type = volume->type();
-    volume->set_type(new_type);
-
-    // Track if Precise Seam group changed (strong ↔ weak)
-    bool group_changed = true; // Default: reorder for non-Precise Seam types
-
-    // If switching to/from Precise Seam with group change, move to end of volumes array
-    if (volume->is_precise_seam() || is_precise_seam(old_type)) {
-        // Determine if group changed (strong ↔ weak or non-PS ↔ PS)
-        bool old_is_ps = is_precise_seam(old_type);
-        bool new_is_ps = volume->is_precise_seam();
-
-        group_changed = false; // Reset for Precise Seam types
-        if (old_is_ps && new_is_ps) {
-            // Both Precise Seam: check if strong ↔ weak change occurred
-            bool old_strong = is_precise_seam_strong(old_type);
-            bool new_strong = volume->is_precise_seam_strong();
-            group_changed = (old_strong != new_strong);
-        } else if (old_is_ps != new_is_ps) {
-            // Switching between Precise Seam and other type → always move to end
-            group_changed = true;
-        }
-
-        // Move volume to end if entering new group
-        if (group_changed) {
-            ModelObject* obj = (*m_objects)[obj_idx];
-            auto it = std::find(obj->volumes.begin(), obj->volumes.end(), volume);
-            if (it != obj->volumes.end()) {
-                obj->volumes.erase(it);
-                obj->volumes.push_back(volume); // place at end before sort
-            }
-        }
-    }
-
-    // Update UI based on whether group/type changed
-    if (group_changed) {
-        // Group changed: reorder volumes and reselect
-        wxDataViewItemArray sel = reorder_volumes_and_get_selection(obj_idx, [volume](const ModelVolume* vol) { return vol == volume; });
-        if (!sel.IsEmpty())
-            select_item(sel.front());
-    } else {
-        // Same group: just update the item's icon/name without reordering
-        wxDataViewItem item = GetSelection();
-        if (item.IsOk()) {
-            m_objects_model->ItemChanged(item);
-            changed_object(obj_idx);
-        }
-    }
-
-  return;
-  }
-
-  // --- Multi Selection ---
-  struct Target { int obj_idx; Slic3r::ModelVolume* vol; };
-  std::vector<Target> targets;
-  targets.reserve(selections.size());
-  bool any_text_or_svg = false;
-
-  for (const auto& item : selections) {
-    auto typeMask = m_objects_model->GetItemType(item);
-    if (!(typeMask & itVolume)) {
-      continue;
-    }
-
-    int obj_idx = -1, vol_idx = -1;
-    get_selected_item_indexes(obj_idx, vol_idx, item);
-    if (obj_idx < 0 || vol_idx < 0) {
-      continue;
-    }
-
-    ModelVolume* vol = (*m_objects)[obj_idx]->volumes[vol_idx];
-    if (!vol) {
-      continue;
-    }
-
-    targets.push_back({ obj_idx, vol });
-    if (vol->is_svg() || vol->is_text())
-      any_text_or_svg = true;
-  }
-
-  if (targets.empty()) {
-    return;
-  }
-
-  wxArrayString names;
-  names.Add(_L("Part"));
-  names.Add(_L("Negative Part"));
-  names.Add(_L("Modifier"));
-  int precise_seam_index = -1;
-  if (!any_text_or_svg) {
-    names.Add(_L("Support Blocker"));
-    names.Add(_L("Support Enforcer"));
-    precise_seam_index = names.GetCount();
-    names.Add(_L("Precise Seam"));
-  }
-
-  // Preselect current type of the first selected volume
-  ModelVolumeType initial_type = targets.front().vol->type();
-  int type_index = int(initial_type);
-  // Precise Seam subtypes map to a single dialog entry
-  if (targets.front().vol->is_precise_seam() && precise_seam_index >= 0)
-      type_index = precise_seam_index;
-  // Abort on incompatible mix (e.g. Precise Seam + text/svg): silently defaulting to "Part"
-  // would convert non-printing helpers (text, SVG, seam modifiers) into printed geometry.
-  if (type_index >= (int)names.GetCount()) {
-      Slic3r::GUI::show_error(nullptr,
-          _L("Cannot change type: the current selection mixes incompatible volume types.\n"
-             "Please change type separately for each group."));
-      return;
-  }
-  SingleChoiceDialog dlg(_L("Type:"), _L("Choose part type"), names, type_index);
-  auto new_type = ModelVolumeType(dlg.GetSingleChoiceIndex());
-  if (new_type == ModelVolumeType::INVALID) {
-    return;
-  }
-
-  if (new_type != ModelVolumeType::MODEL_PART) {
-    // Count initial MODEL_PARTs per object
-    std::unordered_map<int, int> parts_initial;
-    for (const auto& t : targets) {
-      int cnt = 0;
-      for (auto v : (*m_objects)[t.obj_idx]->volumes)
-          if (v->type() == ModelVolumeType::MODEL_PART) ++cnt;
-      parts_initial[t.obj_idx] = cnt;
-    }
-
-    // Count how many selected MODEL_PARTs would be converted away, per object
-    std::unordered_map<int, int> parts_to_remove;
-    for (const auto& t : targets) {
-      if (t.vol->type() == ModelVolumeType::MODEL_PART) {
-        ++parts_to_remove[t.obj_idx];
-      }
-    }
-
-    // If for any object: initial_parts > 0 and removals == initial_parts => would remove all
-    bool would_remove_all_for_any = false;
-    for (const auto& kv : parts_to_remove) {
-      const int obj_idx   = kv.first;
-      const int removing  = kv.second;
-      const int initial   = parts_initial[obj_idx];
-      if (initial > 0 && removing == initial) {
-        would_remove_all_for_any = true;
-        break;
-      }
-    }
-
-    if (would_remove_all_for_any) {
-      Slic3r::GUI::show_error(nullptr, _(L("The type of the last solid object part is not to be changed.")));
-      return;
-    }
-  }
-
-  take_snapshot("Change part type (multi)");
-
-  // Apply changes
-  size_t applied = 0, skipped_same = 0;
-  std::unordered_map<int, std::vector<ModelVolume*>> changed_per_object;
-  for (const auto& t : targets) {
-    const auto current = t.vol->type();
-    // If target is "Precise Seam" and volume is already a Precise Seam subtype, keep it
-    if (new_type == ModelVolumeType::PRECISE_SEAM_CENTER && t.vol->is_precise_seam()) {
-        ++skipped_same;
-        continue;
-    }
-    if (current == new_type) {
-        ++skipped_same;
-        continue;
-    }
-    t.vol->set_type(new_type);
-    changed_per_object[t.obj_idx].push_back(t.vol);
-    ++applied;
-  }
-
-  if (applied == 0) {
-    // Nothing changed; keep the original selection as-is
-    select_items(selections);
-    return;
-  }
-
- // Reorder per object and rebuild selection to follow changed volumes
-  wxDataViewItemArray new_selection;
-  for (const auto& kv : changed_per_object) {
-    const int obj_idx = kv.first;
-    const auto& changed_vols = kv.second;
-
-    std::unordered_set<const ModelVolume*> changed_set;
-    changed_set.reserve(changed_vols.size());
-    for (const auto* v : changed_vols) {
-      changed_set.insert(v);
-    }
-
-    wxDataViewItemArray sel = reorder_volumes_and_get_selection(
-      obj_idx,
-      [&changed_set](const ModelVolume* v) -> bool {
-        return changed_set.find(v) != changed_set.end();
-      }
-    );
-
-    // Append to new_selection
-    for (const auto& it : sel) new_selection.Add(it);
-  }
-
-  if (!new_selection.IsEmpty()) {
-    select_items(new_selection);
-  } else {
-    select_items(selections);
-  }
-
-  return;
-}
-
 ModelVolumeType ObjectList::get_selected_volume_type()
 {
     ModelVolume* volume = get_selected_model_volume();
@@ -5679,13 +5407,49 @@ ModelVolumeType ObjectList::get_selected_volume_type()
     return ModelVolumeType::INVALID;
 }
 
-void ObjectList::set_volume_type(ModelVolumeType new_type)
+// ---------------- Helpers for Precise Seam group-aware type changes ----------------
+// Used by set_volume_type() and the "Precise Seam Type" subtype submenu handler.
+
+// Detects whether a type change crosses a Precise Seam "group boundary" that requires
+// manual repositioning inside ModelObject::volumes[]:
+//   - between any non-PS type and any PS subtype, or
+//   - between strong PS (CENTER/LEFT/RIGHT) and weak PS (ENFORCED/BLOCKED/NEUTRAL).
+// sort_volumes() is stable and groups strong PS before weak PS. When a volume crosses
+// a group, moving it to the end of volumes[] lets the subsequent stable sort place it
+// at the end of its new group. Without this, a strong→weak transition would leave the
+// volume stuck in the strong segment and break the modifier-application order.
+static bool precise_seam_group_changed(ModelVolumeType old_type, ModelVolumeType new_type)
+{
+    const bool old_is_ps = is_precise_seam(old_type);
+    const bool new_is_ps = is_precise_seam(new_type);
+    if (old_is_ps != new_is_ps)
+        return true;                 // non-PS ↔ PS transition
+    if (!old_is_ps)
+        return false;                // both non-PS — regular enum ordering is enough
+    return is_precise_seam_strong(old_type) != is_precise_seam_strong(new_type);
+}
+
+// Moves a volume to the end of ModelObject::volumes[]. Combined with stable sort_volumes(),
+// this places it at the end of its new group while preserving relative order of others.
+static void move_volume_to_end(ModelObject* obj, ModelVolume* volume)
+{
+    if (obj == nullptr || volume == nullptr)
+        return;
+    auto it = std::find(obj->volumes.begin(), obj->volumes.end(), volume);
+    if (it != obj->volumes.end()) {
+        obj->volumes.erase(it);
+        obj->volumes.push_back(volume);
+    }
+}
+
+void ObjectList::set_volume_type(ModelVolumeType new_type, bool preserve_ps_subtype)
 {
     struct VolumeSelection {
         int          object_idx;
         ModelVolume* volume;
     };
 
+    // --- Collect selected volumes from the object tree, falling back to the 3D canvas ---
     std::vector<VolumeSelection> volumes;
     auto add_volume = [&volumes](int obj_idx, ModelVolume* volume) {
         if (volume == nullptr)
@@ -5743,12 +5507,57 @@ void ObjectList::set_volume_type(ModelVolumeType new_type)
             return;
     }
 
+    // --- Incompatible-mix guard ---
+    // Text/SVG volumes carry metadata (text_configuration, emboss_shape) that only makes sense
+    // for Part / Negative Part / Modifier. Silently converting them to Support or Precise Seam
+    // would leave stale metadata behind and produce meaningless seam/support control. This is
+    // the same restriction the old SingleChoiceDialog enforced by hiding those entries; with
+    // the new always-visible submenu we must enforce it at action time.
+    {
+        const bool has_text_or_svg = std::any_of(volumes.begin(), volumes.end(),
+            [](const VolumeSelection& sel) { return sel.volume->is_svg() || sel.volume->is_text(); });
+        const bool target_is_part_like =
+            new_type == ModelVolumeType::MODEL_PART ||
+            new_type == ModelVolumeType::NEGATIVE_VOLUME ||
+            new_type == ModelVolumeType::PARAMETER_MODIFIER;
+        if (has_text_or_svg && !target_is_part_like) {
+            // Single-sentence message: the "separately" clause that used to follow would be
+            // misleading for all-text/SVG selections since text/SVG → Support/PS is always
+            // disallowed, not just in mixed selections.
+            Slic3r::GUI::show_error(nullptr,
+                _L("Cannot change type: text/SVG volumes can only become Part, Negative Part, or Modifier."));
+            return;
+        }
+    }
+
+    // --- Subtype preservation for the generic "Precise Seam" entry ---
+    // The Change Type submenu uses PRECISE_SEAM_CENTER as the single "Precise Seam" entry
+    // and calls with preserve_ps_subtype=true: volumes that are already Precise Seam keep
+    // their subtype (LEFT/RIGHT/etc.); only non-PS volumes get converted to the default
+    // CENTER subtype.
+    //
+    // The "Precise Seam Type" subtype submenu calls with preserve_ps_subtype=false: the
+    // user explicitly picked CENTER and all selected PS volumes must be set to CENTER
+    // verbatim (otherwise CENTER would become unreachable for mixed-subtype selections,
+    // since preservation would keep every volume at its current subtype and any_diff would
+    // be false — the reason for this two-parameter split).
+    auto effective_new_type = [new_type, preserve_ps_subtype](const ModelVolume* v) -> ModelVolumeType {
+        if (preserve_ps_subtype && new_type == ModelVolumeType::PRECISE_SEAM_CENTER && v->is_precise_seam())
+            return v->type();
+        return new_type;
+    };
+
+    // --- Any-change check using the effective target type ---
     const bool any_diff = std::any_of(volumes.begin(), volumes.end(),
-        [new_type](const VolumeSelection& sel) { return sel.volume->type() != new_type; });
+        [&effective_new_type](const VolumeSelection& sel) {
+            return sel.volume->type() != effective_new_type(sel.volume);
+        });
 
     if (!any_diff)
         return;
 
+    // --- Last-solid-part guard (pre-existing behavior) ---
+    // When converting away from MODEL_PART, ensure at least one solid part remains per object.
     if (new_type != ModelVolumeType::MODEL_PART) {
         std::map<int, int> total_part_cnt;
         std::map<int, int> selected_part_cnt;
@@ -5776,14 +5585,36 @@ void ObjectList::set_volume_type(ModelVolumeType new_type)
 
     take_snapshot("Change part type");
 
+    // --- Apply type changes with Precise Seam group-aware repositioning ---
+    // Note: `changed_volumes` / `touched_objects` track every processed volume, including
+    // subtype-preservation no-ops. Tracking no-ops is intentional — it ensures such
+    // volumes remain selected after the post-apply rebuild. Without that, a cross-object
+    // mixed selection like [Part, PS_LEFT] clicking "Change type → Precise Seam" would
+    // silently deselect the preserved PS_LEFT: only the Part's object would enter
+    // touched_objects, and the final SetSelections(new_selection) would drop PS_LEFT.
     std::set<const ModelVolume*> changed_volumes;
     std::set<int>                touched_objects;
     for (const auto& sel : volumes) {
-        sel.volume->set_type(new_type);
+        const ModelVolumeType target   = effective_new_type(sel.volume);
+        const ModelVolumeType old_type = sel.volume->type();
+
+        // Record the volume for reselection before the no-op short-circuit (see comment above).
         changed_volumes.insert(sel.volume);
         touched_objects.insert(sel.object_idx);
+
+        if (old_type == target)
+            continue; // subtype-preservation no-op — nothing to write/move
+
+        sel.volume->set_type(target);
+
+        // If the change crosses a PS group boundary, move the volume to the end of volumes[]
+        // so the stable sort in reorder_volumes_and_get_selection() places it at the end of
+        // its new group (see precise_seam_group_changed() for details).
+        if (precise_seam_group_changed(old_type, target))
+            move_volume_to_end((*m_objects)[sel.object_idx], sel.volume);
     }
 
+    // --- Rebuild selection to follow the changed volumes ---
     wxDataViewItemArray new_selection;
     for (int obj_idx : touched_objects) {
         wxDataViewItemArray sel_items = reorder_volumes_and_get_selection(obj_idx, [&changed_volumes](const ModelVolume* volume) {

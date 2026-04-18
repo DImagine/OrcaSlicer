@@ -783,11 +783,16 @@ wxMenuItem* MenuFactory::append_menu_item_change_type(wxMenu* menu)
     };
 
     std::vector<TypeInfo> types = {
-        { ModelVolumeType::MODEL_PART,         _L("Part") },
-        { ModelVolumeType::NEGATIVE_VOLUME,    _L("Negative Part") },
-        { ModelVolumeType::PARAMETER_MODIFIER, _L("Modifier") },
-        { ModelVolumeType::SUPPORT_BLOCKER,    _L("Support Blocker") },
-        { ModelVolumeType::SUPPORT_ENFORCER,   _L("Support Enforcer") }
+        { ModelVolumeType::MODEL_PART,          _L("Part") },
+        { ModelVolumeType::NEGATIVE_VOLUME,     _L("Negative Part") },
+        { ModelVolumeType::PARAMETER_MODIFIER,  _L("Modifier") },
+        { ModelVolumeType::SUPPORT_BLOCKER,     _L("Support Blocker") },
+        { ModelVolumeType::SUPPORT_ENFORCER,    _L("Support Enforcer") },
+        // Single "Precise Seam" entry that maps to PRECISE_SEAM_CENTER as the default subtype.
+        // set_volume_type() preserves the existing subtype (LEFT/RIGHT/etc.) for volumes that
+        // are already Precise Seam; subtype picking is done via the separate
+        // "Precise Seam Type" submenu (see append_menu_item_precise_seam_submenu).
+        { ModelVolumeType::PRECISE_SEAM_CENTER, _L("Precise Seam") }
     };
 
     for (const auto& info : types) {
@@ -801,7 +806,13 @@ wxMenuItem* MenuFactory::append_menu_item_change_type(wxMenu* menu)
             obj_list()->GetSelections(sels);
             for (auto item : sels) {
                 ModelVolumeType vol_type = obj_list()->GetModel()->GetVolumeType(item);
-                if (vol_type == type) {
+                // The "Precise Seam" entry represents all six PS subtypes, so any subtype
+                // among selected volumes counts as a match (keeps the checkbox ticked when
+                // user has PS_LEFT/RIGHT/etc. selected, not only plain CENTER).
+                const bool match = (type == ModelVolumeType::PRECISE_SEAM_CENTER)
+                    ? is_precise_seam(vol_type)
+                    : (vol_type == type);
+                if (match) {
                     has_type = true;
                     break;
                 }
@@ -1236,35 +1247,67 @@ void MenuFactory::append_menu_item_precise_seam_submenu(wxMenu* menu)
 {
     wxString submenu_name = _L("Precise Seam Type");
 
-    // Remove existing submenu if present
+    // Remove existing submenu if present (menu is rebuilt on every right-click)
     const int menu_item_id = menu->FindItem(submenu_name);
     if (menu_item_id != wxNOT_FOUND)
         menu->Destroy(menu_item_id);
 
-    // Only add submenu if Precise Seam volume is selected
-    ModelVolume* volume = obj_list()->get_selected_model_volume();
-    if (!volume || !volume->is_precise_seam())
+    // --- Precondition: ALL selected volumes must be Precise Seam ---
+    // Mixed selections (PS + non-PS) are ambiguous for subtype switching: applying a subtype
+    // would implicitly convert the non-PS volumes to PS, which is not what the user expects
+    // from a subtype picker. For mixed selections the user should first use
+    // "Change type → Precise Seam" to unify them, then come back to this submenu.
+    wxDataViewItemArray sels;
+    obj_list()->GetSelections(sels);
+    if (sels.IsEmpty())
         return;
 
-    // Get current volume type to mark active item with checkmark
-    ModelVolumeType current_type = volume->type();
+    // A right-click on a volume in the 3D view routes through Plater::show_context_menu
+    // → ObjectList::update_selections(), which intentionally preserves a pre-existing
+    // settings-row selection alongside the clicked volume. As a result GetSelections()
+    // may return settings-row items that are children of a volume. Treat each settings
+    // row as selecting its parent volume (same pattern used by set_volume_type()
+    // internally). Without this resolution, GetVolumeType(settings_row) returns INVALID
+    // and the submenu would hide even when a valid PS volume is in the selection.
+    //
+    // Precomputing the resolved PS types once here also lets the checkmark loop below
+    // display checks correctly for selections that contain settings rows.
+    std::vector<ModelVolumeType> selected_ps_types;
+    selected_ps_types.reserve(sels.size());
 
-    // Find position of "Change Type" menu item to insert submenu after it
-    int insert_pos = wxNOT_FOUND;
+    auto* model = obj_list()->GetModel();
+    for (const auto& sel_item : sels) {
+        wxDataViewItem vol_item  = sel_item;
+        const ItemType type_mask = model->GetItemType(sel_item);
+        if (!(type_mask & itVolume)) {
+            // Only settings rows whose parent is a volume map to "selecting that volume".
+            // Any other non-volume item (object, instance, etc.) means the selection is
+            // not purely PS-volume-based — hide the submenu.
+            if ((type_mask & itSettings) && (model->GetItemType(model->GetParent(sel_item)) & itVolume))
+                vol_item = model->GetParent(sel_item);
+            else
+                return;
+        }
+        const ModelVolumeType vol_type = model->GetVolumeType(vol_item);
+        if (!is_precise_seam(vol_type))
+            return;
+        selected_ps_types.push_back(vol_type);
+    }
+
+    // --- Locate where to insert the submenu: right after "Change type" ---
+    int insert_pos     = wxNOT_FOUND;
     int change_type_id = menu->FindItem(_L("Change type"));
-
     if (change_type_id != wxNOT_FOUND) {
-        // Find index of the menu item in the menu
         for (size_t i = 0; i < menu->GetMenuItemCount(); i++) {
             wxMenuItem* item = menu->FindItemByPosition(i);
             if (item && item->GetId() == change_type_id) {
-                insert_pos = i + 1;  // Insert after Change Type
+                insert_pos = i + 1;  // insert directly after the Change Type entry
                 break;
             }
         }
     }
 
-    // Create submenu for Precise Seam type selection
+    // --- Build the subtype submenu ---
     wxMenu* ps_menu = new wxMenu();
     if (!ps_menu)
         return;
@@ -1280,67 +1323,41 @@ void MenuFactory::append_menu_item_precise_seam_submenu(wxMenu* menu)
         {L("Seam Neutral"),  ModelVolumeType::PRECISE_SEAM_NEUTRAL},
     }};
 
-    // Add radio button menu items for Precise Seam type selection
     for (const auto& ps_type : PS_TYPES) {
         wxString label = _(ps_type.first);
 
-        // Create radio button menu item with type switching handler
-        wxMenuItem* item = append_menu_radio_item(ps_menu, wxID_ANY, label, "",
+        // Check-items (not radio): radio groups in wxWidgets auto-select the first item when
+        // no item is explicitly checked, which misleads the user into seeing "Seam Center"
+        // as the active subtype for mixed-subtype selections. With check-items we can leave
+        // every item unchecked in that case, and the menu matches the pattern of the
+        // neighbouring "Change type" submenu (see append_menu_item_change_type).
+        //
+        // Handler: delegate to set_volume_type() with preserve_ps_subtype=false. The user
+        // explicitly picked a subtype here, so "Seam Center" must set every selected PS
+        // volume to CENTER verbatim — preservation (the default for "Change type") would
+        // keep existing subtypes and make CENTER unreachable on mixed-subtype selections.
+        // set_volume_type() already handles multi-select iteration, the last-solid-part
+        // guard, and the PS group-change reordering via move_volume_to_end().
+        wxMenuItem* item = append_menu_check_item(ps_menu, wxID_ANY, label, "",
             [ps_type](wxCommandEvent&) {
-                // Get selected volume
-                ModelVolume* volume = obj_list()->get_selected_model_volume();
-                if (!volume || !volume->is_precise_seam()) return;
-
-                int obj_idx = obj_list()->get_selected_obj_idx();
-                if (obj_idx < 0) return;
-
-                // Change type and create undo snapshot
-                plater()->take_snapshot("Change Precise Seam Type");
-
-                ModelVolumeType old_type = volume->type();
-                ModelVolumeType new_type = ps_type.second;
-
-                // Check if group change occurred (strong ↔ weak)
-                bool old_strong = volume->is_precise_seam_strong();
-                bool new_strong = is_precise_seam_strong(new_type);
-
-                bool group_changed = (old_strong != new_strong);
-
-                volume->set_type(new_type);
-
-                // If group changed, move volume to end of volumes array before reordering
-                // This ensures it will be placed at the end of its new group after stable_sort
-                if (group_changed) {
-                    ModelObject* obj = obj_list()->object(obj_idx);
-                    auto it = std::find(obj->volumes.begin(), obj->volumes.end(), volume);
-                    if (it != obj->volumes.end()) {
-                        obj->volumes.erase(it);
-                        obj->volumes.push_back(volume); // move to end
-                    }
-                }
-
-                // Update UI based on whether group changed
-                if (group_changed) {
-                    // Group changed (strong ↔ weak): reorder volumes and reselect
-                    wxDataViewItemArray sel = obj_list()->reorder_volumes_and_get_selection(
-                        obj_idx, [volume](const ModelVolume* vol) { return vol == volume; });
-                    if (!sel.IsEmpty())
-                        obj_list()->select_item(sel.front());
-                } else {
-                    // Same group: just update the item's icon/name without reordering
-                    wxDataViewItem item = obj_list()->GetSelection();
-                    if (item.IsOk()) {
-                        obj_list()->GetModel()->SetVolumeType(item, new_type);
-                        obj_list()->changed_object(obj_idx);
-                    }
-                }
+                obj_list()->set_volume_type(ps_type.second, /*preserve_ps_subtype=*/false);
             },
-            menu);
+            ps_menu);
 
-        // Check the active item
-        if (ps_type.second == current_type && item) {
+        // Tick every subtype that is present in the current selection. Same pattern as the
+        // neighbouring "Change type" submenu (where selecting [Part + Modifier] ticks both
+        // "Part" and "Modifier" boxes). For homogeneous selections exactly one checkbox is
+        // ticked; for mixed subtype selections (e.g. PS_LEFT + PS_RIGHT) both "Seam Left"
+        // and "Seam Right" appear checked, so the user sees at a glance which subtypes are
+        // currently in the selection.
+        //
+        // Uses the precomputed selected_ps_types (which resolved settings rows to their
+        // parent volumes); iterating sels directly would miss subtypes for selections that
+        // arrive via settings rows from right-click-in-3D-view.
+        const bool is_present = std::find(selected_ps_types.begin(), selected_ps_types.end(),
+                                          ps_type.second) != selected_ps_types.end();
+        if (is_present && item)
             item->Check(true);
-        }
     }
 
     // Add submenu to parent menu
@@ -2046,6 +2063,10 @@ wxMenu* MenuFactory::multi_selection_menu()
         append_menu_item_per_object_process(menu);
         menu->AppendSeparator();
         append_menu_item_change_type(menu);
+        // Subtype picker for Precise Seam — shown only when all selected volumes are PS.
+        // Must be paired with Change Type here (as in single-volume part_menu), otherwise
+        // the user cannot switch PS subtypes (LEFT/RIGHT/etc.) on multi-selection.
+        append_menu_item_precise_seam_submenu(menu);
         append_menu_item_change_filament(menu);
     }
     return menu;
