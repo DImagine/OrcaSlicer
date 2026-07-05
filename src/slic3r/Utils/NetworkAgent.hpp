@@ -36,7 +36,6 @@ public:
 #endif
     static std::string get_version();
     static void* get_network_function(const char* name);
-    static bool use_legacy_network;
 
     static NetworkLibraryLoadError get_load_error();
     static void clear_load_error();
@@ -93,7 +92,7 @@ public:
     // NOTE: this should always call only OrcaCloud
     int get_user_presets(std::map<std::string, std::map<std::string, std::string>>* user_presets, const std::string& provider = ORCA_CLOUD_PROVIDER);
     std::string request_setting_id(std::string name, std::map<std::string, std::string>* values_map, unsigned int* http_code, const std::string& provider = ORCA_CLOUD_PROVIDER);
-    int put_setting(std::string setting_id, std::string name, std::map<std::string, std::string>* values_map, unsigned int* http_code, const std::string& provider = ORCA_CLOUD_PROVIDER);
+    int put_setting(std::string setting_id, std::string name, std::map<std::string, std::string>* values_map, unsigned int* http_code, const std::string& provider = ORCA_CLOUD_PROVIDER, bool force = false);
     int get_setting_list(std::string bundle_version, ProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr, const std::string& provider = ORCA_CLOUD_PROVIDER);
     int get_setting_list2(std::string bundle_version, CheckFn chk_fn, ProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr, const std::string& provider = ORCA_CLOUD_PROVIDER);
     int delete_setting(std::string setting_id, const std::string& provider = ORCA_CLOUD_PROVIDER);

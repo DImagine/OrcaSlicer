@@ -32,8 +32,6 @@ int invoke_on_all_cloud_agents(const std::map<std::string, std::shared_ptr<IClou
 
 } // namespace
 
-bool NetworkAgent::use_legacy_network = true;
-
 // ============================================================================
 // Static methods - delegate to BBLNetworkPlugin
 // ============================================================================
@@ -383,11 +381,12 @@ int NetworkAgent::put_setting(std::string                         setting_id,
                               std::string                         name,
                               std::map<std::string, std::string>* values_map,
                               unsigned int*                       http_code,
-                              const std::string&                  provider)
+                              const std::string&                  provider,
+                              bool force)
 {
     const auto cloud_agent = get_cloud_agent(provider);
     if (cloud_agent)
-        return cloud_agent->put_setting(std::move(setting_id), std::move(name), values_map, http_code);
+        return cloud_agent->put_setting(std::move(setting_id), std::move(name), values_map, http_code, force);
     return -1;
 }
 
