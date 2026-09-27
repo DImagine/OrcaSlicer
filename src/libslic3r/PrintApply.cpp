@@ -8,12 +8,12 @@
 
 namespace Slic3r {
 
-// Add or remove support modifier ModelVolumes from model_object_dst to match the ModelVolumes of model_object_new
+// Add or remove support and Precise Seam modifier ModelVolumes from model_object_dst to match the ModelVolumes of model_object_new
 // in the exact order and with the same IDs.
-// It is expected, that the model_object_dst already contains the non-support volumes of model_object_new in the correct order.
+// Other volume types must already match model_object_new in the correct order.
 // Friend to ModelVolume to allow copying.
 // static is not accepted by gcc if declared as a friend of ModelObject.
-/* static */ void model_volume_list_update_supports(ModelObject &model_object_dst, const ModelObject &model_object_new)
+/* static */ void model_volume_list_update_supports_and_seams(ModelObject &model_object_dst, const ModelObject &model_object_new)
 {
     typedef std::pair<const ModelVolume*, bool> ModelVolumeWithStatus;
     std::vector<ModelVolumeWithStatus> old_volumes;
@@ -49,57 +49,6 @@ namespace Slic3r {
         } else {
             // The volume was not found in the old list. Create a new copy.
             assert(model_volume_src->is_support_modifier() || model_volume_src->is_precise_seam());
-            model_object_dst.volumes.emplace_back(new ModelVolume(*model_volume_src));
-            model_object_dst.volumes.back()->set_model_object(&model_object_dst);
-        }
-    }
-    // Release the non-consumed old volumes (those were deleted from the new list).
-    for (ModelVolumeWithStatus &mv_with_status : old_volumes)
-        if (! mv_with_status.second)
-            delete mv_with_status.first;
-}
-
-// Add or remove Precise Seam modifier ModelVolumes from model_object_dst to match the ModelVolumes of model_object_new
-// in the exact order and with the same IDs.
-// It is expected, that the model_object_dst already contains the non-precise-seam volumes of model_object_new in the correct order.
-// Friend to ModelVolume to allow copying.
-// static is not accepted by gcc if declared as a friend of ModelObject.
-/* static */ void model_volume_list_update_precise_seam(ModelObject &model_object_dst, const ModelObject &model_object_new)
-{
-    typedef std::pair<const ModelVolume*, bool> ModelVolumeWithStatus;
-    std::vector<ModelVolumeWithStatus> old_volumes;
-    old_volumes.reserve(model_object_dst.volumes.size());
-    for (const ModelVolume *model_volume : model_object_dst.volumes)
-        old_volumes.emplace_back(ModelVolumeWithStatus(model_volume, false));
-    auto model_volume_lower = [](const ModelVolumeWithStatus &mv1, const ModelVolumeWithStatus &mv2){ return mv1.first->id() <  mv2.first->id(); };
-    auto model_volume_equal = [](const ModelVolumeWithStatus &mv1, const ModelVolumeWithStatus &mv2){ return mv1.first->id() == mv2.first->id(); };
-    std::sort(old_volumes.begin(), old_volumes.end(), model_volume_lower);
-    model_object_dst.volumes.clear();
-    model_object_dst.volumes.reserve(model_object_new.volumes.size());
-    for (const ModelVolume *model_volume_src : model_object_new.volumes) {
-        ModelVolumeWithStatus key(model_volume_src, false);
-        auto it = std::lower_bound(old_volumes.begin(), old_volumes.end(), key, model_volume_lower);
-        if (it != old_volumes.end() && model_volume_equal(*it, key)) {
-            // The volume was found in the old list. Just copy it.
-            assert(! it->second); // not consumed yet
-            it->second = true;
-            ModelVolume *model_volume_dst = const_cast<ModelVolume*>(it->first);
-            // Type may switch within precise_seam family, within support family, or between them.
-            assert((model_volume_dst->is_precise_seam()     && model_volume_src->is_precise_seam())     ||
-                   (model_volume_dst->is_support_modifier() && model_volume_src->is_support_modifier()) ||
-                   (model_volume_dst->is_precise_seam()     && model_volume_src->is_support_modifier()) ||
-                   (model_volume_dst->is_support_modifier() && model_volume_src->is_precise_seam())     ||
-                   model_volume_dst->type() == model_volume_src->type());
-            model_object_dst.volumes.emplace_back(model_volume_dst);
-            if (model_volume_dst->is_precise_seam() || model_volume_dst->is_support_modifier()) {
-                // Type may have been switched within or between support/precise_seam families.
-                model_volume_dst->set_type(model_volume_src->type());
-                model_volume_dst->set_transformation(model_volume_src->get_transformation());
-            }
-            assert(model_volume_dst->get_matrix().isApprox(model_volume_src->get_matrix()));
-        } else {
-            // The volume was not found in the old list. Create a new copy.
-            assert(model_volume_src->is_precise_seam() || model_volume_src->is_support_modifier());
             model_object_dst.volumes.emplace_back(new ModelVolume(*model_volume_src));
             model_object_dst.volumes.back()->set_model_object(&model_object_dst);
         }
@@ -1755,10 +1704,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 // Invalidate just the supports step.
                 for (const PrintObjectStatus &print_object_status : print_objects_range)
                     update_apply_status(print_object_status.print_object->invalidate_step(posSupportMaterial));
-                if (supports_differ) {
-                    // Copy just the support volumes.
-                    model_volume_list_update_supports(model_object, model_object_new);
-                }
             }
             if (precise_seam_differ) {
                 // First stop background processing before shuffling or deleting the ModelVolumes in the ModelObject's list.
@@ -1766,11 +1711,13 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 update_apply_status(false);
                 // Invalidate seam placement (affects G-code export).
                 update_apply_status(this->invalidate_step(psGCodeExport));
-                // Copy just the Precise Seam volumes.
-                model_volume_list_update_precise_seam(model_object, model_object_new);
             } else if (model_custom_seam_data_changed(model_object, model_object_new)) {
                 update_apply_status(this->invalidate_step(psGCodeExport));
             }
+            // Synchronize both families once, after cancellation and all affected-step invalidations.
+            // This also handles type changes between supports and Precise Seam before copying configs below.
+            if (supports_differ || precise_seam_differ)
+                model_volume_list_update_supports_and_seams(model_object, model_object_new);
             if (brim_points_differ) {
                 model_object.brim_points = model_object_new.brim_points;
                 update_apply_status(this->invalidate_all_steps());

@@ -110,7 +110,6 @@ std::optional<Point> insert_strong_seam_point(
 // Also inserts boundary points into the perimeter polygon (sorted by descending arc length)
 // Refines enforced edges by subdividing them into segments ≤ enforcer_oversampling_distance
 // Parameters:
-//   strong_volumes    - list of strong precise seam modifiers (for debug output header)
 //   weak_volumes      - list of weak precise seam modifiers
 //   polygon           - perimeter polygon (will be modified with inserted points and refined edges)
 //   layer             - current layer
@@ -118,7 +117,6 @@ std::optional<Point> insert_strong_seam_point(
 // Returns:
 //   Ordered vector of segments with updated coordinates (same order as weak_volumes list)
 std::vector<WeakModifierSegment> collect_weak_modifier_segments(
-    const std::vector<const ModelVolume*> &strong_volumes,
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
     const Layer *layer,
@@ -129,24 +127,14 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
 // Finds boundary points in refined polygon and sets types for points within segments
 // Parameters:
 //   weak_segments       - segments with boundary coordinates and types
-//   polygon             - refined polygon (after point insertion)
 //   result              - layer seams data to modify
 //   perimeter           - perimeter info (start/end indices)
 //   some_point_enforced - flag to update if Enforced points are set
-//   weak_volumes        - list of weak modifiers (for debug output, optional)
-//   layer_id            - layer ID (for debug output, optional)
 void apply_weak_modifiers_to_perimeter(
     const std::vector<WeakModifierSegment> &weak_segments,
-    const Polygon &polygon,
     PrintObjectSeamData::LayerSeams &result,
     const SeamPlacerImpl::Perimeter &perimeter,
-    bool &some_point_enforced,
-    const std::vector<const ModelVolume*> *weak_volumes = nullptr,
-    size_t layer_id = 0);
-
-// Nudge duplicate last vertex toward previous vertex to avoid zero-length edge
-// Modifies polygon in-place if first and last vertices coincide
-void nudge_duplicate_vertex(Polygon &polygon);
+    bool &some_point_enforced);
 
 // Restore precise seam positions that may have been modified by alignment
 // Iterates through all perimeters and restores precise_seam_point positions

@@ -1390,9 +1390,9 @@ void MenuFactory::append_menu_item_precise_seam_submenu(wxMenu* menu)
         selected_ps_types.push_back(vol_type);
     }
 
-    // --- Locate where to insert the submenu: right after "Change type" ---
+    // Match the label used by append_menu_item_change_type, including its translation.
     int insert_pos     = wxNOT_FOUND;
-    int change_type_id = menu->FindItem(_L("Change type"));
+    int change_type_id = menu->FindItem(_L("Change Type"));
     if (change_type_id != wxNOT_FOUND) {
         for (size_t i = 0; i < menu->GetMenuItemCount(); i++) {
             wxMenuItem* item = menu->FindItemByPosition(i);
@@ -1405,8 +1405,6 @@ void MenuFactory::append_menu_item_precise_seam_submenu(wxMenu* menu)
 
     // --- Build the subtype submenu ---
     wxMenu* ps_menu = new wxMenu();
-    if (!ps_menu)
-        return;
 
     // Array of all 6 Precise Seam subtypes with labels.
     // "Seam ..." prefix disambiguates from other i18n contexts (extruder Left/Right, "Center on bed", etc.)

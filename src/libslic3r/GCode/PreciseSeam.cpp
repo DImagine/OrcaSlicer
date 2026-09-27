@@ -1,11 +1,7 @@
 #include "PreciseSeam.hpp"
 #include "SeamPlacer.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include <algorithm>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
-#include <string>
-#include <unordered_map>
 #include <boost/log/trivial.hpp>
 #include <tbb/parallel_for.h>
 
@@ -24,72 +20,6 @@ static constexpr double MACHINE_PRECISION_SQUARED = 2.5;
 // Tolerance for checking proximity when inserting seam points into perimeter
 static const coord_t TOLERANCE_LINEAR = scale_(0.001);  // 1.0 micrometers
 static const coord_t TOLERANCE_SQUARED = TOLERANCE_LINEAR * TOLERANCE_LINEAR;
-
-// Finds the closest point of a polygon to the query point.
-// Returns the foot point, the squared distance to it, and the index of the edge
-// (or vertex) that produced that closest point; {foot_point, distance_squared, edge_index}
-// edge_index == std::numeric_limits<size_t>::max()
-// marks "no valid edge/vertex found" (e.g. empty polygon), so callers
-// must check for that sentinel before dereferencing the index.
-static std::tuple<Point, double, size_t>
-project_point_onto_polygon(const Polygon &poly, const Point &point)
-{
-    Point proj = point;
-    double dmin = std::numeric_limits<double>::max();
-    const auto invalid = std::numeric_limits<size_t>::max();
-    size_t best_edge = invalid;
-
-    const auto &pts = poly.points;
-    if (pts.empty()) {
-        return {proj, dmin, best_edge};
-    }
-
-    for (size_t i = 0; i < pts.size(); ++i) {
-        const size_t j = (i + 1 == pts.size()) ? 0 : i + 1;
-        const Point &pt0 = pts[i];
-        const Point &pt1 = pts[j];
-
-        double d = (point - pt0).cast<double>().squaredNorm();
-        if (d < dmin) {
-            dmin = d;
-            proj = pt0;
-            best_edge = i;                  // closest vertex - its index
-        }
-
-        d = (point - pt1).cast<double>().squaredNorm();
-        if (d < dmin) {
-            dmin = d;
-            proj = pt1;
-            best_edge = j;
-        }
-
-        Vec2d v1(coordf_t(pt1(0) - pt0(0)), coordf_t(pt1(1) - pt0(1)));
-        coordf_t div = v1.squaredNorm();
-        if (div <= 0.) {
-            continue;
-        }
-
-        Vec2d v2(coordf_t(point(0) - pt0(0)), coordf_t(point(1) - pt0(1)));
-        coordf_t t = v1.dot(v2) / div;
-        if (t <= 0. || t >= 1.) {
-            continue;
-        }
-
-        Point foot(
-            coord_t(std::floor(coordf_t(pt0(0)) + t * v1(0) + 0.5)),
-            coord_t(std::floor(coordf_t(pt0(1)) + t * v1(1) + 0.5))
-        );
-
-        d = (point - foot).cast<double>().squaredNorm();
-        if (d < dmin) {
-            dmin = d;
-            proj = foot;
-            best_edge = i;                  // projection lies on edge starting at pts[i]
-        }
-    }
-
-    return {proj, dmin, best_edge};
-}
 
 // Find common segment between intersection polygon and object perimeter
 //
@@ -139,10 +69,9 @@ static std::optional<SegmentData> common_segment_in_intersection(
 
     // Project each intersection point onto perimeter
     for (size_t i = 0; i < isect_n; ++i) {
-        auto [proj_point, dist_sq, edge_idx] = project_point_onto_polygon(
-            perimeter_polygon,
-            intersection_polygon.points[i]
-        );
+        size_t edge_idx;
+        const Point proj_point = perimeter_polygon.point_projection(intersection_polygon.points[i], &edge_idx);
+        const double dist_sq = (intersection_polygon.points[i] - proj_point).cast<double>().squaredNorm();
 
         const auto invalid = std::numeric_limits<size_t>::max();
         if (edge_idx == invalid) {
@@ -269,10 +198,8 @@ static std::optional<SegmentData> common_segment_in_intersection(
             );
 
             // Project midpoint onto perimeter
-            auto [proj, dist_sq, edge_idx] = project_point_onto_polygon(
-                perimeter_polygon,
-                edge_center
-            );
+            const Point proj = perimeter_polygon.point_projection(edge_center);
+            const double dist_sq = (edge_center - proj).cast<double>().squaredNorm();
 
             // Check if midpoint lies on perimeter (accounting for rounding error)
             if (dist_sq > EDGE_CENTER_THRESHOLD) {
@@ -425,7 +352,7 @@ static std::optional<SegmentData> common_segment_in_intersection_fast(
         return common_segment_in_intersection(intersection_polygon, perimeter_polygon, warnings);
     }
 
-    // Sentinel value for invalid edge_index (returned by project_point_onto_polygon on error)
+    // Sentinel value for an invalid edge_index returned by Polygon::point_projection.
     const auto invalid = std::numeric_limits<size_t>::max();
 
     // ============================================================
@@ -449,10 +376,9 @@ static std::optional<SegmentData> common_segment_in_intersection_fast(
         }
 
         // Exact match not found - check geometrically
-        auto [proj_point, dist_sq, edge_idx] = project_point_onto_polygon(
-            perimeter_polygon,
-            curr_isect_pt
-        );
+        size_t edge_idx;
+        const Point proj_point = perimeter_polygon.point_projection(curr_isect_pt, &edge_idx);
+        const double dist_sq = (curr_isect_pt - proj_point).cast<double>().squaredNorm();
 
         if (edge_idx == invalid || dist_sq > MACHINE_PRECISION_SQUARED) {
             // Point not on perimeter - break forward pass
@@ -490,10 +416,9 @@ static std::optional<SegmentData> common_segment_in_intersection_fast(
         }
 
         // Exact match not found - check geometrically
-        auto [proj_point, dist_sq, edge_idx] = project_point_onto_polygon(
-            perimeter_polygon,
-            curr_isect_pt
-        );
+        size_t edge_idx;
+        const Point proj_point = perimeter_polygon.point_projection(curr_isect_pt, &edge_idx);
+        const double dist_sq = (curr_isect_pt - proj_point).cast<double>().squaredNorm();
 
         if (edge_idx == invalid || dist_sq > MACHINE_PRECISION_SQUARED) {
             // Point not on perimeter - break backward pass
@@ -614,46 +539,19 @@ void init_precise_seam_data(
 
     has_strong_out = !strong_volumes_out.empty();
 
-    // Sort modifiers by their position in model_object->volumes[].
-    // Drag & drop in GUI directly reorders volumes[], so this reflects user intent.
-    // Works identically for GUI and CLI (3MF preserves volumes[] order).
-    auto get_position = [&](const ModelVolume* vol) -> size_t {
-        auto it = std::find(model_object->volumes.begin(),
-                           model_object->volumes.end(), vol);
-        return (it != model_object->volumes.end())
-            ? std::distance(model_object->volumes.begin(), it)
-            : SIZE_MAX;
-    };
-
-    // Strong modifiers: top-down (earlier in volumes[] = higher priority)
-    if (!strong_volumes_out.empty()) {
-        std::stable_sort(strong_volumes_out.begin(), strong_volumes_out.end(),
-            [&](const ModelVolume* a, const ModelVolume* b) {
-                return get_position(a) < get_position(b);
-            });
-    }
-
-    // Weak modifiers: sorted low-priority-first (bottom of tree first).
-    // Earlier in volumes[] = higher in object tree = higher priority.
-    // Application uses "last write wins", so higher-priority modifiers
-    // (earlier in volumes[], placed last in this sorted order) overwrite
-    // lower-priority ones, producing the correct hierarchy.
-    if (!weak_volumes_out.empty()) {
-        std::stable_sort(weak_volumes_out.begin(), weak_volumes_out.end(),
-            [&](const ModelVolume* a, const ModelVolume* b) {
-                return get_position(a) > get_position(b);
-            });
-    }
+    // Collection already preserves model order, with higher-priority strong modifiers first.
+    // Weak modifiers use last-write-wins, so apply the higher-priority ones last.
+    std::reverse(weak_volumes_out.begin(), weak_volumes_out.end());
 }
 
 // Calculate cumulative lengths for each Polyline point
 // Analog of Polygon::parameter_by_length(), adapted for open line
-static std::vector<float> polyline_parameter_by_length(const Polyline &polyline)
+static std::vector<double> polyline_parameter_by_length(const Polyline &polyline)
 {
-    // Parameterize polyline by its length
-    std::vector<float> lengths(polyline.points.size(), 0.f);
+    // Keep scaled-coordinate lengths in double precision for midpoint interpolation.
+    std::vector<double> lengths(polyline.points.size(), 0.);
     for (size_t i = 1; i < polyline.points.size(); ++i) {
-        lengths[i] = lengths[i-1] + (polyline.points[i] - polyline.points[i-1]).cast<float>().norm();
+        lengths[i] = lengths[i-1] + (polyline.points[i] - polyline.points[i-1]).cast<double>().norm();
     }
     return lengths;
 }
@@ -661,10 +559,7 @@ static std::vector<float> polyline_parameter_by_length(const Polyline &polyline)
 // Find geometric center coordinates of segment
 // Returns: {center coordinates, perimeter vertex index}
 // Index is start vertex of edge containing center
-static std::optional<std::pair<Point, size_t>> segment_center(
-    const SegmentData &data,
-    const Polygon &perimeter_polygon
-)
+static std::optional<std::pair<Point, size_t>> segment_center(const SegmentData &data, const Polygon &perimeter_polygon)
 {
     const Polyline &segment = data.segment;
 
@@ -672,14 +567,14 @@ static std::optional<std::pair<Point, size_t>> segment_center(
         return std::nullopt; // Need at least a line to find middle
     }
 
-    std::vector<float> lengths = polyline_parameter_by_length(segment);
+    std::vector<double> lengths = polyline_parameter_by_length(segment);
     if (lengths.empty()) {
         return std::nullopt; // Polyline contains no points
     }
 
-    float half_length = lengths.back() * 0.5f; // Take half of total length
+    double half_length = lengths.back() * 0.5; // Take half of total length
     size_t mid_idx = segment.points.size() / 2;
-    float mid_length = lengths[mid_idx];
+    double mid_length = lengths[mid_idx];
 
     bool found = false;
     size_t start_idx = 0;
@@ -719,30 +614,31 @@ static std::optional<std::pair<Point, size_t>> segment_center(
     const Point &p1 = segment.points[start_idx];
     const Point &p2 = segment.points[end_idx];
 
-    float local_mid_length = half_length - lengths[start_idx];
-    float edge_length = lengths[end_idx] - lengths[start_idx];
+    double local_mid_length = half_length - lengths[start_idx];
+    double edge_length = lengths[end_idx] - lengths[start_idx];
 
     Point mid_point;
-    if (edge_length <= 0.0f) {
+    if (edge_length <= 0.0) {
         mid_point = p1; // Degenerate case, take start point
     } else {
-        float k = local_mid_length / edge_length;
-        mid_point = p1 + (k * (p2 - p1).cast<float>()).cast<coord_t>(); // Linear interpolation
+        double k = local_mid_length / edge_length;
+        mid_point = p1 + (k * (p2 - p1).cast<double>()).cast<coord_t>(); // Linear interpolation
     }
 
-    // Take edge_index from start point of segment containing center
-    size_t edge_idx = data.perimeter_edge_indices[start_idx];
+    // Clipper may merge several collinear perimeter edges into one segment edge.
+    // Locate the midpoint on the original perimeter instead of reusing the start's edge.
+    size_t edge_idx;
+    const Point projected_midpoint = perimeter_polygon.point_projection(mid_point, &edge_idx);
+    if (edge_idx == std::numeric_limits<size_t>::max())
+        return std::nullopt;
 
-    return std::make_pair(mid_point, edge_idx);
+    return std::make_pair(projected_midpoint, edge_idx);
 }
 
 // Find coordinates of left (first) point of segment
 // Returns: {first point coordinates, perimeter vertex index}
 // Index is start vertex of edge containing first point
-static std::optional<std::pair<Point, size_t>> segment_left(
-    const SegmentData &data,
-    const Polygon &perimeter_polygon
-)
+static std::optional<std::pair<Point, size_t>> segment_left(const SegmentData &data)
 {
     if (data.segment.points.empty()) {
         return std::nullopt;
@@ -754,10 +650,7 @@ static std::optional<std::pair<Point, size_t>> segment_left(
 // Find coordinates of right (last) point of segment
 // Returns: {last point coordinates, perimeter vertex index}
 // Index is start vertex of edge containing last point
-static std::optional<std::pair<Point, size_t>> segment_right(
-    const SegmentData &data,
-    const Polygon &perimeter_polygon
-)
+static std::optional<std::pair<Point, size_t>> segment_right(const SegmentData &data)
 {
     if (data.segment.points.empty()) {
         return std::nullopt;
@@ -918,6 +811,9 @@ std::optional<Point> insert_strong_seam_point(
     const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
     size_t layer_id = layer->id() - raft_layers;
 
+    // Reject disjoint bounds before running polygon clipping; touching bounds still overlap.
+    const BoundingBox perimeter_bbox(polygon.points);
+
     // Iterate through strong modifiers in hierarchy order
     for (const ModelVolume* modifier_volume : strong_volumes) {
         // Look up pre-sliced polygons from cache (sliced once in SeamPlacer::init).
@@ -956,7 +852,11 @@ std::optional<Point> insert_strong_seam_point(
         // intersections from unprocessed polygons indicate a multiple-intersection situation.
         auto check_remaining_polygons = [&](size_t current_idx) {
             if (warnings && !warnings->multiple_intersections.load(std::memory_order_relaxed)) {
+                // Refinement may have rounded newly inserted points, so use the current bounds.
+                const BoundingBox refined_bbox(polygon.points);
                 for (size_t j = current_idx + 1; j < modifier_polygons.size(); ++j) {
+                    if (!refined_bbox.overlap(BoundingBox(modifier_polygons[j].points)))
+                        continue;
                     if (!intersection(Polygons{polygon}, Polygons{modifier_polygons[j]}).empty()) {
                         warnings->multiple_intersections.store(true, std::memory_order_relaxed);
                         break;  // one extra intersection is enough to trigger the warning
@@ -966,6 +866,8 @@ std::optional<Point> insert_strong_seam_point(
         };
         for (size_t modifier_polygon_idx = 0; modifier_polygon_idx < modifier_polygons.size(); ++modifier_polygon_idx) {
             const Polygon &modifier_polygon = modifier_polygons[modifier_polygon_idx];
+            if (!perimeter_bbox.overlap(BoundingBox(modifier_polygon.points)))
+                continue;
             // Find intersection with perimeter
             Polygons intersection_polygons = intersection(Polygons{polygon}, Polygons{modifier_polygon});
 
@@ -1006,8 +908,8 @@ std::optional<Point> insert_strong_seam_point(
                 std::optional<std::pair<Point, size_t>> target;
                 switch (modifier_volume->type()) {
                     case ModelVolumeType::PRECISE_SEAM_CENTER: target = segment_center(segment.value(), polygon); break;
-                    case ModelVolumeType::PRECISE_SEAM_LEFT:   target = segment_left(segment.value(), polygon);   break;
-                    case ModelVolumeType::PRECISE_SEAM_RIGHT:  target = segment_right(segment.value(), polygon);  break;
+                    case ModelVolumeType::PRECISE_SEAM_LEFT:   target = segment_left(segment.value());   break;
+                    case ModelVolumeType::PRECISE_SEAM_RIGHT:  target = segment_right(segment.value());  break;
                     default: continue;
                 }
 
@@ -1072,7 +974,6 @@ static EnforcedBlockedSeamPoint convert_weak_modifier_type(ModelVolumeType type)
 // Split enforced edges into small segments (≤ enforcer_oversampling_distance) for precise seam placement
 // Return ordered vector of segments with updated coordinates (in same order as weak_volumes list)
 std::vector<WeakModifierSegment> collect_weak_modifier_segments(
-    const std::vector<const ModelVolume*> &strong_volumes,
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
     const Layer *layer,
@@ -1091,6 +992,9 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     // offset to get the correct index into the cache.
     const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
     size_t layer_id = layer->id() - raft_layers;
+
+    // The perimeter is not modified until all weak segments have been collected.
+    const BoundingBox perimeter_bbox(polygon.points);
 
     // Iterate through all weak modifiers in hierarchy order
     for (const ModelVolume* modifier_volume : weak_volumes) {
@@ -1126,6 +1030,9 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
 
         // Iterate through all modifier polygons on this layer
         for (const Polygon &modifier_polygon : modifier_polygons) {
+            // Preserve touching and contained pairs for the existing clipping and warning logic.
+            if (!perimeter_bbox.overlap(BoundingBox(modifier_polygon.points)))
+                continue;
             // Find intersection with perimeter
             Polygons intersection_polygons = intersection(Polygons{polygon}, Polygons{modifier_polygon});
 
@@ -1165,10 +1072,10 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
                 }
 
                 // Get left (first) point of segment
-                std::optional<std::pair<Point, size_t>> left = segment_left(segment.value(), polygon);
+                std::optional<std::pair<Point, size_t>> left = segment_left(segment.value());
 
                 // Get right (last) point of segment
-                std::optional<std::pair<Point, size_t>> right = segment_right(segment.value(), polygon);
+                std::optional<std::pair<Point, size_t>> right = segment_right(segment.value());
 
                 // If both boundaries found, add segment to result
                 if (left.has_value() && right.has_value()) {
@@ -1231,10 +1138,6 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
               });
 
     // 4. Insert points in descending arc length order
-    // Preparation: reserve memory for boundary points (used for refine_at_vertex)
-    std::vector<std::pair<Point, int>> boundary_points;
-    boundary_points.reserve(points_to_insert.size());
-
     std::vector<bool> segment_valid(result.size(), true);
     bool any_insertion_failed = false;
 
@@ -1250,8 +1153,6 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         if (insert_result.has_value()) {
             // Update coordinates in result (if point coincided with existing vertex, take its coordinates)
             point_coords = insert_result->first;
-
-            boundary_points.emplace_back(point_coords, pt.is_left ? -1 : +1);
         } else {
             // Failed to insert point - segment becomes invalid
             segment_valid[pt.segment_idx] = false;
@@ -1259,7 +1160,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         }
     }
 
-    // 5. Process insertion result: compaction (if errors) or refinement (normal case)
+    // 5. Remove segments whose boundaries could not be inserted
     if (any_insertion_failed) {
         // Critical error: boundary point not inserted (shouldn't happen in normal conditions)
         BOOST_LOG_TRIVIAL(error) << "PreciseSeam: boundary point insertion failed, performing segment compaction";
@@ -1275,18 +1176,23 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
             }
         }
         result.resize(write_pos);
-    } else {
-        // 6. Insert additional points near segment boundaries through refine_at_vertex
-        // boundary_points ordered by descending arc length (from distant to near)
-        // Iterate polygon from end to start - matches order of points in boundary_points
-        // O(N) instead of O(N×M) searching each point through entire polygon
-        for (size_t poly_idx = polygon.size(), bp_idx = 0;
-             poly_idx-- > 0 && bp_idx < boundary_points.size(); ) {
-            if (polygon[poly_idx] == boundary_points[bp_idx].first) {
-                refine_at_vertex(poly_idx, boundary_points[bp_idx].second, polygon);
-                ++bp_idx;
-            }
+    }
+
+    // 6. Group coincident boundaries by their snapped vertex, including wraparound to vertex 0.
+    // Scan original vertices backwards so insertions cannot shift pending vertex indices.
+    // O(vertices * segments), matching the boundary lookup below; typically only a few segments.
+    for (size_t poly_idx = polygon.size(); poly_idx-- > 0; ) {
+        bool refine_before = false;
+        bool refine_after = false;
+        for (const WeakModifierSegment &segment : result) {
+            refine_before |= polygon[poly_idx] == segment.left_point;
+            refine_after |= polygon[poly_idx] == segment.right_point;
         }
+        // Insert after first: inserting before would shift the current vertex index.
+        if (refine_after)
+            refine_at_vertex(poly_idx, +1, polygon);
+        if (refine_before)
+            refine_at_vertex(poly_idx, -1, polygon);
     }
 
     // 7. Split edges in enforced zones into segments ≤ enforcer_oversampling_distance
@@ -1376,12 +1282,9 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
 // for all points inside each segment.
 void apply_weak_modifiers_to_perimeter(
     const std::vector<WeakModifierSegment> &weak_segments,
-    const Polygon &polygon,
     PrintObjectSeamData::LayerSeams &result,
     const SeamPlacerImpl::Perimeter &perimeter,
-    bool &some_point_enforced,
-    const std::vector<const ModelVolume*> *weak_volumes,
-    size_t layer_id)
+    bool &some_point_enforced)
 {
     // Get z-coordinate for unscaling boundary points
     const float z_coord = result.points[perimeter.start_index].position.z();
@@ -1423,56 +1326,6 @@ void apply_weak_modifiers_to_perimeter(
         }
     }
 }
-
-// Nudge duplicate last vertex toward previous vertex to avoid zero-length edge.
-// Modifies polygon in-place if first and last vertices coincide exactly (bitwise comparison).
-// If last vertex coincides with first, nudges it toward the previous vertex by a small amount:
-// min(0.5 * edge_length, 0.001 mm). Logs warnings if operation cannot be performed safely.
-void nudge_duplicate_vertex(Polygon &polygon)
-{
-    // Check minimum vertex count
-    if (polygon.points.size() < 2) {
-        BOOST_LOG_TRIVIAL(warning) << "nudge_duplicate_vertex: polygon has < 2 points, skipping";
-        return;
-    }
-
-    // Bitwise check if first and last vertices coincide
-    const Point &first = polygon.points.front();
-    const Point &last = polygon.points.back();
-    if (first != last) {
-        return;  // No duplicate - nothing to do
-    }
-
-    // Get second-to-last vertex
-    const Point &prev = polygon.points[polygon.points.size() - 2];
-
-    // Compute distance between last and previous vertices
-    coord_t edge_length_sq = (last - prev).squaredNorm();
-    if (edge_length_sq == 0) {
-        BOOST_LOG_TRIVIAL(warning) << "nudge_duplicate_vertex: zero distance between last two vertices";
-        return;
-    }
-
-    float edge_length = std::sqrt(float(edge_length_sq));
-
-    // Compute nudge amount: min(0.5 * edge_length, 1 micron)
-    coord_t max_nudge = scale_(0.001);  // 0.001 mm = 1 micron
-    float nudge_amount = std::min(0.5f * edge_length, float(max_nudge));
-
-    // Interpolate: new_last = last + nudge_amount * (prev - last).normalized()
-    float k = nudge_amount / edge_length;
-    Point new_last = last + (k * (prev - last).cast<float>()).cast<coord_t>();
-
-    // Verify that nudged vertex doesn't coincide with other vertices
-    if (new_last == first || new_last == prev) {
-        BOOST_LOG_TRIVIAL(warning) << "nudge_duplicate_vertex: nudged vertex coincides with another vertex, skipping";
-        return;
-    }
-
-    // Apply the change
-    polygon.points.back() = new_last;
-}
-
 
 // Restore precise seam positions that may have been modified
 void restore_precise_seam_positions(std::vector<PrintObjectSeamData::LayerSeams> &layers) {

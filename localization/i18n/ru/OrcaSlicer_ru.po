@@ -27358,6 +27358,10 @@ msgstr ""
 #~ msgid "Right click to reset value to system default."
 #~ msgstr "Правая кнопка мыши - сброс значения до системного по умолчанию."
 
+# AI Translated
+msgid "Precise Seam"
+msgstr "Точный шов"
+
 msgid "multiple intersections with a perimeter detected"
 msgstr "обнаружены множественные пересечения с периметром"
 

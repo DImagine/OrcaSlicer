@@ -11,6 +11,7 @@
 #include "MainFrame.hpp"
 #include "Tab.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/PrintBase.hpp"
 #include "format.hpp"
 
 #include <boost/algorithm/string.hpp>
@@ -2038,6 +2039,22 @@ void NotificationManager::push_slicing_error_notification(const std::string &tex
 	push_notification_data({ NotificationType::SlicingError, NotificationLevel::ErrorNotificationLevel, 0,  _u8L("Error:") + "\n" + text, link, callback }, 0);
 	set_slicing_progress_hidden();
 }
+std::string NotificationManager::format_slicing_warning_text(const std::string &text, int warning_msg_id)
+{
+    if (warning_msg_id != PrintStateBase::SlicingPreciseSeamWarning)
+        return text;
+
+    // Precise Seam emits independent translation keys separated by newlines.
+    std::vector<std::string> parts;
+    boost::split(parts, text, boost::is_any_of("\n"));
+    for (std::string &part : parts) {
+        // gettext("") returns the catalog header; preserve blank lines without translating them.
+        if (!part.empty())
+            part = _u8L(part.c_str());
+    }
+    return boost::join(parts, "\n");
+}
+
 void NotificationManager::push_slicing_warning_notification(const std::string& text, bool gray, ModelObject const * obj, ObjectID oid, int warning_step, int warning_msg_id, NotificationLevel level/* = NotificationLevel::WarningNotificationLevel*/)
 {
 	std::function<bool(wxEvtHandler*)> callback;
@@ -2054,10 +2071,11 @@ void NotificationManager::push_slicing_warning_notification(const std::string& t
 	}
     auto link = callback ? _u8L("Jump to") : "";
     if (obj) link += std::string(" [") + obj->name + "]";
-	NotificationData data { NotificationType::SlicingWarning, level, 0,  _u8L("Warning:") + "\n" + text, link, callback };
+    const std::string display_text = format_slicing_warning_text(text, warning_msg_id);
+	NotificationData data { NotificationType::SlicingWarning, level, 0,  _u8L("Warning:") + "\n" + display_text, link, callback };
 
 	data.sub_msg_id = warning_msg_id;
-	data.ori_text = text;
+	data.ori_text = display_text;
 
 	auto notification = std::make_unique<NotificationManager::ObjectIDNotification>(data, m_id_provider, m_evt_handler);
 	notification->object_id = oid;
@@ -3084,7 +3102,9 @@ bool NotificationManager::push_notification_data(std::unique_ptr<NotificationMan
 	bool retval = false;
 	if (this->activate_existing(notification.get())) {
 		if (m_initialized && m_imgui_ready) {
-			if (notification->get_type() == NotificationType::SlicingWarning) {
+			// Precise Seam already aggregates all causes; replace it on repeated warning events.
+			if (notification->get_type() == NotificationType::SlicingWarning &&
+                notification->get_data().sub_msg_id != PrintStateBase::SlicingPreciseSeamWarning) {
 				m_pop_notifications.back()->append(notification->get_data().ori_text);
 			} else {
                 m_pop_notifications.back()->update(notification->get_data());

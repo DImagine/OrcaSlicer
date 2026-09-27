@@ -85,6 +85,7 @@ public:
         // A non-current warning will either become current or it will be removed at the end of a milestone.
         bool 			current;
         // Message to be shown to the user, UTF8, localized.
+        // SlicingPreciseSeamWarning instead stores newline-separated keys for GUI display-time translation.
         std::string     message;
         // If message_id == 0, then the message is expected to identify the warning uniquely.
         // Otherwise message_id identifies the message. For example, if the message contains a varying number, then

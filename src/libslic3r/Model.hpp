@@ -1063,8 +1063,7 @@ protected:
     friend class SLAPrint;
     friend class Model;
 	friend class ModelObject;
-    friend void model_volume_list_update_supports(ModelObject& model_object_dst, const ModelObject& model_object_new);
-    friend void model_volume_list_update_precise_seam(ModelObject& model_object_dst, const ModelObject& model_object_new);
+    friend void model_volume_list_update_supports_and_seams(ModelObject& model_object_dst, const ModelObject& model_object_new);
 
 	// Copies IDs of both the ModelVolume and its config.
 	explicit ModelVolume(const ModelVolume &rhs) = default;

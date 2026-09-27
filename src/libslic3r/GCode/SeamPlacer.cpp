@@ -415,7 +415,8 @@ struct GlobalModelInfo {
 ;
 
 //Extract perimeter polygons of the given layer
-Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerRegion*> &corresponding_regions_out) {
+Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerRegion*> &corresponding_regions_out,
+                                   bool has_precise_seam_modifiers) {
   Polygons polygons;
   for (const LayerRegion *layer_region : layer->regions()) {
     for (const ExtrusionEntity *ex_entity : layer_region->perimeters.entities) {
@@ -452,6 +453,18 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
     }
   }
 
+  if (has_precise_seam_modifiers) {
+    // Extrusion loops repeat their start point; Polygon closes the contour implicitly.
+    // Normalize here for Precise Seam without changing ordinary seam candidates.
+    for (Polygon &polygon : polygons) {
+      // Adjacent extrusion paths share endpoints; zero-length edges would prevent refinement at their junctions.
+      // Remove only consecutive duplicates, preserving distinct visits to a self-touching contour point.
+      polygon.points.erase(std::unique(polygon.points.begin(), polygon.points.end()), polygon.points.end());
+      while (polygon.size() > 1 && polygon.points.front() == polygon.points.back())
+        polygon.points.pop_back();
+    }
+  }
+
   if (polygons.empty()) { // If there are no perimeter polygons for whatever reason (disabled perimeters .. ) insert dummy point
     // it is easier than checking everywhere if the layer is not emtpy, no seam will be placed to this layer anyway
     polygons.emplace_back(Points{ { 0, 0 } });
@@ -463,7 +476,7 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
 
 // Build SeamCandidates for each vertex of the perimeter polygon and attach them to a shared Perimeter.
 // For each vertex: computes position, angle, and type (Enforcer / Blocker / Neutral).
-// When Precise Seam modifiers are present: nudges duplicate vertex, inserts strong seam point,
+// When Precise Seam modifiers are present: inserts strong seam point,
 // oversamples enforcer edges, applies weak modifiers, marks one enforced point as central for alignment.
 void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const LayerRegion *region,
                                const GlobalModelInfo &global_model_info, PrintObjectSeamData::LayerSeams &result,
@@ -473,12 +486,6 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   }
   Polygon polygon = orig_polygon;
   bool was_clockwise = polygon.make_counter_clockwise();
-  // NOTE: In OrcaSlicer (as in upstream Slic3r) polygons are conceptually closed but stored without
-  // repeating the first vertex. At this point in the pipeline we consistently receive polygons whose
-  // first and last points coincide, creating a zero-length edge. Ideally such inputs should be rebuilt
-  // (drop the duplicate or remodel this contour as a Polyline), but until that contract is enforced we
-  // nudge the duplicate slightly toward the previous vertex before running the precise seam logic; see
-  // the workaround later here.
 
   // Process Precise Seam modifiers to find seam placement
   const Layer* layer = region ? region->layer() : nullptr;
@@ -486,11 +493,6 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   // Use pre-computed Precise Seam volumes from global_model_info (computed once in init)
   const auto& strong_volumes = global_model_info.precise_seam_strong_volumes;
   const auto& weak_volumes = global_model_info.precise_seam_weak_volumes;
-
-  // Apply vertex nudging workaround only when precise seam modifiers are present
-  if (!strong_volumes.empty() || !weak_volumes.empty()) {
-      PreciseSeam::nudge_duplicate_vertex(polygon);
-  }
 
   // Use pre-sliced cache from global_model_info instead of re-slicing on every call
   auto seam_point = PreciseSeam::insert_strong_seam_point(strong_volumes, polygon, layer, global_model_info.precise_seam_slices, warnings);
@@ -505,7 +507,7 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   // Process weak modifiers (ENFORCED/BLOCKED/NEUTRAL) only if no strong modifier was inserted
   std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
   if (!inserted_seam_position.has_value()) {
-    weak_segments = PreciseSeam::collect_weak_modifier_segments(strong_volumes, weak_volumes, polygon, layer, global_model_info.precise_seam_slices, warnings);
+    weak_segments = PreciseSeam::collect_weak_modifier_segments(weak_volumes, polygon, layer, global_model_info.precise_seam_slices, warnings);
   }
 
   float angle_arm_len = region != nullptr ? region->flow(FlowRole::frExternalPerimeter).nozzle_diameter() : 0.5f;
@@ -579,14 +581,12 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   // Apply weak modifiers if no strong modifier was inserted
   if (!inserted_seam_position.has_value() && !weak_segments.empty()) {
     PreciseSeam::apply_weak_modifiers_to_perimeter(
-        weak_segments, polygon, result, perimeter, some_point_enforced,
-        &weak_volumes, layer ? layer->id() : 0);
+        weak_segments, result, perimeter, some_point_enforced);
   }
 
   if (some_point_enforced) {
-    // We will patches of enforced points (patch: continuous section of enforced points), choose
-    // the longest patch, and select the middle point or sharp point (depending on the angle)
-    // this point will have high priority on this perimeter
+    // Choose the continuous enforced patch with the most candidates, then select its middle
+    // candidate or a sharp corner. Patch length here is a point count, not geometric distance.
     size_t perimeter_size = perimeter.end_index - perimeter.start_index;
     const auto next_index = [&](size_t idx) {
       return perimeter.start_index + Slic3r::next_idx_modulo(idx - perimeter.start_index, perimeter_size);
@@ -617,7 +617,9 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
       std::pair<size_t, size_t> longest_patch { 0, 0 };
       auto patch_len = [perimeter_size](const std::pair<size_t, size_t> &start_end) {
         if (start_end.second < start_end.first) {
-          return start_end.first + (perimeter_size - start_end.second);
+          // Count [start, end) across the closing edge, independently of the contour's start.
+          // Subtract indices first: they are offsets in the layer, not local perimeter indices.
+          return perimeter_size - (start_end.first - start_end.second);
         } else {
           return start_end.second - start_end.first;
         }
@@ -1080,7 +1082,9 @@ void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerI
                         auto unscaled_z = layer->slice_z;
                         std::vector<const LayerRegion*> regions;
                         //NOTE corresponding region ptr may be null, if the layer has zero perimeters
-                        Polygons polygons = extract_perimeter_polygons(layer, regions);
+                        const bool has_precise_seam_modifiers = !global_model_info.precise_seam_strong_volumes.empty() ||
+                                                               !global_model_info.precise_seam_weak_volumes.empty();
+                        Polygons polygons = extract_perimeter_polygons(layer, regions, has_precise_seam_modifiers);
                         for (size_t poly_index = 0; poly_index < polygons.size(); ++poly_index) {
                           process_perimeter_polygon(polygons[poly_index], unscaled_z,
                                                     regions[poly_index], global_model_info, layer_seams,
@@ -1584,7 +1588,8 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
       const bool tb = precise_seam_warnings.through_body.load(std::memory_order_relaxed);
       const bool mc = precise_seam_warnings.multiply_connected.load(std::memory_order_relaxed);
       const bool fc = precise_seam_warnings.full_containment.load(std::memory_order_relaxed);
-      // Build warning from independent parts, joined by "; ".
+      // Store one translation key per line for translation when the GUI displays the warning.
+      // Keep a single warning event, and readable source text for CLI consumers.
       // NOTE: Russian translations exist in localization/i18n/ru/OrcaSlicer_ru.po
       // and must be updated when these messages change.
       std::vector<std::string> parts;
@@ -1597,12 +1602,12 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
       if (fc)
           parts.push_back(L("perimeter is fully contained inside modifier and was ignored"));
       if (!parts.empty()) {
-          std::string warning_text = "Precise Seam: ";
-          for (size_t i = 0; i < parts.size(); ++i) {
-              if (i > 0) warning_text += "; ";
-              warning_text += parts[i];
+          std::string warning_text = L("Precise Seam");
+          for (const std::string &part : parts) {
+              warning_text += '\n';
+              warning_text += part;
           }
-          warning_text += ". ";
+          warning_text += '\n';
           warning_text += L("Seam placement may differ from expected.");
           print.active_step_add_warning(
               PrintStateBase::WarningLevel::NON_CRITICAL,

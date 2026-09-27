@@ -1945,26 +1945,10 @@ bool ObjectList::can_drop(const wxDataViewItem& item, int& src_obj_id, int& src_
         if (dragged_item_v_type == item_v_type && dragged_item_v_type != ModelVolumeType::MODEL_PART)
             return true;
 
-        // Special handling for Precise Seam modifiers: allow drag&drop within same group (strong↔strong or weak↔weak)
-        const int obj_idx = m_dragged_data.obj_idx();
-        const int dragged_vol_idx = m_dragged_data.sub_obj_idx();
-        const int target_vol_idx = m_objects_model->GetVolumeIdByItem(item);
-
-        if (obj_idx >= 0 && obj_idx < int(m_objects->size()) &&
-            dragged_vol_idx >= 0 && target_vol_idx >= 0) {
-            const auto& volumes = (*m_objects)[obj_idx]->volumes;
-            if (dragged_vol_idx >= int(volumes.size()) || target_vol_idx >= int(volumes.size()))
-                return false;
-            ModelVolume* dragged_vol = volumes[dragged_vol_idx];
-            ModelVolume* target_vol  = volumes[target_vol_idx];
-
-            if (dragged_vol->is_precise_seam() && target_vol->is_precise_seam()) {
-                // Allow drop only if both volumes are in the same group (strong or weak)
-                bool dragged_strong = dragged_vol->is_precise_seam_strong();
-                bool target_strong  = target_vol->is_precise_seam_strong();
-                return dragged_strong == target_strong; // same group → allow, different groups → block
-            }
-        }
+        // Use tree item types: hidden cut connectors make tree indices differ from volumes indices.
+        if (is_precise_seam(dragged_item_v_type) && is_precise_seam(item_v_type))
+            // Allow reordering only within the strong or weak modifier group.
+            return is_precise_seam_strong(dragged_item_v_type) == is_precise_seam_strong(item_v_type);
 
         if ((dragged_item_v_type != item_v_type) ||   // we can't reorder volumes outside of types
             item_v_type >= ModelVolumeType::SUPPORT_BLOCKER)        // support blockers/enforcers can't change its place
@@ -2055,10 +2039,43 @@ void ObjectList::OnDrop(wxDataViewEvent &event)
         int to_volume_id   = m_objects_model->GetVolumeIdByItem(item);
         int delta          = to_volume_id < from_volume_id ? -1 : 1;
 
-        auto &volumes = (*m_objects)[m_dragged_data.obj_idx()]->volumes;
+        const int obj_idx = m_dragged_data.obj_idx();
+        // Object-indexed UI maps may be stale after another object is removed or reordered.
+        if (obj_idx < 0 || size_t(obj_idx) >= m_objects->size()) {
+            event.Veto();
+            m_dragged_data.clear();
+            return;
+        }
+        const ModelObject *object = (*m_objects)[obj_idx];
+        auto &volumes = (*m_objects)[obj_idx]->volumes;
+        std::vector<size_t> visible_volume_indices;
+        visible_volume_indices.reserve(volumes.size());
+        for (size_t idx = 0; idx < volumes.size(); ++idx)
+            // Match add_volumes_to_object_in_list: only connectors of cut objects are hidden.
+            if (!(object->is_cut() && volumes[idx]->is_cut_connector()))
+                visible_volume_indices.push_back(idx);
 
-        int cnt = 0;
-        for (int id = from_volume_id; cnt < abs(from_volume_id - to_volume_id); id += delta, cnt++) std::swap(volumes[id], volumes[id + delta]);
+        // Validate the entire move before any swap; these checks must also protect Release builds.
+        if (from_volume_id < 0 || to_volume_id < 0 ||
+            size_t(from_volume_id) >= visible_volume_indices.size() || size_t(to_volume_id) >= visible_volume_indices.size()) {
+            event.Veto();
+            m_dragged_data.clear();
+            return;
+        }
+
+        // Move through visible slots only, keeping hidden cut connectors at their original indices.
+        // The local mapping stays valid because no hidden volume changes slots during the move.
+        for (int id = from_volume_id; id != to_volume_id; id += delta) {
+            const size_t current_idx = visible_volume_indices[id];
+            const size_t next_idx = visible_volume_indices[id + delta];
+            std::swap(volumes[current_idx], volumes[next_idx]);
+        }
+
+        // Later selection/filament handlers use this cache; repair it for the moved object too.
+        auto &ui_to_model = m_objects_model->get_ui_and_3d_volume_map()[obj_idx];
+        ui_to_model.clear();
+        for (size_t idx = 0; idx < visible_volume_indices.size(); ++idx)
+            ui_to_model[int(idx)] = int(visible_volume_indices[idx]);
 
         select_item(m_objects_model->ReorganizeChildren(from_volume_id, to_volume_id, m_objects_model->GetParent(item)));
 

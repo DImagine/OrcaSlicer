@@ -250,6 +250,8 @@ public:
     void close_slicing_serious_warning_notification(const std::string &text);
 	// Creates Slicing Error notification with a custom text and no fade out.
     void push_slicing_error_notification(const std::string &text, std::vector<ModelObject const *> objs);
+    // Share display-time translation between notifications and the export warning dialog.
+    static std::string format_slicing_warning_text(const std::string &text, int warning_msg_id);
 	// Creates Slicing Warning notification with a custom text and no fade out.
     void push_slicing_warning_notification(const std::string &text, bool gray, ModelObject const *obj, ObjectID oid, int warning_step, int warning_msg_id, NotificationLevel level = NotificationLevel::WarningNotificationLevel);
 	// marks slicing errors as gray
