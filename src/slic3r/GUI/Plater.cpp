@@ -6690,7 +6690,6 @@ bool emboss_svg(Plater& plater, const wxString &svg_file, const Vec2d& mouse_dro
 }
 }
 
-
 // State to manage showing after export notifications and device ejecting
 enum ExportingStatus{
     NOT_EXPORTING,
@@ -12754,14 +12753,12 @@ bool Plater::priv::warnings_dialog()
         return true;
     std::string text = _u8L("There are warnings after slicing models:") + "\n";
     for (auto const& it : current_warnings) {
+        size_t next_n = it.first.message.find_first_of('\n', 0);
         text += "\n";
-        if (it.first.message_id == PrintStateBase::SlicingPreciseSeamWarning) {
-            // Preserve and translate every warning detail, including causes after the first line.
-            text += NotificationManager::format_slicing_warning_text(it.first.message, it.first.message_id);
-        } else {
-            // Other warnings retain their existing first-line summary.
-            text += it.first.message.substr(0, it.first.message.find_first_of('\n'));
-        }
+        if (next_n != std::string::npos)
+            text += it.first.message.substr(0, next_n);
+        else
+            text += it.first.message;
     }
     //text += "\n\nDo you still wish to export?";
     MessageDialog msg_window(this->q, from_u8(text), _L("warnings"), wxOK);

@@ -20,6 +20,7 @@
 #include "libslic3r/Layer.hpp"
 
 #include "libslic3r/Geometry/Curves.hpp"
+#include "libslic3r/I18N.hpp"
 #include "libslic3r/ShortEdgeCollapse.hpp"
 #include "libslic3r/TriangleSetSampling.hpp"
 
@@ -1588,27 +1589,26 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
       const bool tb = precise_seam_warnings.through_body.load(std::memory_order_relaxed);
       const bool mc = precise_seam_warnings.multiply_connected.load(std::memory_order_relaxed);
       const bool fc = precise_seam_warnings.full_containment.load(std::memory_order_relaxed);
-      // Store one translation key per line for translation when the GUI displays the warning.
-      // Keep a single warning event, and readable source text for CLI consumers.
       // NOTE: Russian translations exist in localization/i18n/ru/OrcaSlicer_ru.po
       // and must be updated when these messages change.
       std::vector<std::string> parts;
       if (mi)
-          parts.push_back(L("multiple intersections with a perimeter detected"));
+          parts.push_back(_u8L("multiple intersections with a perimeter detected"));
       if (tb)
-          parts.push_back(L("modifier fully crosses the printable perimeter"));
+          parts.push_back(_u8L("modifier fully crosses the printable perimeter"));
       if (mc)
-          parts.push_back(L("modifier shape is not solid (has holes inside) and was ignored"));
+          parts.push_back(_u8L("modifier shape is not solid (has holes inside) and was ignored"));
       if (fc)
-          parts.push_back(L("perimeter is fully contained inside modifier and was ignored"));
+          parts.push_back(_u8L("perimeter is fully contained inside modifier and was ignored"));
       if (!parts.empty()) {
-          std::string warning_text = L("Precise Seam");
-          for (const std::string &part : parts) {
-              warning_text += '\n';
-              warning_text += part;
+          // One line: the export warnings dialog shows only the first line of each warning.
+          std::string warning_text = _u8L("Precise Seam") + ": ";
+          for (size_t i = 0; i < parts.size(); ++i) {
+              if (i > 0) warning_text += "; ";
+              warning_text += parts[i];
           }
-          warning_text += '\n';
-          warning_text += L("Seam placement may differ from expected.");
+          warning_text += ". ";
+          warning_text += _u8L("Seam placement may differ from expected.");
           print.active_step_add_warning(
               PrintStateBase::WarningLevel::NON_CRITICAL,
               warning_text,
