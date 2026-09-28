@@ -1589,8 +1589,6 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
       const bool tb = precise_seam_warnings.through_body.load(std::memory_order_relaxed);
       const bool mc = precise_seam_warnings.multiply_connected.load(std::memory_order_relaxed);
       const bool fc = precise_seam_warnings.full_containment.load(std::memory_order_relaxed);
-      // NOTE: Russian translations exist in localization/i18n/ru/OrcaSlicer_ru.po
-      // and must be updated when these messages change.
       std::vector<std::string> parts;
       if (mi)
           parts.push_back(_u8L("multiple intersections with a perimeter detected"));
