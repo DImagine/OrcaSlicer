@@ -117,6 +117,36 @@ bool append_exact_fragment(const Polyline &fragment, const Polygon &perimeter,
     }
     return false;
 }
+
+// Projection fallback: every nonzero fragment edge must match exactly one source edge.
+bool append_exact_fragment_brutforce(const Polyline &fragment, const Polygon &perimeter,
+                                    std::vector<ClippedEdgeInterval> &intervals)
+{
+    const size_t original_size = intervals.size();
+    for (size_t i = 1; i < fragment.size(); ++i) {
+        if (fragment.points[i - 1] == fragment.points[i])
+            continue;
+        std::optional<ClippedEdgeInterval> matched;
+        for (size_t edge = 0; edge < perimeter.size(); ++edge) {
+            auto candidate = interval_on_edge(fragment.points[i - 1], fragment.points[i], edge, perimeter);
+            if (!candidate)
+                continue;
+            if (matched) {
+                // Preserve earlier fragments when this fragment has an ambiguous binding.
+                intervals.resize(original_size);
+                return false;
+            }
+            matched = candidate;
+        }
+        if (!matched) {
+            // Missing bindings must not leave a partially appended fragment either.
+            intervals.resize(original_size);
+            return false;
+        }
+        intervals.push_back(*matched);
+    }
+    return true;
+}
 } // namespace
 
 SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier)
@@ -159,29 +189,10 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExP
     for (const Polyline &fragment : fragments) {
         if (append_exact_fragment(fragment, perimeter, intervals))
             continue;
-        // Keep the existing projection path for two-point and unmatched fragments.
-        for (size_t i = 1; i < fragment.size(); ++i) {
-            if (fragment.points[i - 1] == fragment.points[i])
-                continue;
-            std::optional<ClippedEdgeInterval> matched;
-            for (size_t edge = 0; edge < count; ++edge) {
-                auto candidate = interval_on_edge(fragment.points[i - 1], fragment.points[i], edge, perimeter);
-                if (!candidate)
-                    continue;
-                if (matched) {
-                    ambiguous = true;
-                    break;
-                }
-                matched = candidate;
-            }
-            if (ambiguous || !matched) {
-                ambiguous = true;
-                break;
-            }
-            intervals.push_back(*matched);
-        }
-        if (ambiguous)
+        if (!append_exact_fragment_brutforce(fragment, perimeter, intervals)) {
+            ambiguous = true;
             break;
+        }
     }
 
     if (ambiguous) {
