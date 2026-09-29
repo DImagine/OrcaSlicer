@@ -1608,4 +1608,16 @@ std::vector<Polygons> PrintObject::slice_modifier_volumes(const std::vector<cons
     return slices;
 }
 
+std::vector<ExPolygons> PrintObject::slice_single_volume_regions(const ModelVolume* volume) const
+{
+    if (volume == nullptr)
+        return {};
+    // Match the existing slicing heights and centered transform without flattening holes.
+    const std::vector<float> zs = zs_from_layers(this->layers());
+    MeshSlicingParamsEx params;
+    params.trafo = this->trafo_centered();
+    const Print *print = this->print();
+    return slice_volume(*volume, zs, params, [print]() { print->throw_if_canceled(); });
+}
+
 } // namespace Slic3r

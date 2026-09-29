@@ -66,6 +66,68 @@ void require_vertex(const Polygon &polygon, const Point &point)
 }
 } // namespace
 
+TEST_CASE("A simple clipped interval has consistent geometry before and after weak boundary insertion", "[PreciseSeam][SegmentExtraction]")
+{
+    const bool corner = GENERATE(false, true);
+    SeamFixture fixture;
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    const Polygon cut = corner ? rectangle(-2, -2, 4, 4) : rectangle(2, -2, 8, 2);
+    const Point expected_begin = corner ? mm(0, 4) : mm(2, 0);
+    const Point expected_end = corner ? mm(4, 0) : mm(8, 0);
+    const auto extracted = PreciseSeam::extract_perimeter_segments(perimeter, ExPolygons{ExPolygon(cut)});
+    REQUIRE(extracted.valid);
+    REQUIRE(extracted.segments.size() == 1);
+    CHECK(extracted.segments.front().polyline.points.front() == expected_begin);
+    CHECK(extracted.segments.front().polyline.points.back() == expected_end);
+    // The public consumer still follows the established path; both use the same analytic fixture.
+    const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {cut});
+    const auto applied = PreciseSeam::collect_weak_modifier_segments({modifier}, perimeter, fixture.layer, fixture.cache);
+    REQUIRE(applied.size() == 1);
+    CHECK(applied.front().left_point == expected_begin);
+    CHECK(applied.front().right_point == expected_end);
+    check_square_boundary(perimeter);
+}
+
+TEST_CASE("Structured modifier slices keep holes with their component and preserve sliced area", "[PreciseSeam][SegmentExtraction]")
+{
+    SeamFixture fixture;
+    TriangleMesh shell = Test::cube(10);
+    TriangleMesh cavity = Test::cube(6);
+    cavity.translate(2., 2., -1.);
+    cavity.flip_triangles();
+    shell.merge(cavity);
+    TriangleMesh island = Test::cube(2);
+    island.translate(30., 0., 0.);
+    shell.merge(island);
+    // The layer intersects an annulus and a separate island, with areas 100-36 and 4 mm^2.
+    ModelVolume *volume = fixture.modifiers.objects.front()->add_volume(shell);
+    PrintObject *object = fixture.print.get_object(0);
+    PreciseSeam::ModifierRegionsCache cache;
+    cache.emplace(volume, object->slice_single_volume_regions(volume));
+    const auto &layers = cache.at(volume);
+    REQUIRE(layers.size() == 1);
+    REQUIRE(layers.front().size() == 2);
+    size_t holes = 0;
+    double area = 0.;
+    for (const ExPolygon &region : layers.front()) {
+        holes += region.holes.size();
+        CHECK(region.contour.is_counter_clockwise());
+        for (const Polygon &hole : region.holes)
+            CHECK(hole.is_clockwise());
+        area += region.area();
+    }
+    CHECK(holes == 1);
+    CHECK_THAT(area / double(scale_(1.)) / double(scale_(1.)), Catch::Matchers::WithinAbs(68., 1e-4));
+    // The established flattened API remains available to support and legacy seam consumers.
+    const auto flat_layers = object->slice_single_volume(volume);
+    REQUIRE(flat_layers.size() == 1);
+    CHECK(flat_layers.front().size() == 3);
+    double flat_area = 0.;
+    for (const Polygon &contour : flat_layers.front())
+        flat_area += contour.area();
+    CHECK_THAT(flat_area, Catch::Matchers::WithinAbs(area, 1.));
+}
+
 TEST_CASE("Strong seam modes select the requested location on a clipped side", "[PreciseSeam]")
 {
     const auto mode = GENERATE(ModelVolumeType::PRECISE_SEAM_LEFT, ModelVolumeType::PRECISE_SEAM_CENTER,

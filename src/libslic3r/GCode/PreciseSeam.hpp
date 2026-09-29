@@ -51,6 +51,8 @@ using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 // Pre-sliced modifier cache: ModelVolume pointer → per-layer Polygons.
 // Built once in SeamPlacer::init(), then passed read-only into per-perimeter functions.
 using ModifierSlicesCache = std::unordered_map<const ModelVolume*, std::vector<Polygons>>;
+// Structured slices for the new extractor; legacy consumers keep their existing cache until migration.
+using ModifierRegionsCache = std::unordered_map<const ModelVolume*, std::vector<ExPolygons>>;
 
 // Warning flags set during Precise Seam processing (thread-safe)
 struct PreciseSeamWarnings {
@@ -65,6 +67,33 @@ struct SegmentData {
     Polyline segment;                         // Points from intersection_polygon forming the segment
     std::vector<size_t> perimeter_edge_indices; // edge_index for each point in segment
 };
+
+// A vertex is represented by its outgoing edge and parameter zero, including vertex 0.
+struct PerimeterPosition {
+    size_t edge_index;
+    double parameter;
+};
+
+struct PerimeterSegment {
+    Polyline polyline;
+    // One original edge per polyline interval; repeated coordinates retain their occurrence.
+    std::vector<size_t> edge_indices;
+    PerimeterPosition begin;
+    PerimeterPosition end;
+    double length = 0.; // Euclidean arc length in scaled coordinates, not squared length.
+};
+
+struct SegmentExtraction {
+    std::vector<PerimeterSegment> segments;
+    bool full_containment = false;
+    bool valid = true; // Invalid input or failed provenance recovery is not an empty intersection.
+};
+
+// Clip an immutable, implicitly closed perimeter against each nearby modifier region.
+// Each exterior keeps its holes; disjoint region bounds are rejected before clipping.
+// Outer contours and holes use nonzero winding. The perimeter must have at least three
+// vertices and no consecutive duplicates; either traversal direction is accepted.
+SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier);
 
 // Result of weak modifier segment processing
 struct WeakModifierSegment {

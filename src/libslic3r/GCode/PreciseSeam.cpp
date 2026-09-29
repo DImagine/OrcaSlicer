@@ -21,6 +21,199 @@ static constexpr double MACHINE_PRECISION_SQUARED = 2.5;
 static const coord_t TOLERANCE_LINEAR = scale_(0.001);  // 1.0 micrometers
 static const coord_t TOLERANCE_SQUARED = TOLERANCE_LINEAR * TOLERANCE_LINEAR;
 
+namespace {
+struct ClippedEdgeInterval {
+    size_t edge;
+    double begin;
+    double end;
+    Point first;
+    Point last;
+};
+
+// Use the existing clipping tolerance only to recover rounded coordinates, not to
+// bridge gaps between intervals: even a small uncovered interval must remain a gap.
+std::optional<double> parameter_on_edge(const Point &point, const Point &a, const Point &b)
+{
+    const Vec2d direction = b.cast<double>() - a.cast<double>();
+    const Vec2d offset = point.cast<double>() - a.cast<double>();
+    const double squared_length = direction.squaredNorm();
+    if (squared_length == 0.)
+        return std::nullopt;
+    const double parameter = std::clamp(offset.dot(direction) / squared_length, 0., 1.);
+    if ((offset - parameter * direction).squaredNorm() > MACHINE_PRECISION_SQUARED)
+        return std::nullopt;
+    return parameter;
+}
+
+std::optional<ClippedEdgeInterval> interval_on_edge(
+    const Point &first, const Point &last, size_t edge, const Polygon &perimeter)
+{
+    const Point &a = perimeter.points[edge];
+    const Point &b = perimeter.points[(edge + 1) % perimeter.size()];
+    const auto t0 = parameter_on_edge(first, a, b);
+    const auto t1 = parameter_on_edge(last, a, b);
+    if (!t0 || !t1 || *t0 == *t1)
+        return std::nullopt;
+    ClippedEdgeInterval interval{edge, *t0, *t1, first, last};
+    if (interval.begin > interval.end) {
+        std::swap(interval.begin, interval.end);
+        std::swap(interval.first, interval.last);
+    }
+    // Canonical endpoints make adjacent original edges join at their shared vertex.
+    if (interval.begin == 0.) interval.first = a;
+    if (interval.end == 1.) interval.last = b;
+    return interval;
+}
+} // namespace
+
+SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier)
+{
+    SegmentExtraction result;
+    const size_t count = perimeter.size();
+    if (count < 3) {
+        result.valid = false;
+        return result;
+    }
+    for (size_t edge = 0; edge < count; ++edge) {
+        if (perimeter.points[edge] == perimeter.points[(edge + 1) % count]) {
+            result.valid = false;
+            return result;
+        }
+    }
+    const BoundingBox perimeter_bounds(perimeter.points);
+    std::vector<const ExPolygon*> nearby_regions;
+    for (const ExPolygon &region : modifier)
+        if (!region.empty() && perimeter_bounds.overlap(BoundingBox(region.contour.points)))
+            nearby_regions.push_back(&region);
+    if (nearby_regions.empty())
+        return result;
+
+    // The open overload avoids coordinate-only recombination at self-touching vertices.
+    Polyline source;
+    source.points = perimeter.points;
+    source.points.push_back(source.points.front());
+    std::vector<ClippedEdgeInterval> intervals;
+    // Repeated vertices can lose visit identity inside the clipper itself; retain it
+    // from the outset instead of waiting for an ambiguous output coordinate.
+    std::unordered_map<Point, size_t, PointHash> occurrences;
+    bool ambiguous = false;
+    for (size_t i = 0; i < count; ++i)
+        if (!occurrences.emplace(perimeter.points[i], i).second)
+            ambiguous = true;
+    Polylines fragments;
+    if (!ambiguous) {
+        // Clip only accepted regions, with their holes still attached to the exterior.
+        for (const ExPolygon *region : nearby_regions) {
+            Polylines clipped = intersection_pl(source, *region);
+            for (Polyline &fragment : clipped)
+                fragments.push_back(std::move(fragment));
+        }
+    }
+    for (const Polyline &fragment : fragments) {
+        for (size_t i = 1; i < fragment.size(); ++i) {
+            if (fragment.points[i - 1] == fragment.points[i])
+                continue;
+            std::optional<ClippedEdgeInterval> matched;
+            for (size_t edge = 0; edge < count; ++edge) {
+                auto candidate = interval_on_edge(fragment.points[i - 1], fragment.points[i], edge, perimeter);
+                if (!candidate)
+                    continue;
+                if (matched) {
+                    ambiguous = true;
+                    break;
+                }
+                matched = candidate;
+            }
+            if (ambiguous || !matched) {
+                ambiguous = true;
+                break;
+            }
+            intervals.push_back(*matched);
+        }
+        if (ambiguous)
+            break;
+    }
+
+    if (ambiguous) {
+        // Clipping each edge preserves provenance when coordinates identify several
+        // visits, or when clipping has collapsed multiple collinear source edges.
+        intervals.clear();
+        for (size_t edge = 0; edge < count; ++edge) {
+            Polyline line;
+            line.points = {perimeter.points[edge], perimeter.points[(edge + 1) % count]};
+            for (const ExPolygon *region : nearby_regions) {
+                for (const Polyline &fragment : intersection_pl(line, *region)) {
+                    for (size_t i = 1; i < fragment.size(); ++i) {
+                        if (fragment.points[i - 1] == fragment.points[i])
+                            continue;
+                        auto interval = interval_on_edge(fragment.points[i - 1], fragment.points[i], edge, perimeter);
+                        if (!interval) {
+                            result.valid = false;
+                            return result;
+                        }
+                        intervals.push_back(*interval);
+                    }
+                }
+            }
+        }
+    }
+
+    std::sort(intervals.begin(), intervals.end(), [](const auto &a, const auto &b) {
+        if (a.edge != b.edge) return a.edge < b.edge;
+        if (a.begin != b.begin) return a.begin < b.begin;
+        return a.end < b.end;
+    });
+    // Union overlaps on the same occurrence of an edge, never across equal coordinates.
+    std::vector<ClippedEdgeInterval> merged;
+    for (const ClippedEdgeInterval &interval : intervals) {
+        if (!merged.empty() && merged.back().edge == interval.edge && interval.begin <= merged.back().end) {
+            if (interval.end > merged.back().end) {
+                merged.back().end = interval.end;
+                merged.back().last = interval.last;
+            }
+        } else
+            merged.push_back(interval);
+    }
+    const auto position = [count](size_t edge, double parameter) {
+        return parameter == 1. ? PerimeterPosition{(edge + 1) % count, 0.}
+                               : PerimeterPosition{edge, parameter};
+    };
+    const auto same_position = [](const PerimeterPosition &a, const PerimeterPosition &b) {
+        return a.edge_index == b.edge_index && a.parameter == b.parameter;
+    };
+    for (const ClippedEdgeInterval &interval : merged) {
+        const auto begin = position(interval.edge, interval.begin);
+        const auto end = position(interval.edge, interval.end);
+        if (result.segments.empty() || !same_position(result.segments.back().end, begin)) {
+            PerimeterSegment segment;
+            segment.begin = begin;
+            segment.polyline.points.push_back(interval.first);
+            result.segments.push_back(std::move(segment));
+        }
+        PerimeterSegment &segment = result.segments.back();
+        segment.polyline.points.push_back(interval.last);
+        segment.edge_indices.push_back(interval.edge);
+        segment.end = end;
+        segment.length += (interval.last.cast<double>() - interval.first.cast<double>()).norm();
+    }
+    if (result.segments.size() > 1 && same_position(result.segments.back().end, result.segments.front().begin)) {
+        // Only the artificial cut at vertex zero can join the last and first intervals.
+        PerimeterSegment tail = std::move(result.segments.back());
+        result.segments.pop_back();
+        PerimeterSegment &head = result.segments.front();
+        tail.polyline.points.insert(tail.polyline.points.end(), head.polyline.points.begin() + 1, head.polyline.points.end());
+        tail.edge_indices.insert(tail.edge_indices.end(), head.edge_indices.begin(), head.edge_indices.end());
+        tail.end = head.end;
+        tail.length += head.length;
+        head = std::move(tail);
+    }
+    // A full loop must cover every original edge, not merely have equal endpoint coordinates.
+    result.full_containment = merged.size() == count;
+    for (size_t i = 0; result.full_containment && i < count; ++i)
+        result.full_containment = merged[i].edge == i && merged[i].begin == 0. && merged[i].end == 1.;
+    return result;
+}
+
 // Find common segment between intersection polygon and object perimeter
 //
 // REQUIREMENTS:

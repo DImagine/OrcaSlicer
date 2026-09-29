@@ -474,6 +474,8 @@ public:
     std::vector<Polygons>       slice_modifier_volumes(const std::vector<const ModelVolume*> &volumes) const;
     // Keep Precise Seam volumes separate so their individual priority is preserved.
     std::vector<Polygons>       slice_single_volume(const ModelVolume* volume) const { return this->slice_modifier_volumes({volume}); }
+    // Preserve each connected region and its holes for perimeter clipping.
+    std::vector<ExPolygons>     slice_single_volume_regions(const ModelVolume* volume) const;
 
     // Helpers to project custom facets on slices
     void project_and_append_custom_facets(bool seam, EnforcerBlockerType type, std::vector<Polygons>& expolys, std::vector<std::pair<Vec3f,Vec3f>>* vertical_points=nullptr) const;
