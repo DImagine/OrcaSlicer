@@ -1589,7 +1589,10 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
       const bool tb = precise_seam_warnings.through_body.load(std::memory_order_relaxed);
       const bool mc = precise_seam_warnings.multiply_connected.load(std::memory_order_relaxed);
       const bool fc = precise_seam_warnings.full_containment.load(std::memory_order_relaxed);
+      const bool failed = precise_seam_warnings.intersection_processing_failed.load(std::memory_order_relaxed);
       std::vector<std::string> parts;
+      if (failed)
+          parts.push_back(_u8L("unable to process intersection"));
       if (mi)
           parts.push_back(_u8L("multiple intersections with a perimeter detected"));
       if (tb)

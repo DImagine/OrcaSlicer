@@ -1,4 +1,5 @@
 #include "PreciseSeam.hpp"
+#include "PreciseSeamInternal.hpp"
 #include "SeamPlacer.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include <algorithm>
@@ -21,14 +22,7 @@ static constexpr double MACHINE_PRECISION_SQUARED = 2.5;
 static const coord_t TOLERANCE_LINEAR = scale_(0.001);  // 1.0 micrometers
 static const coord_t TOLERANCE_SQUARED = TOLERANCE_LINEAR * TOLERANCE_LINEAR;
 
-namespace {
-struct ClippedEdgeInterval {
-    size_t edge;
-    double begin;
-    double end;
-    Point first;
-    Point last;
-};
+namespace detail {
 
 // Use the existing clipping tolerance only to recover rounded coordinates, not to
 // bridge gaps between intervals: even a small uncovered interval must remain a gap.
@@ -121,42 +115,93 @@ bool append_exact_fragment(const Polyline &fragment, const Polygon &perimeter,
     return false;
 }
 
-// Projection fallback; two-point fragments accept the first matching source edge.
+// Find the first edge once, then follow the contour without restarting a global search.
 bool append_exact_fragment_brutforce(const Polyline &fragment, const Polygon &perimeter,
-                                    std::vector<ClippedEdgeInterval> &intervals)
+                                    std::vector<ClippedEdgeInterval> &intervals,
+                                    FragmentBindingFailure &failure)
 {
     const size_t original_size = intervals.size();
+    bool forward = true;
+    const size_t count = perimeter.size();
     for (size_t i = 1; i < fragment.size(); ++i) {
         if (fragment.points[i - 1] == fragment.points[i])
             continue;
+        failure.pair_index = i - 1;
         std::optional<ClippedEdgeInterval> matched;
-        for (size_t edge = 0; edge < perimeter.size(); ++edge) {
-            auto candidate = interval_on_edge(fragment.points[i - 1], fragment.points[i], edge, perimeter);
-            if (!candidate)
-                continue;
-            if (matched) {
-                // Preserve earlier fragments when this fragment has an ambiguous binding.
-                intervals.resize(original_size);
-                return false;
+        const auto is_forward = [&](const ClippedEdgeInterval &candidate) {
+            const Vec2d movement = fragment.points[i].cast<double>() - fragment.points[i - 1].cast<double>();
+            const Vec2d edge = perimeter.points[(candidate.edge + 1) % count].cast<double>() -
+                               perimeter.points[candidate.edge].cast<double>();
+            return movement.dot(edge) > 0.;
+        };
+        if (intervals.size() == original_size) {
+            failure.reason = "initial edge not found";
+            for (size_t edge = 0; edge < count; ++edge) {
+                matched = interval_on_edge(fragment.points[i - 1], fragment.points[i], edge, perimeter);
+                if (matched) {
+                    // The first suitable edge defines orientation; overlapping visits are unsupported.
+                    forward = is_forward(*matched);
+                    break;
+                }
             }
-            matched = candidate;
-            // Overlapping source edges are outside the two-point binding contract.
-            if (fragment.size() == 2)
-                break;
+        } else {
+            failure.reason = "non-continuous binding";
+            const ClippedEdgeInterval &previous = intervals.back();
+            const double end = forward ? previous.end : previous.begin;
+            matched = interval_on_edge(fragment.points[i - 1], fragment.points[i], previous.edge, perimeter);
+            if (matched && (is_forward(*matched) != forward ||
+                            (forward ? matched->begin : matched->end) != end))
+                matched.reset();
+            // Crossing to the neighbor is allowed only at their actual shared vertex.
+            const size_t vertex = forward ? (previous.edge + 1) % count : previous.edge;
+            if (!matched && end == (forward ? 1. : 0.) && fragment.points[i - 1] == perimeter.points[vertex]) {
+                const size_t edge = forward ? vertex : (previous.edge + count - 1) % count;
+                matched = interval_on_edge(fragment.points[i - 1], fragment.points[i], edge, perimeter);
+                if (matched && (is_forward(*matched) != forward ||
+                                (forward ? matched->begin != 0. : matched->end != 1.)))
+                    matched.reset();
+            }
         }
         if (!matched) {
-            // Missing bindings must not leave a partially appended fragment either.
+            // Never leave a partial fragment or discard earlier successful fragments.
             intervals.resize(original_size);
             return false;
         }
         intervals.push_back(*matched);
     }
-    return true;
+    return intervals.size() > original_size;
 }
-} // namespace
 
-SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier)
+bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
+                     std::vector<ClippedEdgeInterval> &intervals,
+                     const ExtractionContext &context, size_t fragment_index)
 {
+    if (fragment.size() > 2 && append_exact_fragment(fragment, perimeter, intervals))
+        return true;
+    FragmentBindingFailure failure;
+    if (append_exact_fragment_brutforce(fragment, perimeter, intervals, failure))
+        return true;
+    if (context.warnings)
+        context.warnings->intersection_processing_failed.store(true, std::memory_order_relaxed);
+    const Layer *layer = context.layer;
+    const ModelObject *object = layer && layer->object() ? layer->object()->model_object() : nullptr;
+    // Keep a small marker for investigating a saved project, not a full geometry dump.
+    BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamIntersectionFailed] Unable to process intersection"
+        << " object=" << (object ? object->id().id : 0)
+        << " modifier=" << (context.modifier ? context.modifier->id().id : 0)
+        << " layer=" << (layer ? std::to_string(layer->id()) : "unknown")
+        << " z=" << (layer ? std::to_string(layer->slice_z) : "unknown")
+        << " fragment=" << fragment_index << " pair=" << failure.pair_index
+        << " reason=" << failure.reason << " fragment_points=" << fragment.size()
+        << " perimeter_points=" << perimeter.size();
+    return false;
+}
+} // namespace detail
+
+SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier,
+                                             const ExtractionContext &context)
+{
+    using detail::ClippedEdgeInterval;
     SegmentExtraction result;
     const size_t count = perimeter.size();
     if (count < 3) {
@@ -184,7 +229,6 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExP
     source.points = perimeter.points;
     source.points.push_back(source.points.front());
     std::vector<ClippedEdgeInterval> intervals;
-    bool ambiguous = false;
     Polylines fragments;
     // Clip only accepted regions, with their holes still attached to the exterior.
     for (const ExPolygon *region : nearby_regions) {
@@ -192,38 +236,9 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExP
         for (Polyline &fragment : clipped)
             fragments.push_back(std::move(fragment));
     }
-    for (const Polyline &fragment : fragments) {
-        if (fragment.size() > 2 && append_exact_fragment(fragment, perimeter, intervals))
-            continue;
-        if (!append_exact_fragment_brutforce(fragment, perimeter, intervals)) {
-            ambiguous = true;
-            break;
-        }
-    }
-
-    if (ambiguous) {
-        // Clipping each edge preserves provenance when coordinates identify several
-        // visits, or when clipping has collapsed multiple collinear source edges.
-        intervals.clear();
-        for (size_t edge = 0; edge < count; ++edge) {
-            Polyline line;
-            line.points = {perimeter.points[edge], perimeter.points[(edge + 1) % count]};
-            for (const ExPolygon *region : nearby_regions) {
-                for (const Polyline &fragment : intersection_pl(line, *region)) {
-                    for (size_t i = 1; i < fragment.size(); ++i) {
-                        if (fragment.points[i - 1] == fragment.points[i])
-                            continue;
-                        auto interval = interval_on_edge(fragment.points[i - 1], fragment.points[i], edge, perimeter);
-                        if (!interval) {
-                            result.valid = false;
-                            return result;
-                        }
-                        intervals.push_back(*interval);
-                    }
-                }
-            }
-        }
-    }
+    for (size_t i = 0; i < fragments.size(); ++i)
+        if (!detail::append_fragment(fragments[i], perimeter, intervals, context, i))
+            ++result.discarded_segments;
 
     std::sort(intervals.begin(), intervals.end(), [](const auto &a, const auto &b) {
         if (a.edge != b.edge) return a.edge < b.edge;

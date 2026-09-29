@@ -60,6 +60,14 @@ struct PreciseSeamWarnings {
     std::atomic<bool> through_body{false};            // modifier passes through the model body entirely
     std::atomic<bool> multiply_connected{false};      // modifier has holes (multiply-connected cross-section)
     std::atomic<bool> full_containment{false};        // modifier fully contains perimeter, no intersection edges
+    std::atomic<bool> intersection_processing_failed{false}; // at least one unbindable fragment was ignored
+};
+
+// Optional caller identity for concise diagnostics when an intersection is discarded.
+struct ExtractionContext {
+    const Layer *layer = nullptr;
+    const ModelVolume *modifier = nullptr;
+    PreciseSeamWarnings *warnings = nullptr;
 };
 
 // Result of finding common segment between perimeter and intersection
@@ -76,7 +84,7 @@ struct PerimeterPosition {
 
 struct PerimeterSegment {
     Polyline polyline;
-    // One original edge per polyline interval; repeated coordinates retain their occurrence.
+    // One bound source edge per polyline interval.
     std::vector<size_t> edge_indices;
     PerimeterPosition begin;
     PerimeterPosition end;
@@ -86,14 +94,16 @@ struct PerimeterSegment {
 struct SegmentExtraction {
     std::vector<PerimeterSegment> segments;
     bool full_containment = false;
-    bool valid = true; // Invalid input or failed provenance recovery is not an empty intersection.
+    bool valid = true; // Invalid perimeter input; discarded fragments do not invalidate other segments.
+    size_t discarded_segments = 0; // Failed bindings are ignored, with a warning and diagnostic marker.
 };
 
 // Clip an immutable, implicitly closed perimeter against each nearby modifier region.
 // Each exterior keeps its holes; disjoint region bounds are rejected before clipping.
 // Outer contours and holes use nonzero winding. The perimeter must have at least three
 // vertices and no consecutive duplicates; either traversal direction is accepted.
-SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier);
+SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier,
+                                             const ExtractionContext &context = {});
 
 // Result of weak modifier segment processing
 struct WeakModifierSegment {

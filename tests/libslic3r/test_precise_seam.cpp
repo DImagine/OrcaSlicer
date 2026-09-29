@@ -1,5 +1,6 @@
 #include <catch2/catch_all.hpp>
 #include "libslic3r/GCode/PreciseSeam.hpp"
+#include "libslic3r/GCode/PreciseSeamInternal.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +19,7 @@ Polygon rectangle(double x0, double y0, double x1, double y1)
 void check_provenance(const Polygon &perimeter, const PreciseSeam::SegmentExtraction &result)
 {
     REQUIRE(result.valid);
+    CHECK(result.discarded_segments == 0);
     for (const auto &segment : result.segments) {
         REQUIRE(segment.polyline.size() >= 2);
         REQUIRE(segment.edge_indices.size() + 1 == segment.polyline.size());
@@ -52,6 +54,85 @@ void check_provenance(const Polygon &perimeter, const PreciseSeam::SegmentExtrac
     }
 }
 } // namespace
+
+TEST_CASE("Projection binding follows the same edge and its neighbor in either direction", "[PreciseSeam][SegmentExtraction]")
+{
+    const bool reverse = GENERATE(false, true);
+    const bool wrap = GENERATE(false, true);
+    const Polygon perimeter = rectangle(0, 0, 10, 10);
+    Polyline fragment;
+    fragment.points = wrap ? Points{mm(0, 3), mm(0, 0), mm(3, 0), mm(6, 0)}
+                           : Points{mm(2, 0), mm(4, 0), mm(7, 0), mm(10, 0), mm(10, 3)};
+    std::vector<size_t> expected = wrap ? std::vector<size_t>{3, 0, 0} : std::vector<size_t>{0, 0, 0, 1};
+    if (reverse) {
+        std::reverse(fragment.points.begin(), fragment.points.end());
+        std::reverse(expected.begin(), expected.end());
+    }
+    std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
+    PreciseSeam::detail::FragmentBindingFailure failure;
+    REQUIRE(PreciseSeam::detail::append_exact_fragment_brutforce(fragment, perimeter, intervals, failure));
+    REQUIRE(intervals.size() == expected.size());
+    for (size_t i = 0; i < intervals.size(); ++i) {
+        CHECK(intervals[i].edge == expected[i]);
+        CHECK(intervals[i].first == fragment.points[reverse ? i + 1 : i]);
+        CHECK(intervals[i].last == fragment.points[reverse ? i : i + 1]);
+    }
+}
+
+TEST_CASE("Projection binding rolls back a fragment that reverses or leaves the contour", "[PreciseSeam][SegmentExtraction]")
+{
+    const int scenario = GENERATE(0, 1, 2);
+    const Polygon perimeter = rectangle(0, 0, 10, 10);
+    Polyline fragment;
+    fragment.points = {mm(2, 0), mm(7, 0)};
+    // Every failure follows a successful pair, exercising rollback rather than an empty result.
+    fragment.points.push_back(scenario == 0 ? mm(4, 0) : scenario == 1 ? mm(7, 3) : mm(10, 3));
+    std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals{{2, 0., 1., mm(10, 10), mm(0, 10)}};
+    PreciseSeam::detail::FragmentBindingFailure failure;
+    CHECK_FALSE(PreciseSeam::detail::append_exact_fragment_brutforce(fragment, perimeter, intervals, failure));
+    REQUIRE(intervals.size() == 1);
+    CHECK(intervals[0].edge == 2);
+    CHECK(intervals[0].first == mm(10, 10));
+    CHECK(intervals[0].last == mm(0, 10));
+    CHECK(failure.pair_index == 1);
+}
+
+TEST_CASE("Projection binding does not jump to a distant edge at a repeated vertex", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon perimeter(Points{mm(0, 0), mm(4, 0), mm(4, 4), mm(0, 0), mm(-4, 0), mm(-4, -4)});
+    Polyline fragment;
+    // The last pair belongs to edge zero, but edge three is the required continuation.
+    fragment.points = {mm(4, 1), mm(4, 4), mm(0, 0), mm(2, 0)};
+    std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
+    PreciseSeam::detail::FragmentBindingFailure failure;
+    CHECK_FALSE(PreciseSeam::detail::append_exact_fragment_brutforce(fragment, perimeter, intervals, failure));
+    CHECK(intervals.empty());
+    CHECK(failure.pair_index == 2);
+}
+
+TEST_CASE("A rejected intersection warns without removing successful fragments", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon perimeter = rectangle(0, 0, 10, 10);
+    PreciseSeam::PreciseSeamWarnings warnings;
+    PreciseSeam::ExtractionContext context;
+    context.warnings = &warnings;
+    std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
+    Polyline fragment;
+    fragment.points = {mm(1, 0), mm(2, 0)};
+    REQUIRE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 0));
+    CHECK_FALSE(warnings.intersection_processing_failed.load());
+    // An out-and-back path must be discarded, not salvaged by clipping source edges again.
+    fragment.points = {mm(3, 0), mm(7, 0), mm(4, 0)};
+    CHECK_FALSE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 1));
+    REQUIRE(intervals.size() == 1);
+    CHECK(intervals[0].first == mm(1, 0));
+    CHECK(intervals[0].last == mm(2, 0));
+    CHECK(warnings.intersection_processing_failed.load());
+    fragment.points = {mm(10, 2), mm(10, 4)};
+    REQUIRE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 2));
+    REQUIRE(intervals.size() == 2);
+    CHECK(intervals.back().edge == 1);
+}
 
 TEST_CASE("A crossing modifier extracts both perimeter intervals without a body chord", "[PreciseSeam][SegmentExtraction]")
 {
