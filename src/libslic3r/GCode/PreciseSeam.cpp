@@ -34,6 +34,9 @@ struct ClippedEdgeInterval {
 // bridge gaps between intervals: even a small uncovered interval must remain a gap.
 std::optional<double> parameter_on_edge(const Point &point, const Point &a, const Point &b)
 {
+    // Original vertices need no floating-point projection.
+    if (point == a) return 0.;
+    if (point == b) return 1.;
     const Vec2d direction = b.cast<double>() - a.cast<double>();
     const Vec2d offset = point.cast<double>() - a.cast<double>();
     const double squared_length = direction.squaredNorm();
@@ -64,6 +67,56 @@ std::optional<ClippedEdgeInterval> interval_on_edge(
     if (interval.end == 1.) interval.last = b;
     return interval;
 }
+
+// Interior clipping vertices normally retain the exact source coordinates. Only
+// the two cut endpoints need projection; a failed sequence tries the next anchor.
+bool append_exact_fragment(const Polyline &fragment, const Polygon &perimeter,
+                           std::vector<ClippedEdgeInterval> &intervals)
+{
+    const size_t size = fragment.size();
+    const size_t count = perimeter.size();
+    if (size < 3 || size > count + 2)
+        return false;
+    for (size_t anchor = 0; anchor < count; ++anchor) {
+        if (fragment.points[1] != perimeter.points[anchor])
+            continue;
+        // Clipping may return either direction, independent of contour winding.
+        for (bool forward : {true, false}) {
+            const auto next = [count, forward](size_t index) {
+                return forward ? (index + 1) % count : (index + count - 1) % count;
+            };
+            size_t last = anchor;
+            bool matches = true;
+            for (size_t i = 2; i + 1 < size; ++i) {
+                last = next(last);
+                if (fragment.points[i] != perimeter.points[last]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (!matches)
+                continue;
+            const size_t first_edge = forward ? (anchor + count - 1) % count : anchor;
+            const size_t last_edge = forward ? last : (last + count - 1) % count;
+            const auto first = interval_on_edge(fragment.points.front(), fragment.points[1], first_edge, perimeter);
+            const auto end = interval_on_edge(fragment.points[size - 2], fragment.points.back(), last_edge, perimeter);
+            if (!first || !end)
+                continue;
+            // Commit only a complete match, so rejected anchors leave no intervals.
+            intervals.push_back(*first);
+            size_t vertex = anchor;
+            for (size_t i = 2; i + 1 < size; ++i) {
+                const size_t adjacent = next(vertex);
+                const size_t edge = forward ? vertex : adjacent;
+                intervals.push_back({edge, 0., 1., perimeter.points[edge], perimeter.points[(edge + 1) % count]});
+                vertex = adjacent;
+            }
+            intervals.push_back(*end);
+            return true;
+        }
+    }
+    return false;
+}
 } // namespace
 
 SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier)
@@ -88,28 +141,25 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExP
     if (nearby_regions.empty())
         return result;
 
+    // Accept the clipper's boundary behavior without offsets or special contact handling;
+    // modifiers should cross the perimeter unambiguously.
     // The open overload avoids coordinate-only recombination at self-touching vertices.
     Polyline source;
     source.points = perimeter.points;
     source.points.push_back(source.points.front());
     std::vector<ClippedEdgeInterval> intervals;
-    // Repeated vertices can lose visit identity inside the clipper itself; retain it
-    // from the outset instead of waiting for an ambiguous output coordinate.
-    std::unordered_map<Point, size_t, PointHash> occurrences;
     bool ambiguous = false;
-    for (size_t i = 0; i < count; ++i)
-        if (!occurrences.emplace(perimeter.points[i], i).second)
-            ambiguous = true;
     Polylines fragments;
-    if (!ambiguous) {
-        // Clip only accepted regions, with their holes still attached to the exterior.
-        for (const ExPolygon *region : nearby_regions) {
-            Polylines clipped = intersection_pl(source, *region);
-            for (Polyline &fragment : clipped)
-                fragments.push_back(std::move(fragment));
-        }
+    // Clip only accepted regions, with their holes still attached to the exterior.
+    for (const ExPolygon *region : nearby_regions) {
+        Polylines clipped = intersection_pl(source, *region);
+        for (Polyline &fragment : clipped)
+            fragments.push_back(std::move(fragment));
     }
     for (const Polyline &fragment : fragments) {
+        if (append_exact_fragment(fragment, perimeter, intervals))
+            continue;
+        // Keep the existing projection path for two-point and unmatched fragments.
         for (size_t i = 1; i < fragment.size(); ++i) {
             if (fragment.points[i - 1] == fragment.points[i])
                 continue;

@@ -102,6 +102,50 @@ TEST_CASE("Collinear perimeter vertices retain their original edge provenance", 
     CHECK_THAT(unscale<double>(segment.length), Catch::Matchers::WithinAbs(12., 1e-6));
 }
 
+TEST_CASE("Interior vertices retain their sequence between two cut endpoints", "[PreciseSeam][SegmentExtraction]")
+{
+    const bool reverse = GENERATE(false, true);
+    const size_t origin = GENERATE(size_t(0), size_t(5));
+    Polygon perimeter;
+    // A zigzag makes skipped or misbound interior edges observable in the arc length.
+    for (int x = 0; x <= 10; ++x)
+        perimeter.points.push_back(mm(x, x % 2));
+    perimeter.points.push_back(mm(10, 10));
+    perimeter.points.push_back(mm(0, 10));
+    if (reverse) perimeter.reverse();
+    std::rotate(perimeter.points.begin(), perimeter.points.begin() + origin, perimeter.points.end());
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(2.5, -2, 8.5, 3))});
+    check_provenance(perimeter, result);
+    REQUIRE(result.segments.size() == 1);
+    const auto &segment = result.segments.front();
+    Points expected{mm(2.5, .5)};
+    for (int x = 3; x <= 8; ++x)
+        expected.push_back(mm(x, x % 2));
+    expected.push_back(mm(8.5, .5));
+    if (reverse) std::reverse(expected.begin(), expected.end());
+    CHECK(segment.polyline.points == expected);
+    CHECK_THAT(unscale<double>(segment.length), Catch::Matchers::WithinAbs(6. * std::sqrt(2.), 1e-6));
+}
+
+TEST_CASE("Neighboring vertices distinguish repeated anchors on different lobes", "[PreciseSeam][SegmentExtraction]")
+{
+    const bool reverse = GENERATE(false, true);
+    // Both lobes visit the origin, but their adjacent edges lead to different vertices.
+    Polygon perimeter(Points{mm(0, 0), mm(4, 0), mm(4, 4), mm(0, 4),
+                             mm(0, 0), mm(-4, 0), mm(-4, -4), mm(0, -4)});
+    if (reverse) perimeter.reverse();
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-1, -5, 1, 5))});
+    check_provenance(perimeter, result);
+    REQUIRE(result.segments.size() == 2);
+    std::vector<size_t> edges;
+    for (const auto &segment : result.segments) {
+        CHECK_THAT(unscale<double>(segment.length), Catch::Matchers::WithinAbs(6., 1e-6));
+        edges.insert(edges.end(), segment.edge_indices.begin(), segment.edge_indices.end());
+    }
+    std::sort(edges.begin(), edges.end());
+    CHECK(edges == std::vector<size_t>{0, 2, 3, 4, 6, 7});
+}
+
 TEST_CASE("Modifier holes subtract coverage while separate components add intervals", "[PreciseSeam][SegmentExtraction]")
 {
     const Polygon perimeter = rectangle(0, 0, 20, 20);
