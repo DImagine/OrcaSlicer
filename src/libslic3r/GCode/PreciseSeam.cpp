@@ -121,7 +121,7 @@ bool append_exact_fragment(const Polyline &fragment, const Polygon &perimeter,
     return false;
 }
 
-// Projection fallback: every nonzero fragment edge must match exactly one source edge.
+// Projection fallback; two-point fragments accept the first matching source edge.
 bool append_exact_fragment_brutforce(const Polyline &fragment, const Polygon &perimeter,
                                     std::vector<ClippedEdgeInterval> &intervals)
 {
@@ -140,6 +140,9 @@ bool append_exact_fragment_brutforce(const Polyline &fragment, const Polygon &pe
                 return false;
             }
             matched = candidate;
+            // Overlapping source edges are outside the two-point binding contract.
+            if (fragment.size() == 2)
+                break;
         }
         if (!matched) {
             // Missing bindings must not leave a partially appended fragment either.
@@ -190,7 +193,7 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExP
             fragments.push_back(std::move(fragment));
     }
     for (const Polyline &fragment : fragments) {
-        if (append_exact_fragment(fragment, perimeter, intervals))
+        if (fragment.size() > 2 && append_exact_fragment(fragment, perimeter, intervals))
             continue;
         if (!append_exact_fragment_brutforce(fragment, perimeter, intervals)) {
             ambiguous = true;

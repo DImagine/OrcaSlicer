@@ -199,17 +199,17 @@ TEST_CASE("Repeated visits to a coordinate stay on their original perimeter edge
     CHECK(edges == std::vector<size_t>{0, 2, 3, 5});
 }
 
-TEST_CASE("Overlapping edge visits preserve both traversal occurrences", "[PreciseSeam][SegmentExtraction]")
+TEST_CASE("Two-point fragments accept the first matching perimeter edge", "[PreciseSeam][SegmentExtraction]")
 {
-    // The bottom edge is traversed in both directions; clipping coordinates alone are ambiguous.
+    // Policy: do not search for duplicate bindings on overlapping source edges.
     const Polygon perimeter(Points{mm(0, 0), mm(10, 0), mm(0, 0), mm(0, 10)});
     const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(2, -1, 8, 1))});
     check_provenance(perimeter, result);
-    REQUIRE(result.segments.size() == 2);
+    REQUIRE(result.segments.size() == 1);
     CHECK(result.segments[0].edge_indices == std::vector<size_t>{0});
-    CHECK(result.segments[1].edge_indices == std::vector<size_t>{1});
     CHECK(result.segments[0].polyline.points.front() == mm(2, 0));
-    CHECK(result.segments[1].polyline.points.front() == mm(8, 0));
+    CHECK(result.segments[0].polyline.points.back() == mm(8, 0));
+    CHECK_THAT(unscale<double>(result.segments[0].length), Catch::Matchers::WithinAbs(6., 1e-6));
 }
 
 TEST_CASE("Unnormalized perimeter input is reported instead of silently losing coverage", "[PreciseSeam][SegmentExtraction]")
