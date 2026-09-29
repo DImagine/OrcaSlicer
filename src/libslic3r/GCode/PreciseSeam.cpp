@@ -54,8 +54,11 @@ std::optional<ClippedEdgeInterval> interval_on_edge(
     const Point &a = perimeter.points[edge];
     const Point &b = perimeter.points[(edge + 1) % perimeter.size()];
     const auto t0 = parameter_on_edge(first, a, b);
+    // Reject this edge before projecting the second point when the first is outside.
+    if (!t0)
+        return std::nullopt;
     const auto t1 = parameter_on_edge(last, a, b);
-    if (!t0 || !t1 || *t0 == *t1)
+    if (!t1 || *t0 == *t1)
         return std::nullopt;
     ClippedEdgeInterval interval{edge, *t0, *t1, first, last};
     if (interval.begin > interval.end) {
