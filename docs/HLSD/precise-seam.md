@@ -115,8 +115,11 @@ rolls back and discards only that fragment, with a diagnostic marker. Overlappin
 source visits are outside the binding contract. Boundary contacts are accepted
 as returned by clipping, without offsets or additional contact rules.
 
-Each segment retains source edge indices, endpoint positions and Euclidean edge
-lengths. Neighboring intervals are joined, including across contour vertex zero.
+Each segment retains source edge indices and endpoint positions. Strong extraction
+also calculates and retains Euclidean edge lengths; weak disables both total and
+per-edge length calculation. Its boundary insertion and enforcement subdivision
+still perform their own necessary measurements. Neighboring intervals are joined,
+including across contour vertex zero.
 Insertion snaps points within 1 micrometre of an existing vertex to that vertex.
 
 ## Strong modifiers

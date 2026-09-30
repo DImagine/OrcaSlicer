@@ -199,7 +199,7 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
 } // namespace detail
 
 SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier,
-                                             const ExtractionContext &context)
+                                             const ExtractionContext &context, bool calculate_lengths)
 {
     using detail::ClippedEdgeInterval;
     SegmentExtraction result;
@@ -276,9 +276,12 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExP
         segment.polyline.points.push_back(interval.last);
         segment.edge_indices.push_back(interval.edge);
         segment.end = end;
-        const double length = (interval.last.cast<double>() - interval.first.cast<double>()).norm();
-        segment.edge_lengths.push_back(length);
-        segment.length += length;
+        // Only strong selection needs arc lengths; weak retains geometry without this work.
+        if (calculate_lengths) {
+            const double length = (interval.last.cast<double>() - interval.first.cast<double>()).norm();
+            segment.edge_lengths.push_back(length);
+            segment.length += length;
+        }
     }
     if (result.segments.size() > 1 && same_position(result.segments.back().end, result.segments.front().begin)) {
         // Only the artificial cut at vertex zero can join the last and first intervals.
@@ -784,7 +787,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         if (it == slices_cache.end() || layer_id >= it->second.size())
             continue;
         const ExtractionContext context{layer, modifier_volume, warnings};
-        const SegmentExtraction extracted = extract_perimeter_segments(polygon, it->second[layer_id], context);
+        const SegmentExtraction extracted = extract_perimeter_segments(polygon, it->second[layer_id], context, false);
         if (!extracted.valid)
             continue;
         // Keep the existing full-containment policy until it is changed explicitly.

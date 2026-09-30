@@ -63,6 +63,34 @@ void check_provenance(const Polygon &perimeter, const PreciseSeam::SegmentExtrac
 }
 } // namespace
 
+TEST_CASE("Skipping segment lengths preserves geometry and source bindings", "[PreciseSeam][SegmentExtraction]")
+{
+    const int scenario = GENERATE(0, 1, 2);
+    const Polygon perimeter = rectangle(0, 0, 20, 20);
+    // Cover separate intervals, joining across vertex zero, and full containment.
+    const ExPolygons modifier{ExPolygon(scenario == 0 ? rectangle(8, -2, 12, 22) :
+                                        scenario == 1 ? rectangle(-2, -2, 4, 4) : rectangle(-2, -2, 22, 22))};
+    const auto measured = PreciseSeam::extract_perimeter_segments(perimeter, modifier);
+    const auto unmeasured = PreciseSeam::extract_perimeter_segments(perimeter, modifier, {}, false);
+    check_provenance(perimeter, measured);
+    CHECK(unmeasured.valid == measured.valid);
+    CHECK(unmeasured.full_containment == measured.full_containment);
+    CHECK(unmeasured.discarded_segments == measured.discarded_segments);
+    REQUIRE(unmeasured.segments.size() == measured.segments.size());
+    for (size_t i = 0; i < measured.segments.size(); ++i) {
+        const auto &expected = measured.segments[i];
+        const auto &actual = unmeasured.segments[i];
+        CHECK(actual.polyline.points == expected.polyline.points);
+        CHECK(actual.edge_indices == expected.edge_indices);
+        CHECK(actual.begin.edge_index == expected.begin.edge_index);
+        CHECK(actual.end.edge_index == expected.end.edge_index);
+        CHECK_THAT(actual.begin.parameter, Catch::Matchers::WithinAbs(expected.begin.parameter, 1e-12));
+        CHECK_THAT(actual.end.parameter, Catch::Matchers::WithinAbs(expected.end.parameter, 1e-12));
+        CHECK(actual.edge_lengths.empty());
+        CHECK_THAT(actual.length, Catch::Matchers::WithinAbs(0., 1e-12));
+    }
+}
+
 TEST_CASE("Projection binding follows the same edge and its neighbor in either direction", "[PreciseSeam][SegmentExtraction]")
 {
     const bool reverse = GENERATE(false, true);
