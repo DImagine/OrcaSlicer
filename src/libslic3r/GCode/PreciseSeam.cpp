@@ -26,7 +26,7 @@ namespace detail {
 
 // Use the existing clipping tolerance only to recover rounded coordinates, not to
 // bridge gaps between intervals: even a small uncovered interval must remain a gap.
-std::optional<double> parameter_on_edge(const Point &point, const Point &a, const Point &b)
+static std::optional<double> parameter_on_edge(const Point &point, const Point &a, const Point &b)
 {
     // Original vertices need no floating-point projection.
     if (point == a) return 0.;
@@ -42,7 +42,7 @@ std::optional<double> parameter_on_edge(const Point &point, const Point &a, cons
     return parameter;
 }
 
-std::optional<ClippedEdgeInterval> interval_on_edge(
+static std::optional<ClippedEdgeInterval> interval_on_edge(
     const Point &first, const Point &last, size_t edge, const Polygon &perimeter)
 {
     const Point &a = perimeter.points[edge];
@@ -67,8 +67,8 @@ std::optional<ClippedEdgeInterval> interval_on_edge(
 
 // Interior clipping vertices normally retain the exact source coordinates. Only
 // the two cut endpoints need projection; a failed sequence tries the next anchor.
-bool append_exact_fragment(const Polyline &fragment, const Polygon &perimeter,
-                           std::vector<ClippedEdgeInterval> &intervals)
+static bool append_exact_fragment(const Polyline &fragment, const Polygon &perimeter,
+                                  std::vector<ClippedEdgeInterval> &intervals)
 {
     const size_t size = fragment.size();
     const size_t count = perimeter.size();
@@ -116,9 +116,9 @@ bool append_exact_fragment(const Polyline &fragment, const Polygon &perimeter,
 }
 
 // Find the first edge once, then follow the contour without restarting a global search.
-bool append_exact_fragment_brutforce(const Polyline &fragment, const Polygon &perimeter,
-                                    std::vector<ClippedEdgeInterval> &intervals,
-                                    FragmentBindingFailure &failure)
+bool append_projected_fragment(const Polyline &fragment, const Polygon &perimeter,
+                               std::vector<ClippedEdgeInterval> &intervals,
+                               FragmentBindingFailure &failure)
 {
     const size_t original_size = intervals.size();
     bool forward = true;
@@ -179,7 +179,7 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
     if (fragment.size() > 2 && append_exact_fragment(fragment, perimeter, intervals))
         return true;
     FragmentBindingFailure failure;
-    if (append_exact_fragment_brutforce(fragment, perimeter, intervals, failure))
+    if (append_projected_fragment(fragment, perimeter, intervals, failure))
         return true;
     if (context.warnings)
         context.warnings->intersection_processing_failed.store(true, std::memory_order_relaxed);
@@ -526,8 +526,9 @@ std::optional<Point> insert_strong_seam_point(
             continue;
         const SegmentExtraction extracted = extract_perimeter_segments(
             polygon, it->second[layer_id], modifier->type(), {layer, modifier, warnings});
+        // Invalid input belongs to this unchanged perimeter, regardless of the modifier.
         if (!extracted.valid)
-            continue;
+            return std::nullopt;
         // Full containment retains its existing skip policy, separately from segment selection.
         if (extracted.full_containment) {
             if (warnings)
@@ -802,8 +803,9 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
             continue;
         const ExtractionContext context{layer, modifier_volume, warnings};
         const SegmentExtraction extracted = extract_perimeter_segments(polygon, it->second[layer_id], modifier_volume->type(), context);
+        // No modifier can repair an invalid perimeter; boundary insertion has not started yet.
         if (!extracted.valid)
-            continue;
+            return {};
         // Keep the existing full-containment policy until it is changed explicitly.
         if (extracted.full_containment) {
             if (warnings)

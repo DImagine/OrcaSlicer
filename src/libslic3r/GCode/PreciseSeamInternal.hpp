@@ -19,9 +19,9 @@ struct FragmentBindingFailure {
 };
 
 // Failure rolls back this fragment only; earlier bindings remain intact.
-bool append_exact_fragment_brutforce(const Polyline &fragment, const Polygon &perimeter,
-                                    std::vector<ClippedEdgeInterval> &intervals,
-                                    FragmentBindingFailure &failure);
+bool append_projected_fragment(const Polyline &fragment, const Polygon &perimeter,
+                               std::vector<ClippedEdgeInterval> &intervals,
+                               FragmentBindingFailure &failure);
 
 // Both binding paths share the same discard and diagnostic policy.
 bool append_fragment(const Polyline &fragment, const Polygon &perimeter,

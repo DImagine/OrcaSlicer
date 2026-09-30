@@ -170,7 +170,7 @@ TEST_CASE("Projection binding follows the same edge and its neighbor in either d
     }
     std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
     PreciseSeam::detail::FragmentBindingFailure failure;
-    REQUIRE(PreciseSeam::detail::append_exact_fragment_brutforce(fragment, perimeter, intervals, failure));
+    REQUIRE(PreciseSeam::detail::append_projected_fragment(fragment, perimeter, intervals, failure));
     REQUIRE(intervals.size() == expected.size());
     for (size_t i = 0; i < intervals.size(); ++i) {
         CHECK(intervals[i].edge == expected[i]);
@@ -189,7 +189,7 @@ TEST_CASE("Projection binding rolls back a fragment that reverses or leaves the 
     fragment.points.push_back(scenario == 0 ? mm(4, 0) : scenario == 1 ? mm(7, 3) : mm(10, 3));
     std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals{{2, 0., 1., mm(10, 10), mm(0, 10)}};
     PreciseSeam::detail::FragmentBindingFailure failure;
-    CHECK_FALSE(PreciseSeam::detail::append_exact_fragment_brutforce(fragment, perimeter, intervals, failure));
+    CHECK_FALSE(PreciseSeam::detail::append_projected_fragment(fragment, perimeter, intervals, failure));
     REQUIRE(intervals.size() == 1);
     CHECK(intervals[0].edge == 2);
     CHECK(intervals[0].first == mm(10, 10));
@@ -205,7 +205,7 @@ TEST_CASE("Projection binding does not jump to a distant edge at a repeated vert
     fragment.points = {mm(4, 1), mm(4, 4), mm(0, 0), mm(2, 0)};
     std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
     PreciseSeam::detail::FragmentBindingFailure failure;
-    CHECK_FALSE(PreciseSeam::detail::append_exact_fragment_brutforce(fragment, perimeter, intervals, failure));
+    CHECK_FALSE(PreciseSeam::detail::append_projected_fragment(fragment, perimeter, intervals, failure));
     CHECK(intervals.empty());
     CHECK(failure.pair_index == 2);
 }
@@ -348,7 +348,13 @@ TEST_CASE("Modifier holes subtract coverage while separate components add interv
 
 TEST_CASE("Full coverage is distinct from an empty or point-only intersection", "[PreciseSeam][SegmentExtraction]")
 {
-    const Polygon perimeter = rectangle(0, 0, 20, 20);
+    const bool reverse = GENERATE(false, true);
+    const size_t origin = GENERATE(size_t(0), size_t(1), size_t(2), size_t(3));
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    // Coverage depends on traversed edges, not winding or the arbitrary contour origin.
+    if (reverse)
+        perimeter.reverse();
+    std::rotate(perimeter.points.begin(), perimeter.points.begin() + origin, perimeter.points.end());
     const int scenario = GENERATE(0, 1, 2, 3, 4);
     ExPolygons modifier;
     if (scenario == 0) modifier = {ExPolygon(rectangle(-2, -2, 22, 22))};

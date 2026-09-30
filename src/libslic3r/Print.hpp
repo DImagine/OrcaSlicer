@@ -472,8 +472,6 @@ public:
     std::vector<Polygons>       slice_support_enforcers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_ENFORCER); }
     // Shared slicing path; multiple volumes are united per layer.
     std::vector<Polygons>       slice_modifier_volumes(const std::vector<const ModelVolume*> &volumes) const;
-    // Keep Precise Seam volumes separate so their individual priority is preserved.
-    std::vector<Polygons>       slice_single_volume(const ModelVolume* volume) const { return this->slice_modifier_volumes({volume}); }
     // Preserve each connected region and its holes for perimeter clipping.
     std::vector<ExPolygons>     slice_single_volume_regions(const ModelVolume* volume) const;
 
