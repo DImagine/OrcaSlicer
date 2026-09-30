@@ -44,7 +44,7 @@ struct SeamFixture {
         ExPolygons regions;
         for (Polygon &slice : slices)
             regions.emplace_back(std::move(slice));
-        cache.emplace(volume, std::vector<ExPolygons>{std::move(regions)});
+        cache.emplace(volume, PreciseSeam::prepare_modifier_slices({std::move(regions)}));
         return volume;
     }
 
@@ -53,7 +53,7 @@ struct SeamFixture {
         // Supply structured slices directly, without reconstructing holes from flat contours.
         const ModelVolume *volume = add(type, {});
         REQUIRE(volume->is_precise_seam());
-        cache.at(volume) = std::vector<ExPolygons>{std::move(regions)};
+        cache.at(volume) = PreciseSeam::prepare_modifier_slices({std::move(regions)});
         return volume;
     }
 };
@@ -111,7 +111,7 @@ TEST_CASE("A simple clipped interval has consistent geometry before and after we
     const Polygon cut = corner ? rectangle(-2, -2, 4, 4) : rectangle(2, -2, 8, 2);
     const Point expected_begin = corner ? mm(0, 4) : mm(2, 0);
     const Point expected_end = corner ? mm(4, 0) : mm(8, 0);
-    const auto extracted = PreciseSeam::extract_perimeter_segments(perimeter, ExPolygons{ExPolygon(cut)}, ModelVolumeType::PRECISE_SEAM_ENFORCED);
+    const auto extracted = PreciseSeam::extract_perimeter_segments(perimeter, PreciseSeam::prepare_modifier_regions(ExPolygons{ExPolygon(cut)}), ModelVolumeType::PRECISE_SEAM_ENFORCED);
     REQUIRE(extracted.valid);
     REQUIRE(extracted.segments.size() == 1);
     CHECK(extracted.segments.front().polyline.points.front() == expected_begin);
@@ -144,13 +144,14 @@ TEST_CASE("Structured modifier slices keep holes with their component and preser
         volume->set_mirror(Vec3d(-1., 1., 1.));
     PrintObject *object = fixture.print.get_object(0);
     PreciseSeam::ModifierRegionsCache cache;
-    cache.emplace(volume, object->slice_single_volume_regions(volume));
+    cache.emplace(volume, PreciseSeam::prepare_modifier_slices(object->slice_single_volume_regions(volume)));
     const auto &layers = cache.at(volume);
     REQUIRE(layers.size() == 1);
     REQUIRE(layers.front().size() == 2);
     size_t holes = 0;
     double area = 0.;
-    for (const ExPolygon &region : layers.front()) {
+    for (const auto &cached_region : layers.front()) {
+        const ExPolygon &region = cached_region.polygon;
         holes += region.holes.size();
         CHECK(region.contour.is_counter_clockwise());
         for (const Polygon &hole : region.holes)
@@ -182,13 +183,13 @@ TEST_CASE("Modifier slices above a raft use object layer indices for strong and 
     Layer *upper = object->add_layer(int(slicing.raft_layers() + 1), 0.2, slicing.object_print_z_min + 4.2, 4.1);
     ModelVolume *modifier = fixture.modifiers.objects.front()->add_volume(Test::cube(4));
     modifier->set_type(mode);
-    const auto &slices = fixture.cache.emplace(modifier, object->slice_single_volume_regions(modifier)).first->second;
+    const auto &slices = fixture.cache.emplace(modifier, PreciseSeam::prepare_modifier_slices(object->slice_single_volume_regions(modifier))).first->second;
     REQUIRE(slices.size() == 2);
     REQUIRE(slices[0].size() == 1);
     CHECK(slices[1].empty());
 
     // Position the test perimeter relative to the transformed slice to isolate layer indexing.
-    const BoundingBox bounds(slices[0].front().contour.points);
+    const BoundingBox &bounds = slices[0].front().bounds;
     const Point origin = bounds.min;
     const Polygon original(Points{origin + mm(-2, 2), origin + mm(6, 2),
                                   origin + mm(6, 10), origin + mm(-2, 10)});
@@ -307,7 +308,7 @@ TEST_CASE("Strong intersection warnings count joined segments across vertex zero
     if (extra_segment)
         regions.emplace_back(rectangle(8, -2, 12, 2));
     // The two fragments at vertex zero form one eight-millimeter segment, longer than the extra one.
-    const auto extracted = PreciseSeam::extract_perimeter_segments(perimeter, regions, mode);
+    const auto extracted = PreciseSeam::extract_perimeter_segments(perimeter, PreciseSeam::prepare_modifier_regions(regions), mode);
     REQUIRE(extracted.segments.size() == (extra_segment ? 2 : 1));
     const auto *modifier = fixture.add_regions(mode, std::move(regions));
     PreciseSeam::PreciseSeamWarnings warnings;

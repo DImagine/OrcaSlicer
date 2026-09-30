@@ -5,6 +5,8 @@
 #include <optional>
 #include <vector>
 #include <unordered_map>
+#include <utility>
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Model.hpp"
@@ -23,8 +25,23 @@ namespace PreciseSeam {
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
-// Per-volume structured slices, built once and shared read-only by both modifier kinds.
-using ModifierRegionsCache = std::unordered_map<const ModelVolume*, std::vector<ExPolygons>>;
+// Geometry and its exterior bounds are prepared together, then treated as read-only.
+struct ModifierRegion {
+    ExPolygon polygon;
+    BoundingBox bounds;
+
+    explicit ModifierRegion(ExPolygon region)
+        : polygon(std::move(region)), bounds(polygon.contour.points) {}
+};
+
+using ModifierRegions = std::vector<ModifierRegion>;
+using ModifierSlices = std::vector<ModifierRegions>;
+// Per-volume slices with cached bounds, shared read-only by both modifier kinds.
+using ModifierRegionsCache = std::unordered_map<const ModelVolume*, ModifierSlices>;
+
+// Move sliced geometry into the cache without detaching holes or changing layer indices.
+ModifierRegions prepare_modifier_regions(ExPolygons regions);
+ModifierSlices prepare_modifier_slices(std::vector<ExPolygons> slices);
 
 // Warning flags set during Precise Seam processing (thread-safe)
 struct PreciseSeamWarnings {
@@ -76,7 +93,7 @@ struct SegmentExtraction {
 // vertices and no consecutive duplicates; either traversal direction is accepted.
 // Non-contained strong segments receive ready mode points; lengths are measured for Center or comparison.
 // Weak and fully contained results retain geometry and bindings without preparing strong data.
-SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier,
+SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ModifierRegions &modifier,
                                              ModelVolumeType mode, const ExtractionContext &context = {});
 
 // Result of weak modifier segment processing

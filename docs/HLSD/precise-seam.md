@@ -86,8 +86,11 @@ changes the solid and modifier volume lists and reslices as before.
 `SeamPlacer::init()` collects the Precise Seam volumes of each object once:
 strong ones in priority order and weak ones reversed. It slices each volume
 separately with `PrintObject::slice_single_volume_regions()`, retaining each
-region's outer contour and holes as an `ExPolygon`. Both modifier kinds share
-this structured cache. Volumes are not merged, so each keeps
+region's outer contour and holes as an `ExPolygon`. `prepare_modifier_slices()`
+moves these slices into the shared cache, pairing each region with the bounding
+box of its exterior. Bounds are computed once before parallel perimeter processing,
+not on each extraction call. Empty layers keep their original indices. Both
+modifier kinds share this structured cache. Volumes are not merged, so each keeps
 its own priority. The result is cached per volume
 and indexed by object layer; `Layer::id()` includes raft layers, which are
 subtracted. Seam candidates are then gathered in parallel over the layers and
@@ -104,7 +107,8 @@ there. Distinct visits to one point of a self-touching contour are kept.
 The seam placer works on external perimeter loops, including holes, normalized
 to counter-clockwise traversal. Extraction clips the perimeter line against each
 nearby region of one modifier, keeping its holes attached and applying bounding
-box rejection per region. Both strong and weak consume these ready segments.
+box rejection per region using its cached bounds. Geometry and bounds remain
+read-only throughout the seam pass. Both strong and weak consume these ready segments.
 
 The fast binding path anchors on the second fragment point and matches interior
 vertices exactly, trying either direction and later occurrences of the anchor.

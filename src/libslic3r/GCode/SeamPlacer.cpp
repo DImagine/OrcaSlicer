@@ -1504,13 +1504,13 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
           m_seam_per_object[po].has_precise_seam_strong_volumes,
           po->model_object());
 
-      // Pre-slice all precise seam modifier volumes once per object.
+      // Pre-slice all precise seam modifier volumes and cache region bounds once per object.
       // Without these caches, slicing would be repeated for every
       // modifier × every perimeter × every layer — thousands of redundant slicing operations.
       for (const ModelVolume* vol : global_model_info.precise_seam_strong_volumes)
-          global_model_info.precise_seam_slices[vol] = po->slice_single_volume_regions(vol);
+          global_model_info.precise_seam_slices[vol] = PreciseSeam::prepare_modifier_slices(po->slice_single_volume_regions(vol));
       for (const ModelVolume* vol : global_model_info.precise_seam_weak_volumes)
-          global_model_info.precise_seam_slices[vol] = po->slice_single_volume_regions(vol);
+          global_model_info.precise_seam_slices[vol] = PreciseSeam::prepare_modifier_slices(po->slice_single_volume_regions(vol));
 
       throw_if_canceled_func();
       if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {

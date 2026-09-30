@@ -9,6 +9,26 @@
 namespace Slic3r {
 namespace PreciseSeam {
 
+ModifierRegions prepare_modifier_regions(ExPolygons regions)
+{
+    ModifierRegions cached;
+    cached.reserve(regions.size());
+    // Each exterior is measured once; its holes remain in the same cached region.
+    for (ExPolygon &region : regions)
+        cached.emplace_back(std::move(region));
+    return cached;
+}
+
+ModifierSlices prepare_modifier_slices(std::vector<ExPolygons> slices)
+{
+    ModifierSlices cached;
+    cached.reserve(slices.size());
+    // Keep empty layers so callers can index by the original object layer number.
+    for (ExPolygons &layer : slices)
+        cached.push_back(prepare_modifier_regions(std::move(layer)));
+    return cached;
+}
+
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
@@ -238,7 +258,7 @@ static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mo
     }
 }
 
-SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier,
+SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ModifierRegions &modifier,
                                              ModelVolumeType mode, const ExtractionContext &context)
 {
     using detail::ClippedEdgeInterval;
@@ -256,9 +276,9 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExP
     }
     const BoundingBox perimeter_bounds(perimeter.points);
     std::vector<const ExPolygon*> nearby_regions;
-    for (const ExPolygon &region : modifier)
-        if (!region.empty() && perimeter_bounds.overlap(BoundingBox(region.contour.points)))
-            nearby_regions.push_back(&region);
+    for (const ModifierRegion &region : modifier)
+        if (!region.polygon.empty() && perimeter_bounds.overlap(region.bounds))
+            nearby_regions.push_back(&region.polygon);
     if (nearby_regions.empty())
         return result;
 
