@@ -435,7 +435,7 @@ static std::optional<std::pair<Point, size_t>> insert_point_into_perimeter(
     // IMPORTANT: Special handling for the last edge to preserve indexing for subsequent insertions.
     // If this is the last edge (edge_start_idx == perim_max - 1), we append to the end instead of
     // inserting at position 0 (which would shift all indices). This allows sorting points by
-    // descending arc length and inserting them without invalidating previously computed indices.
+    // descending source position and inserting them without invalidating previously computed indices.
     size_t insert_pos;
     if (edge_start_idx == perim_max - 1) {
         // Last edge: add to end of vector
@@ -514,7 +514,7 @@ static bool refine_at_vertex(
     // IMPORTANT: Special handling of last edge to preserve indexing for subsequent insertions.
     // If this is last edge (edge_start_idx == perim_max - 1), add point to end of vector
     // instead of inserting at position 0 (which would shift all indices). This allows sorting points
-    // by descending arc length and inserting them without invalidating previously computed indices.
+    // by descending source position and inserting them without invalidating previously computed indices.
     if (edge_start_idx == perim_max - 1) {
         // Last edge: add to end of vector
         perimeter_polygon.points.push_back(new_point);
@@ -621,55 +621,36 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
         return result;
     }
 
-    // Insert boundary points into perimeter polygon
-    // Sort points by descending arc length to avoid breaking indexing
-
-    // 1. Parameterize polygon: calculate cumulative lengths for each vertex
-    std::vector<double> cumulative_lengths(polygon.points.size() + 1);
-    cumulative_lengths[0] = 0.0;
-    for (size_t i = 0; i < polygon.points.size(); ++i) {
-        size_t next_i = (i + 1) % polygon.points.size();
-        double edge_length = (polygon.points[next_i] - polygon.points[i]).cast<double>().norm();
-        cumulative_lengths[i + 1] = cumulative_lengths[i] + edge_length;
-    }
-
-    // 2. Create helper vector for sorting: {segment index, left/right point, arc length}
+    // Source positions have the same order as arc length, without measuring the perimeter.
     struct PointToInsert {
-        size_t segment_idx;  // Index in result
-        bool is_left;        // true = left point, false = right point
-        double arc_length;   // Arc length from perimeter start
+        size_t segment_idx;
+        bool is_left;
+        PerimeterPosition position;
     };
     std::vector<PointToInsert> points_to_insert;
     points_to_insert.reserve(result.size() * 2);
-
     for (size_t seg_idx = 0; seg_idx < result.size(); ++seg_idx) {
         const WeakModifierSegment &seg = result[seg_idx];
-
-        // Left point
-        double left_base = cumulative_lengths[seg.left_idx];
-        double left_offset = (seg.left_point - polygon.points[seg.left_idx]).cast<double>().norm();
-        points_to_insert.push_back({seg_idx, true, left_base + left_offset});
-
-        // Right point
-        double right_base = cumulative_lengths[seg.right_idx];
-        double right_offset = (seg.right_point - polygon.points[seg.right_idx]).cast<double>().norm();
-        points_to_insert.push_back({seg_idx, false, right_base + right_offset});
+        points_to_insert.push_back({seg_idx, true, seg.left_position});
+        points_to_insert.push_back({seg_idx, false, seg.right_position});
     }
 
-    // 3. Sort by descending arc length (insert distant points first)
+    // Descending order preserves pending source indices; vertex zero is canonical (0, 0).
+    // Only insertion events are reordered: modifier priority in result remains unchanged.
     std::sort(points_to_insert.begin(), points_to_insert.end(),
               [](const PointToInsert &a, const PointToInsert &b) {
-                  return a.arc_length > b.arc_length;
+                  if (a.position.edge_index != b.position.edge_index)
+                      return a.position.edge_index > b.position.edge_index;
+                  return a.position.parameter > b.position.parameter;
               });
 
-    // 4. Insert points in descending arc length order
     std::vector<bool> segment_valid(result.size(), true);
     bool any_insertion_failed = false;
 
     for (const PointToInsert &pt : points_to_insert) {
         WeakModifierSegment &seg = result[pt.segment_idx];
         Point &point_coords = pt.is_left ? seg.left_point : seg.right_point;
-        size_t edge_idx = pt.is_left ? seg.left_idx : seg.right_idx;
+        const size_t edge_idx = pt.position.edge_index;
 
         // Insert point with tolerance check
         std::optional<std::pair<Point, size_t>> insert_result =
@@ -685,7 +666,7 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
         }
     }
 
-    // 5. Remove segments whose boundaries could not be inserted
+    // Remove segments whose boundaries could not be inserted
     if (any_insertion_failed) {
         // Critical error: boundary point not inserted (shouldn't happen in normal conditions)
         BOOST_LOG_TRIVIAL(error) << "PreciseSeam: boundary point insertion failed, performing segment compaction";
@@ -703,7 +684,7 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
         result.resize(write_pos);
     }
 
-    // 6. Group coincident boundaries by their snapped vertex, including wraparound to vertex 0.
+    // Group coincident boundaries by their snapped vertex, including wraparound to vertex 0.
     // Scan original vertices backwards so insertions cannot shift pending vertex indices.
     // O(vertices * segments), matching the boundary lookup below; typically only a few segments.
     for (size_t poly_idx = polygon.size(); poly_idx-- > 0; ) {
@@ -720,7 +701,7 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
             refine_at_vertex(poly_idx, -1, polygon);
     }
 
-    // 7. Split edges in enforced zones into segments ≤ enforcer_oversampling_distance
+    // Split edges in enforced zones into segments ≤ enforcer_oversampling_distance
     // Determine type pattern for each polygon edge (sequential application of hierarchy)
     std::vector<EnforcedBlockedSeamPoint> edge_types(polygon.size(), EnforcedBlockedSeamPoint::Neutral);
 
@@ -834,8 +815,8 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         }
         const auto type = convert_weak_modifier_type(modifier_volume->type());
         for (const PerimeterSegment &segment : extracted.segments) {
-            result.push_back({type, segment.polyline.points.front(), segment.begin.edge_index,
-                                   segment.polyline.points.back(), segment.end.edge_index});
+            result.push_back({type, segment.polyline.points.front(), segment.begin,
+                                   segment.polyline.points.back(), segment.end});
         }
     }
     // Boundary insertion, refinement and last-write-wins priority use the established path.

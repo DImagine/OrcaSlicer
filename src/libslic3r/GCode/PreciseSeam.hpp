@@ -100,9 +100,9 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const Mod
 struct WeakModifierSegment {
     EnforcedBlockedSeamPoint type;  // Enforced/Blocked/Neutral
     Point left_point;               // Coordinates of left (first) point of segment
-    size_t left_idx;                // Perimeter vertex index for left_point
+    PerimeterPosition left_position; // Position on the source perimeter before insertion/refinement.
     Point right_point;              // Coordinates of right (last) point of segment
-    size_t right_idx;               // Perimeter vertex index for right_point
+    PerimeterPosition right_position; // Retained provenance, not an index into the modified polygon.
 };
 
 // Initialize Precise Seam data by populating provided vectors and flag
@@ -138,7 +138,7 @@ std::optional<Point> insert_strong_seam_point(
 // Collect all weak modifier segments for a perimeter polygon
 // Processes weak modifiers (ENFORCED/BLOCKED/NEUTRAL) and collects segment boundaries
 // Passes the ready boundary array to preparation only after all modifiers are collected.
-// Also inserts boundary points into the perimeter polygon (sorted by descending arc length)
+// Also inserts boundary points into the perimeter polygon (sorted by descending source edge and parameter)
 // Refines enforced edges by subdividing them into segments ≤ enforcer_oversampling_distance
 // Parameters:
 //   weak_volumes      - list of weak precise seam modifiers

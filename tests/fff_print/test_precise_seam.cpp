@@ -411,6 +411,44 @@ TEST_CASE("Coincident weak boundaries do not prevent later boundary refinement",
     check_square_boundary(perimeter);
 }
 
+TEST_CASE("Weak boundaries on one source edge retain insertion order and modifier priority", "[PreciseSeam][Regression]")
+{
+    const bool closing_edge = GENERATE(false, true);
+    const bool coincident = GENERATE(false, true);
+    SeamFixture fixture;
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    const Polygon outer = closing_edge ? rectangle(-2, 2, 2, 8) : rectangle(2, -2, 8, 2);
+    const Polygon inner = coincident ? outer :
+        (closing_edge ? rectangle(-2, 4, 2, 6) : rectangle(4, -2, 6, 2));
+    const auto *blocked = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {outer});
+    const auto *neutral = fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, {inner});
+    // Priority order is not geometric insertion order; Neutral must win in the overlap.
+    const auto segments = PreciseSeam::collect_weak_modifier_segments(
+        {blocked, neutral}, perimeter, fixture.layer, fixture.cache);
+    REQUIRE(segments.size() == 2);
+    CHECK(segments[0].type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Blocked);
+    CHECK(segments[1].type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral);
+    CHECK(segments[0].left_position.edge_index == (closing_edge ? 3 : 0));
+    CHECK(segments[0].right_position.edge_index == (closing_edge ? 3 : 0));
+    CHECK_THAT(segments[0].left_position.parameter, Catch::Matchers::WithinAbs(closing_edge ? 0.6 : 0.1, 1e-12));
+    CHECK_THAT(segments[0].right_position.parameter, Catch::Matchers::WithinAbs(closing_edge ? 0.9 : 0.4, 1e-12));
+
+    const auto types = weak_candidate_types(perimeter, segments);
+    for (size_t i = 0; i < perimeter.size(); ++i) {
+        const Point &p = perimeter[i];
+        const coord_t along = closing_edge ? p.y() : p.x();
+        const coord_t across = closing_edge ? p.x() : p.y();
+        const bool in_outer = across == 0 && along >= scale_(2.) && along <= scale_(8.);
+        const bool in_inner = coincident ? in_outer :
+            (across == 0 && along >= scale_(4.) && along <= scale_(6.));
+        const auto expected = in_outer && !in_inner ? SeamPlacerImpl::EnforcedBlockedSeamPoint::Blocked :
+                                                     SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral;
+        CHECK(types[i] == expected);
+    }
+    // Ascending insertion on one edge would retrace the contour or lose pending boundaries.
+    check_square_boundary(perimeter);
+}
+
 TEST_CASE("Weak boundaries sharing a vertex refine both sides", "[PreciseSeam]")
 {
     SeamFixture fixture;

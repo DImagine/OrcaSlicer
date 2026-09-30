@@ -167,15 +167,21 @@ their seam from the external seam as usual, including staggering.
 
 Weak extraction clips the perimeter line against the cached regions of one
 modifier, rejecting each region by its bounding box first. It returns all ready
-segments with their endpoints and source edge indices. The boundary consumer
+segments with their endpoints and canonical source positions (edge index and
+parameter). These positions refer to the original perimeter and are retained as
+provenance after insertion/refinement; they are not indices into the modified
+polygon. The boundary consumer
 does not inspect modifier geometry: it receives the collected segments in
 modifier priority order. All boundaries are collected before the perimeter is
 modified, so their source edge indices refer to the same contour.
 
-`prepare_weak_modifier_segments()` inserts all segment boundaries into
-the perimeter in order of decreasing arc length. Each insertion then leaves the
-indices of the pending, shorter ones unchanged; a point on the closing edge is
-appended rather than inserted at index zero. A helper point is added 1 µm
+`prepare_weak_modifier_segments()` sorts insertion events by decreasing source
+edge index, then decreasing parameter on that edge. This gives arc-length order
+without measuring any lengths for sorting. Vertex zero uses the canonical
+position `(0, 0)` and is processed last. The segment array keeps modifier priority
+order; coincident boundaries continue to share vertices. Each insertion leaves
+pending source indices unchanged; a point on the closing edge is appended rather
+than inserted at index zero. A helper point is added 1 µm
 outside each boundary. Random placement picks a position along the edge that
 follows a candidate. These helpers keep that edge 1 µm long at each boundary, so
 a zone cannot extend or intrude further than that. Boundaries that coincide
