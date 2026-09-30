@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "test_helpers.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/GCode/PreciseSeam.hpp"
 
 #include <algorithm>
@@ -23,13 +24,15 @@ struct SeamFixture {
     Layer *layer = nullptr;
     PreciseSeam::ModifierRegionsCache cache;
 
-    SeamFixture()
+    explicit SeamFixture(int raft_layers = 0)
     {
         // Only the layer/PrintObject context is needed; clipping uses explicit cached slices below.
-        Test::init_print({Test::cube(20)}, print, model, {{"raft_layers", "0"}});
+        Test::init_print({Test::cube(20)}, print, model, {{"raft_layers", std::to_string(raft_layers)}});
         REQUIRE(print.objects().size() == 1);
         PrintObject *object = print.get_object(0);
-        layer = object->add_layer(int(object->slicing_parameters().raft_layers()), 0.2, 0.2, 0.1);
+        const auto &slicing = object->slicing_parameters();
+        // IDs and print heights include the raft; mesh slicing heights remain object-relative.
+        layer = object->add_layer(int(slicing.raft_layers()), 0.2, slicing.object_print_z_min + 0.2, 0.1);
         modifiers.add_object();
     }
 
@@ -164,6 +167,58 @@ TEST_CASE("Structured modifier slices keep holes with their component and preser
     for (const Polygon &contour : flat_layers.front())
         flat_area += contour.area();
     CHECK_THAT(flat_area, Catch::Matchers::WithinAbs(area, 1.));
+}
+
+TEST_CASE("Modifier slices above a raft use object layer indices for strong and weak seams", "[PreciseSeam][Regression]")
+{
+    const auto mode = GENERATE(ModelVolumeType::PRECISE_SEAM_LEFT, ModelVolumeType::PRECISE_SEAM_CENTER,
+                              ModelVolumeType::PRECISE_SEAM_RIGHT, ModelVolumeType::PRECISE_SEAM_BLOCKED);
+    SeamFixture fixture(3);
+    PrintObject *object = fixture.print.get_object(0);
+    const auto &slicing = object->slicing_parameters();
+    REQUIRE(slicing.raft_layers() > 0);
+    REQUIRE(fixture.layer->id() == slicing.raft_layers());
+    // The real modifier mesh intersects the lower sampled object layer, but not the upper one.
+    Layer *upper = object->add_layer(int(slicing.raft_layers() + 1), 0.2, slicing.object_print_z_min + 4.2, 4.1);
+    ModelVolume *modifier = fixture.modifiers.objects.front()->add_volume(Test::cube(4));
+    modifier->set_type(mode);
+    const auto &slices = fixture.cache.emplace(modifier, object->slice_single_volume_regions(modifier)).first->second;
+    REQUIRE(slices.size() == 2);
+    REQUIRE(slices[0].size() == 1);
+    CHECK(slices[1].empty());
+
+    // Position the test perimeter relative to the transformed slice to isolate layer indexing.
+    const BoundingBox bounds(slices[0].front().contour.points);
+    const Point origin = bounds.min;
+    const Polygon original(Points{origin + mm(-2, 2), origin + mm(6, 2),
+                                  origin + mm(6, 10), origin + mm(-2, 10)});
+    Polygon perimeter = original;
+    if (is_precise_seam_strong(mode)) {
+        const auto seam = PreciseSeam::insert_strong_seam_point(
+            {modifier}, perimeter, fixture.layer, fixture.cache);
+        REQUIRE(seam.has_value());
+        const double x = mode == ModelVolumeType::PRECISE_SEAM_LEFT ? 0. :
+                         mode == ModelVolumeType::PRECISE_SEAM_RIGHT ? 4. : 2.;
+        CHECK(*seam == origin + mm(x, 2));
+        perimeter = original;
+        CHECK_FALSE(PreciseSeam::insert_strong_seam_point({modifier}, perimeter, upper, fixture.cache).has_value());
+    } else {
+        const auto segments = PreciseSeam::collect_weak_modifier_segments(
+            {modifier}, perimeter, fixture.layer, fixture.cache);
+        REQUIRE(segments.size() == 1);
+        CHECK(segments.front().left_point == origin + mm(0, 2));
+        CHECK(segments.front().right_point == origin + mm(4, 2));
+        const auto types = weak_candidate_types(perimeter, segments);
+        for (size_t i = 0; i < perimeter.size(); ++i) {
+            const Point local = perimeter[i] - origin;
+            const bool inside = local.y() == scale_(2.) && local.x() >= 0 && local.x() <= scale_(4.);
+            CHECK(types[i] == (inside ? SeamPlacerImpl::EnforcedBlockedSeamPoint::Blocked :
+                                       SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral));
+        }
+        perimeter = original;
+        CHECK(PreciseSeam::collect_weak_modifier_segments({modifier}, perimeter, upper, fixture.cache).empty());
+    }
+    CHECK(perimeter.points == original.points);
 }
 
 TEST_CASE("Strong seam modes select the requested location on a clipped side", "[PreciseSeam]")

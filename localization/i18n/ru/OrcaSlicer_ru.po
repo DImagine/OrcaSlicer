@@ -27365,6 +27365,10 @@ msgstr "Точный шов"
 msgid "multiple intersections with a perimeter detected"
 msgstr "обнаружены множественные пересечения с периметром"
 
+#: src/libslic3r/GCode/SeamPlacer.cpp:1591
+msgid "unable to process intersection"
+msgstr "не удалось обработать пересечение"
+
 msgid "modifier fully crosses the printable perimeter"
 msgstr "модификатор пересекает печатаемый периметр насквозь"
 

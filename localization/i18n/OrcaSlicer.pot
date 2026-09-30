@@ -22855,3 +22855,7 @@ msgstr ""
 #: resources/data/hints.ini: [hint:Avoid warping]
 msgid "Avoid warping\nDid you know that when printing materials that are prone to warping such as ABS, appropriately increasing the heatbed temperature can reduce the probability of warping?"
 msgstr ""
+
+#: src/libslic3r/GCode/SeamPlacer.cpp:1591
+msgid "unable to process intersection"
+msgstr ""
