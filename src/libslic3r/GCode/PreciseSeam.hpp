@@ -13,10 +13,9 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "SeamPlacer.hpp"
 
-// Strong modifiers use polygon intersections and retain their single-segment limitations.
-// Weak modifiers consume all segments from structured perimeter extraction, then apply
-// the existing boundary insertion, refinement and priority rules. Full containment is skipped.
-// Failed extraction fragments are ignored with diagnostics; successful fragments remain usable.
+// Both modifier kinds consume ready perimeter segments. Strong chooses the longest
+// within the first matching modifier; weak applies all segments in priority order.
+// Full containment is skipped; failed fragments are ignored with diagnostics.
 
 namespace Slic3r {
 namespace PreciseSeam {
@@ -24,17 +23,12 @@ namespace PreciseSeam {
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
-// Pre-sliced modifier cache: ModelVolume pointer → per-layer Polygons.
-// Built once in SeamPlacer::init(), then passed read-only into per-perimeter functions.
-using ModifierSlicesCache = std::unordered_map<const ModelVolume*, std::vector<Polygons>>;
-// Structured slices used by weak extraction; strong modifiers retain ModifierSlicesCache.
+// Per-volume structured slices, built once and shared read-only by both modifier kinds.
 using ModifierRegionsCache = std::unordered_map<const ModelVolume*, std::vector<ExPolygons>>;
 
 // Warning flags set during Precise Seam processing (thread-safe)
 struct PreciseSeamWarnings {
     std::atomic<bool> multiple_intersections{false};  // modifier intersects perimeter in multiple separate places (strong only)
-    std::atomic<bool> through_body{false};            // modifier passes through the model body entirely
-    std::atomic<bool> multiply_connected{false};      // modifier has holes (multiply-connected cross-section)
     std::atomic<bool> full_containment{false};        // modifier fully contains perimeter, no intersection edges
     std::atomic<bool> intersection_processing_failed{false}; // at least one unbindable fragment was ignored
 };
@@ -44,12 +38,6 @@ struct ExtractionContext {
     const Layer *layer = nullptr;
     const ModelVolume *modifier = nullptr;
     PreciseSeamWarnings *warnings = nullptr;
-};
-
-// Result of finding common segment between perimeter and intersection
-struct SegmentData {
-    Polyline segment;                         // Points from intersection_polygon forming the segment
-    std::vector<size_t> perimeter_edge_indices; // edge_index for each point in segment
 };
 
 // A vertex is represented by its outgoing edge and parameter zero, including vertex 0.
@@ -64,6 +52,7 @@ struct PerimeterSegment {
     std::vector<size_t> edge_indices;
     PerimeterPosition begin;
     PerimeterPosition end;
+    std::vector<double> edge_lengths; // Reused by Center; one length per polyline interval.
     double length = 0.; // Euclidean arc length in scaled coordinates, not squared length.
 };
 
@@ -117,7 +106,7 @@ std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
     const Layer *layer,
-    const ModifierSlicesCache &slices_cache,
+    const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings = nullptr);
 
 // Collect all weak modifier segments for a perimeter polygon

@@ -85,9 +85,9 @@ changes the solid and modifier volume lists and reslices as before.
 
 `SeamPlacer::init()` collects the Precise Seam volumes of each object once:
 strong ones in priority order and weak ones reversed. It slices each volume
-separately: strong modifiers use `PrintObject::slice_single_volume()` and weak
-modifiers use `slice_single_volume_regions()`. The latter retains each region's
-outer contour and holes as an `ExPolygon`. Volumes are not merged, so each keeps
+separately with `PrintObject::slice_single_volume_regions()`, retaining each
+region's outer contour and holes as an `ExPolygon`. Both modifier kinds share
+this structured cache. Volumes are not merged, so each keeps
 its own priority. The result is cached per volume
 and indexed by object layer; `Layer::id()` includes raft layers, which are
 subtracted. Seam candidates are then gathered in parallel over the layers and
@@ -99,42 +99,45 @@ duplicate points and the repeated closing point of each extrusion loop.
 Zero-length edges at path junctions would otherwise prevent point insertion
 there. Distinct visits to one point of a self-touching contour are kept.
 
-## Finding the strong wall segment
+## Finding perimeter segments
 
-The seam placer works on the external perimeter loops of each layer, both
-outer contours and holes, each made counter-clockwise. For every modifier
-polygon on the layer that overlaps the perimeter's bounding box, the region
-enclosed by the perimeter is clipped against the modifier polygon. The boundary
-of each intersection polygon alternates between runs that follow the perimeter
-and runs that follow the modifier outline. The wall segment is the longest
-continuous run of intersection vertices that lie on the perimeter, measured in
-vertices.
+The seam placer works on external perimeter loops, including holes, normalized
+to counter-clockwise traversal. Extraction clips the perimeter line against each
+nearby region of one modifier, keeping its holes attached and applying bounding
+box rejection per region. Both strong and weak consume these ready segments.
 
-The fast path first finds an intersection vertex that exactly matches a
-perimeter vertex. It then walks forward and backward, expecting the adjacent
-perimeter vertex and falling back to projection when Clipper has merged or
-split collinear edges. A vertex counts as on the perimeter when its projection
-is within about 1.6 nm, which covers Clipper's rounding. If no vertex matches
-exactly, or every vertex lies on the perimeter, the general path projects all
-vertices. When every vertex is on the perimeter, the edge midpoints are checked
-instead: a modifier chord can join two perimeter vertices directly, and the
-chords split the vertex ring into runs. If no edge leaves the perimeter, the
-perimeter lies entirely inside the modifier.
+The fast binding path anchors on the second fragment point and matches interior
+vertices exactly, trying either direction and later occurrences of the anchor.
+Only cut endpoints need projection. Two-point fragments go straight to the
+projection path, which accepts the first matching source edge. Subsequent pairs
+must continue on that edge or its neighbor in the established direction. Failure
+rolls back and discards only that fragment, with a diagnostic marker. Overlapping
+source visits are outside the binding contract. Boundary contacts are accepted
+as returned by clipping, without offsets or additional contact rules.
 
-`Polygon::point_projection()` optionally reports the edge that holds the
-projection, and every point of the segment keeps the index of its perimeter
-edge. New points are inserted on that edge. A point within 1 µm of an existing
-vertex snaps to that vertex instead.
+Each segment retains source edge indices, endpoint positions and Euclidean edge
+lengths. Neighboring intervals are joined, including across contour vertex zero.
+Insertion snaps points within 1 micrometre of an existing vertex to that vertex.
 
 ## Strong modifiers
 
-For a strong modifier, the target is the first point, the last point or the
-arc-length midpoint of the segment. The midpoint is projected back onto the
-original perimeter, because Clipper may have merged several perimeter edges
-into one segment edge. The target is inserted into the perimeter, and a helper
-point is inserted 1 µm before and after it. Strong modifiers are tried in
-priority order, the first valid intersection decides the seam, and weak
-modifiers are not processed for that perimeter.
+Strong modifiers are considered in priority order. For every segment of the
+current modifier, its mode point is computed before any insertion: first point
+for Left, last point for Right, or half the arc length for Center. Center reuses
+the edge lengths and source edge indices already computed by extraction.
+
+The longest segment of that modifier wins, using the sum of Euclidean lengths,
+not its chord or vertex count. Exactly equal lengths are resolved by the mode
+point: largest bed Y first, then smallest X; a complete tie keeps the first
+candidate. Slice coordinates already include instance rotation and have the
+bed axes; centering and XY translation do not change this ordering. Nearly equal
+lengths are not treated as equal.
+
+Once a modifier yields a segment, no later modifier competes with it. Its chosen
+point is inserted with helper points 1 micrometre on either side, after first
+and before second to preserve the insertion index. No weak modifiers are then
+processed for that perimeter. Multiple extracted segments produce a warning
+only for strong modifiers. Full containment retains its separate skip policy.
 
 When candidates are built, the inserted point is the only enforced candidate
 and becomes the central enforcer; every other candidate is blocked. The seam
@@ -153,15 +156,6 @@ segments with their endpoints and source edge indices. The boundary consumer
 does not inspect modifier geometry: it receives the collected segments in
 modifier priority order. All boundaries are collected before the perimeter is
 modified, so their source edge indices refer to the same contour.
-
-Binding first tries exact interior vertex sequences; cut endpoints use projection
-with the clipping-rounding tolerance. The projection fallback searches globally
-for the first edge, then follows only that edge or its neighbor in the chosen
-direction. Two-point fragments take the first matching edge. Failed bindings
-discard only their own fragment, set a warning flag and log a compact diagnostic
-marker with the object, modifier and layer context. Successful fragments remain
-usable. Boundary contacts are accepted as returned by clipping, without offsets
-or additional contact rules.
 
 `prepare_weak_modifier_segments()` inserts all segment boundaries into
 the perimeter in order of decreasing arc length. Each insertion then leaves the
@@ -185,22 +179,14 @@ precedence over painting, and Neutral clears painting inside its zone.
 
 ## Unsupported geometry and warnings
 
-Some modifier shapes cannot be resolved to one seam or one zone per crossing.
-They are detected cheaply and reported rather than guessed:
-
-- A strong modifier that crosses a perimeter in more than one place uses only
-  its first valid segment. The other crossings are ignored.
-- A strong modifier that crosses the whole region enclosed by the perimeter is
-  detected when the modifier outline minus that region leaves more than one
-  piece, none of them a hole. Its intersection holds two wall runs, and only
-  one of them is used.
-- A strong modifier whose slice has a hole on a layer, found as a clockwise polygon in
-  the flattened slice, is skipped on that layer. The flattened slice no longer
-  records which hole belongs to which contour.
-- A perimeter that lies entirely inside a modifier is ignored by that modifier.
-- A weak intersection whose fragment cannot be bound continuously to the
-  perimeter is ignored with an "unable to process intersection" warning.
-  Multiple weak segments and holes do not themselves produce warnings.
+- More than one segment for a strong modifier produces a warning; the selected
+  longest segment is still used. The count is taken after joining across vertex zero.
+- A perimeter fully contained in a modifier is ignored by that modifier.
+- An intersection that cannot be bound continuously is discarded with an
+  "unable to process intersection" warning and a compact log marker containing
+  the object, modifier, layer and failure location. Other segments remain usable.
+- Through-body intersections and modifier holes need no separate warnings.
+  Multiple weak segments are accepted without a warning.
 
 The conditions are atomic flags shared by all layers and objects. After all
 objects are processed, `SeamPlacer::init()` issues at most one non-critical

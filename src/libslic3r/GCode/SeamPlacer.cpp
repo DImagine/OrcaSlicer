@@ -311,12 +311,8 @@ struct GlobalModelInfo {
   // Precise Seam modifiers: weak modifiers (ENFORCED/BLOCKED/NEUTRAL) provide hints for seam placement
   std::vector<const ModelVolume*> precise_seam_weak_volumes;
 
-  // Pre-sliced strong modifier polygons, keyed by ModelVolume pointer.
-  // Populated once in SeamPlacer::init() to avoid re-slicing on every perimeter.
-  // Each value is a per-layer vector of Polygons for that modifier volume.
-  std::unordered_map<const ModelVolume*, std::vector<Polygons>> precise_seam_slices;
-  // Weak extraction keeps structured regions; its consumer only receives ready segments.
-  PreciseSeam::ModifierRegionsCache precise_seam_weak_slices;
+  // Slice each modifier once; both consumers share structured regions and source provenance.
+  PreciseSeam::ModifierRegionsCache precise_seam_slices;
 
   bool is_enforced(const Vec3f &position, float radius) const {
     if (enforcers.empty()) {
@@ -510,7 +506,7 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   // Process weak modifiers (ENFORCED/BLOCKED/NEUTRAL) only if no strong modifier was inserted
   std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
   if (!inserted_seam_position.has_value()) {
-    weak_segments = PreciseSeam::collect_weak_modifier_segments(weak_volumes, polygon, layer, global_model_info.precise_seam_weak_slices, warnings);
+    weak_segments = PreciseSeam::collect_weak_modifier_segments(weak_volumes, polygon, layer, global_model_info.precise_seam_slices, warnings);
   }
 
   float angle_arm_len = region != nullptr ? region->flow(FlowRole::frExternalPerimeter).nozzle_diameter() : 0.5f;
@@ -1512,9 +1508,9 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
       // Without these caches, slicing would be repeated for every
       // modifier × every perimeter × every layer — thousands of redundant slicing operations.
       for (const ModelVolume* vol : global_model_info.precise_seam_strong_volumes)
-          global_model_info.precise_seam_slices[vol] = po->slice_single_volume(vol);
+          global_model_info.precise_seam_slices[vol] = po->slice_single_volume_regions(vol);
       for (const ModelVolume* vol : global_model_info.precise_seam_weak_volumes)
-          global_model_info.precise_seam_weak_slices[vol] = po->slice_single_volume_regions(vol);
+          global_model_info.precise_seam_slices[vol] = po->slice_single_volume_regions(vol);
 
       throw_if_canceled_func();
       if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {
@@ -1588,8 +1584,6 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
   // to duplicate text within each popup.
   {
       const bool mi = precise_seam_warnings.multiple_intersections.load(std::memory_order_relaxed);
-      const bool tb = precise_seam_warnings.through_body.load(std::memory_order_relaxed);
-      const bool mc = precise_seam_warnings.multiply_connected.load(std::memory_order_relaxed);
       const bool fc = precise_seam_warnings.full_containment.load(std::memory_order_relaxed);
       const bool failed = precise_seam_warnings.intersection_processing_failed.load(std::memory_order_relaxed);
       std::vector<std::string> parts;
@@ -1597,10 +1591,6 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
           parts.push_back(_u8L("unable to process intersection"));
       if (mi)
           parts.push_back(_u8L("multiple intersections with a perimeter detected"));
-      if (tb)
-          parts.push_back(_u8L("modifier fully crosses the printable perimeter"));
-      if (mc)
-          parts.push_back(_u8L("modifier shape is not solid (has holes inside) and was ignored"));
       if (fc)
           parts.push_back(_u8L("perimeter is fully contained inside modifier and was ignored"));
       if (!parts.empty()) {

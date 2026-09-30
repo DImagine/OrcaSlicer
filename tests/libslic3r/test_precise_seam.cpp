@@ -23,6 +23,14 @@ void check_provenance(const Polygon &perimeter, const PreciseSeam::SegmentExtrac
     for (const auto &segment : result.segments) {
         REQUIRE(segment.polyline.size() >= 2);
         REQUIRE(segment.edge_indices.size() + 1 == segment.polyline.size());
+        REQUIRE(segment.edge_lengths.size() == segment.edge_indices.size());
+        double cached_length = 0.;
+        for (double length : segment.edge_lengths) {
+            CHECK(length > 0.);
+            cached_length += length;
+        }
+        // Wrapped segments must carry their lengths in the same order as their source edges.
+        CHECK_THAT(cached_length, Catch::Matchers::WithinRel(segment.length, 1e-12));
         CHECK(segment.length > 0.);
         const std::pair<PreciseSeam::PerimeterPosition, Point> endpoints[] = {
             {segment.begin, segment.polyline.points.front()}, {segment.end, segment.polyline.points.back()}};
