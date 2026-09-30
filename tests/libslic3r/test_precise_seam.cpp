@@ -16,17 +16,25 @@ Polygon rectangle(double x0, double y0, double x1, double y1)
     return Polygon(Points{mm(x0, y0), mm(x1, y0), mm(x1, y1), mm(x0, y1)});
 }
 
-void check_provenance(const Polygon &perimeter, const PreciseSeam::SegmentExtraction &result)
+void check_provenance(const Polygon &perimeter, const PreciseSeam::SegmentExtraction &result, bool measured = true)
 {
     REQUIRE(result.valid);
     CHECK(result.discarded_segments == 0);
     for (const auto &segment : result.segments) {
         REQUIRE(segment.polyline.size() >= 2);
         REQUIRE(segment.edge_indices.size() + 1 == segment.polyline.size());
-        REQUIRE(segment.strong_target.has_value());
-        REQUIRE(segment.strong_target->edge_index < perimeter.size());
-        CHECK_THAT(segment.polyline.length(), Catch::Matchers::WithinRel(segment.length, 1e-12));
-        CHECK(segment.length > 0.);
+        // Full coverage retains geometry, but consumers skip it before using strong data.
+        if (result.full_containment)
+            CHECK_FALSE(segment.strong_target.has_value());
+        else {
+            REQUIRE(segment.strong_target.has_value());
+            REQUIRE(segment.strong_target->edge_index < perimeter.size());
+        }
+        if (measured && !result.full_containment) {
+            CHECK_THAT(segment.polyline.length(), Catch::Matchers::WithinRel(segment.length, 1e-12));
+            CHECK(segment.length > 0.);
+        } else
+            CHECK_THAT(segment.length, Catch::Matchers::WithinAbs(0., 1e-12));
         const std::pair<PreciseSeam::PerimeterPosition, Point> endpoints[] = {
             {segment.begin, segment.polyline.points.front()}, {segment.end, segment.polyline.points.back()}};
         for (const auto &[position, point] : endpoints) {
@@ -102,10 +110,11 @@ TEST_CASE("Strong extraction prepares the mode point on the complete joined segm
     // The forward contour crosses vertex zero; Center is either that vertex or inside an edge.
     const auto result = PreciseSeam::extract_perimeter_segments(
         perimeter, {ExPolygon(rectangle(-2, -2, width, 4))}, mode);
-    check_provenance(perimeter, result);
+    const bool center = mode == ModelVolumeType::PRECISE_SEAM_CENTER;
+    check_provenance(perimeter, result, center);
     REQUIRE(result.segments.size() == 1);
     const auto &segment = result.segments.front();
-    CHECK_THAT(segment.length, Catch::Matchers::WithinAbs(scale_(width + 4.), 1e-6));
+    CHECK_THAT(segment.length, Catch::Matchers::WithinAbs(center ? scale_(width + 4.) : 0., 1e-6));
 
     Point expected_point = mm((width - 4.) / 2., 0);
     size_t expected_edge = reverse ? 2 : (width == 4. ? 3 : 0);
@@ -117,6 +126,33 @@ TEST_CASE("Strong extraction prepares the mode point on the complete joined segm
     REQUIRE(segment.strong_target.has_value());
     CHECK(segment.strong_target->point == expected_point);
     CHECK(segment.strong_target->edge_index == expected_edge);
+}
+
+TEST_CASE("Strong extraction measures competing segments but skips fully contained targets", "[PreciseSeam][SegmentExtraction]")
+{
+    const auto mode = GENERATE(ModelVolumeType::PRECISE_SEAM_LEFT,
+                               ModelVolumeType::PRECISE_SEAM_RIGHT,
+                               ModelVolumeType::PRECISE_SEAM_CENTER);
+    const bool full = GENERATE(false, true);
+    const Polygon perimeter = rectangle(0, 0, 20, 20);
+    // Left/Right still require lengths when two segments compete; full coverage skips every mode.
+    const auto result = PreciseSeam::extract_perimeter_segments(
+        perimeter, {ExPolygon(full ? rectangle(-2, -2, 22, 22) : rectangle(8, -2, 12, 22))}, mode);
+    CHECK(result.full_containment == full);
+    REQUIRE(result.segments.size() == (full ? 1 : 2));
+    check_provenance(perimeter, result);
+    for (const auto &segment : result.segments) {
+        CHECK_THAT(segment.length, Catch::Matchers::WithinAbs(full ? 0. : scale_(4.), 1e-6));
+        if (full)
+            CHECK(segment.polyline.points.front() == segment.polyline.points.back());
+        else {
+            REQUIRE(segment.strong_target.has_value());
+            if (mode == ModelVolumeType::PRECISE_SEAM_LEFT)
+                CHECK(segment.strong_target->point == segment.polyline.points.front());
+            else if (mode == ModelVolumeType::PRECISE_SEAM_RIGHT)
+                CHECK(segment.strong_target->point == segment.polyline.points.back());
+        }
+    }
 }
 
 TEST_CASE("Projection binding follows the same edge and its neighbor in either direction", "[PreciseSeam][SegmentExtraction]")
@@ -324,7 +360,7 @@ TEST_CASE("Full coverage is distinct from an empty or point-only intersection", 
     CHECK(result.full_containment == (scenario == 0));
     if (scenario == 0) {
         REQUIRE(result.segments.size() == 1);
-        CHECK_THAT(unscale<double>(result.segments.front().length), Catch::Matchers::WithinAbs(80., 1e-6));
+        CHECK_THAT(unscale<double>(result.segments.front().polyline.length()), Catch::Matchers::WithinAbs(80., 1e-6));
         CHECK(result.segments.front().edge_indices.size() == 4);
     } else
         CHECK(result.segments.empty());

@@ -58,8 +58,9 @@ struct PerimeterSegment {
     std::vector<size_t> edge_indices;
     PerimeterPosition begin;
     PerimeterPosition end;
-    std::optional<StrongSeamTarget> strong_target; // Absent for weak modifiers.
-    double length = 0.; // Euclidean arc length in scaled coordinates; not calculated for weak.
+    std::optional<StrongSeamTarget> strong_target; // Absent for weak modifiers and full containment.
+    // Scaled arc length, calculated only for Center or comparison of multiple strong segments.
+    double length = 0.; // Zero means unmeasured for weak, full containment, and a single Left/Right segment.
 };
 
 struct SegmentExtraction {
@@ -73,7 +74,8 @@ struct SegmentExtraction {
 // Each exterior keeps its holes; disjoint region bounds are rejected before clipping.
 // Outer contours and holes use nonzero winding. The perimeter must have at least three
 // vertices and no consecutive duplicates; either traversal direction is accepted.
-// Strong modes also receive arc lengths and ready mode points; weak receives only geometry and bindings.
+// Non-contained strong segments receive ready mode points; lengths are measured for Center or comparison.
+// Weak and fully contained results retain geometry and bindings without preparing strong data.
 SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier,
                                              ModelVolumeType mode, const ExtractionContext &context = {});
 

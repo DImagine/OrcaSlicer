@@ -199,18 +199,21 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
 } // namespace detail
 
 // Finalize one joined strong segment; only Center needs temporary per-edge lengths.
-static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mode)
+static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mode, bool compare_lengths)
 {
     const bool center = mode == ModelVolumeType::PRECISE_SEAM_CENTER;
     std::vector<double> edge_lengths;
     if (center)
         edge_lengths.reserve(segment.edge_indices.size());
-    for (size_t i = 0; i < segment.edge_indices.size(); ++i) {
-        const double length = (segment.polyline.points[i + 1].cast<double>() -
-                               segment.polyline.points[i].cast<double>()).norm();
-        segment.length += length;
-        if (center)
-            edge_lengths.push_back(length);
+    // A single Left/Right segment needs only its endpoint; Center always needs arc length.
+    if (center || compare_lengths) {
+        for (size_t i = 0; i < segment.edge_indices.size(); ++i) {
+            const double length = (segment.polyline.points[i + 1].cast<double>() -
+                                   segment.polyline.points[i].cast<double>()).norm();
+            segment.length += length;
+            if (center)
+                edge_lengths.push_back(length);
+        }
     }
     if (mode == ModelVolumeType::PRECISE_SEAM_LEFT) {
         segment.strong_target = StrongSeamTarget{segment.polyline.points.front(), segment.begin.edge_index};
@@ -324,14 +327,14 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExP
         tail.end = head.end;
         head = std::move(tail);
     }
-    // Compute ready strong targets only after joining across vertex zero; weak needs neither lengths nor targets.
-    if (is_precise_seam_strong(mode))
-        for (PerimeterSegment &segment : result.segments)
-            prepare_strong_segment(segment, mode);
     // A full loop must cover every original edge, not merely have equal endpoint coordinates.
     result.full_containment = merged.size() == count;
     for (size_t i = 0; result.full_containment && i < count; ++i)
         result.full_containment = merged[i].edge == i && merged[i].begin == 0. && merged[i].end == 1.;
+    // Full containment is skipped by both consumers; retain geometry but prepare no strong data.
+    if (!result.full_containment && is_precise_seam_strong(mode))
+        for (PerimeterSegment &segment : result.segments)
+            prepare_strong_segment(segment, mode, result.segments.size() > 1);
     return result;
 }
 

@@ -117,20 +117,25 @@ as returned by clipping, without offsets or additional contact rules.
 
 Each segment retains source edge indices and endpoint positions. Neighboring
 intervals are joined, including across contour vertex zero. The extractor takes
-the modifier mode explicitly. For strong modes, it then prepares each complete
-segment's Euclidean arc length and mode point with its source edge index. Weak
+the modifier mode explicitly. Full containment is detected before strong data
+preparation: both consumers skip it, so no lengths or targets are calculated.
+Otherwise, strong segments receive their mode point with its source edge index;
+arc lengths are measured for Center or comparison of multiple segments. Weak
 skips both length and target preparation; its boundary insertion and enforcement
-subdivision still perform their own necessary measurements.
+subdivision still perform their own necessary measurements. All modes retain the
+complete segment geometry and source bindings, including for debugging.
 Insertion snaps points within 1 micrometre of an existing vertex to that vertex.
 
 ## Strong modifiers
 
-Strong modifiers are considered in priority order. Each extracted segment already
-contains its mode point: first point for Left, last point for Right, or half the
+Strong modifiers are considered in priority order. After full containment is
+skipped, each extracted segment already contains its mode point: first point for Left, last point for Right, or half the
 arc length for Center. Center temporarily retains edge lengths while measuring
 one segment, then uses them and source edge indices to locate the midpoint. This
 local array is discarded before processing the next segment; Left and Right do
-not fill it. Selection consumes the ready points before any perimeter insertion.
+not fill it. A single Left/Right segment needs no length comparison, so its length
+remains zero (unmeasured); its endpoint is still prepared. Selection consumes the
+ready points before any perimeter insertion.
 
 The longest segment of that modifier wins, using the sum of Euclidean lengths,
 not its chord or vertex count. Exactly equal lengths are resolved by the mode
