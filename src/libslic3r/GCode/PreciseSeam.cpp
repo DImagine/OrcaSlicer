@@ -217,8 +217,10 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
     FragmentBindingFailure failure;
     if (append_projected_fragment(fragment, perimeter, intervals, failure))
         return true;
-    if (context.warnings)
-        context.warnings->intersection_processing_failed.store(true, std::memory_order_relaxed);
+    // Reserve a log slot atomically before formatting; callers without shared state log every failure.
+    if (context.warnings &&
+        context.warnings->failed_fragments.fetch_add(1, std::memory_order_relaxed) >= failed_fragment_log_limit)
+        return false;
     const Layer *layer = context.layer;
     const ModelObject *object = layer && layer->object() ? layer->object()->model_object() : nullptr;
     // Keep a small marker for investigating a saved project, not a full geometry dump.

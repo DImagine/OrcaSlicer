@@ -218,8 +218,15 @@ precedence over painting, and Neutral clears painting inside its zone.
 - Through-body intersections and modifier holes need no separate warnings.
   Multiple weak segments are accepted without a warning.
 
-The conditions are atomic flags shared by all layers and objects. After all
-objects are processed, `SeamPlacer::init()` issues at most one non-critical
+Atomic warning flags and a failed-fragment counter are shared by all layers and
+objects in one `SeamPlacer::init()` call. The first 10 failed fragments receive
+detailed log markers; later failures are only counted, without formatting a
+message. If the limit is exceeded, one final marker reports the total and omitted
+counts. Parallel processing determines which failures are logged first. A new
+call starts with a fresh counter; cancellation may omit the final summary.
+Callers without shared warning state retain unlimited diagnostic logging.
+The limit does not affect discarding fragments or showing the user warning.
+After all objects are processed, `SeamPlacer::init()` issues at most one non-critical
 warning with the ID `SlicingPreciseSeamWarning`. The warning is a single line
 that lists every cause found, because the export warnings dialog shows only the
 first line of each warning. Repeated warning events replace this notification

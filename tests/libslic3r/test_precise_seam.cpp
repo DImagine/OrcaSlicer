@@ -266,18 +266,47 @@ TEST_CASE("A rejected intersection warns without removing successful fragments",
     Polyline fragment;
     fragment.points = {mm(1, 0), mm(2, 0)};
     REQUIRE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 0));
-    CHECK_FALSE(warnings.intersection_processing_failed.load());
+    CHECK(warnings.failed_fragments.load() == 0);
     // An out-and-back path must be discarded, not salvaged by clipping source edges again.
     fragment.points = {mm(3, 0), mm(7, 0), mm(4, 0)};
     CHECK_FALSE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 1));
     REQUIRE(intervals.size() == 1);
     CHECK(intervals[0].first == mm(1, 0));
     CHECK(intervals[0].last == mm(2, 0));
-    CHECK(warnings.intersection_processing_failed.load());
+    CHECK(warnings.failed_fragments.load() == 1);
     fragment.points = {mm(10, 2), mm(10, 4)};
     REQUIRE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 2));
     REQUIRE(intervals.size() == 2);
     CHECK(intervals.back().edge == 1);
+}
+
+TEST_CASE("Rejected fragments remain counted beyond the diagnostic limit", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon perimeter = rectangle(0, 0, 10, 10);
+    PreciseSeam::PreciseSeamWarnings warnings;
+    PreciseSeam::ExtractionContext context;
+    context.warnings = &warnings;
+    std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
+    Polyline fragment;
+    // Keep a valid fragment intact while repeated out-and-back failures exhaust the log budget.
+    fragment.points = {mm(1, 0), mm(2, 0)};
+    REQUIRE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 0));
+    fragment.points = {mm(3, 0), mm(7, 0), mm(4, 0)};
+    const size_t failures = PreciseSeam::failed_fragment_log_limit + 2;
+    for (size_t i = 0; i < failures; ++i)
+        CHECK_FALSE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, i + 1));
+    CHECK(warnings.failed_fragments.load() == failures);
+    REQUIRE(intervals.size() == 1);
+    CHECK(intervals.front().first == mm(1, 0));
+    CHECK(intervals.front().last == mm(2, 0));
+
+    // Standalone callers still reject safely, and a new processing pass gets its own budget.
+    CHECK_FALSE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, {}, 0));
+    CHECK(warnings.failed_fragments.load() == failures);
+    PreciseSeam::PreciseSeamWarnings next_pass;
+    context.warnings = &next_pass;
+    CHECK_FALSE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 0));
+    CHECK(next_pass.failed_fragments.load() == 1);
 }
 
 TEST_CASE("A crossing modifier extracts both perimeter intervals without a body chord", "[PreciseSeam][SegmentExtraction]")

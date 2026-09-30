@@ -43,11 +43,14 @@ using ModifierRegionsCache = std::unordered_map<const ModelVolume*, ModifierSlic
 ModifierRegions prepare_modifier_regions(ExPolygons regions);
 ModifierSlices prepare_modifier_slices(std::vector<ExPolygons> slices);
 
-// Warning flags set during Precise Seam processing (thread-safe)
+// Bound diagnostic volume only; every failed fragment is still counted and discarded.
+inline constexpr size_t failed_fragment_log_limit = 10;
+
+// Shared by all layers and objects in one SeamPlacer::init(); a new pass starts fresh.
 struct PreciseSeamWarnings {
     std::atomic<bool> multiple_intersections{false};  // modifier intersects perimeter in multiple separate places (strong only)
     std::atomic<bool> full_containment{false};        // modifier fully contains perimeter, no intersection edges
-    std::atomic<bool> intersection_processing_failed{false}; // at least one unbindable fragment was ignored
+    std::atomic<size_t> failed_fragments{0}; // Also triggers the user warning when nonzero.
 };
 
 // Optional caller identity for concise diagnostics when an intersection is discarded.

@@ -1589,9 +1589,15 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
   {
       const bool mi = precise_seam_warnings.multiple_intersections.load(std::memory_order_relaxed);
       const bool fc = precise_seam_warnings.full_containment.load(std::memory_order_relaxed);
-      const bool failed = precise_seam_warnings.intersection_processing_failed.load(std::memory_order_relaxed);
+      const size_t failed = precise_seam_warnings.failed_fragments.load(std::memory_order_relaxed);
+      // All workers have finished; cancellation before this point may omit the summary.
+      if (failed > PreciseSeam::failed_fragment_log_limit)
+          BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamIntersectionFailed] " << failed
+              << " fragments discarded; first " << PreciseSeam::failed_fragment_log_limit
+              << " logged (parallel processing order), " << (failed - PreciseSeam::failed_fragment_log_limit)
+              << " omitted";
       std::vector<std::string> parts;
-      if (failed)
+      if (failed > 0)
           parts.push_back(_u8L("unable to process intersection"));
       if (mi)
           parts.push_back(_u8L("multiple intersections with a perimeter detected"));

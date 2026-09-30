@@ -164,7 +164,7 @@ TEST_CASE("Unsuccessful strong modifiers share perimeter preparation with weak p
                                                      SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral;
         CHECK(types[i] == expected);
     }
-    CHECK_FALSE(warnings.intersection_processing_failed.load());
+    CHECK(warnings.failed_fragments.load() == 0);
     check_square_boundary(perimeter);
 }
 
@@ -362,7 +362,7 @@ TEST_CASE("Strong intersection warnings count joined segments across vertex zero
     CHECK(*seam == (mode == ModelVolumeType::PRECISE_SEAM_LEFT ? mm(0, 4) :
                    mode == ModelVolumeType::PRECISE_SEAM_RIGHT ? mm(4, 0) : mm(0, 0)));
     CHECK(warnings.multiple_intersections.load() == extra_segment);
-    CHECK_FALSE(warnings.intersection_processing_failed.load());
+    CHECK(warnings.failed_fragments.load() == 0);
     CHECK_FALSE(warnings.full_containment.load());
     check_square_boundary(perimeter);
 }
@@ -400,7 +400,7 @@ TEST_CASE("A collinear contour origin preserves strong targets and weak candidat
     }
     CHECK_FALSE(warnings.multiple_intersections.load());
     CHECK_FALSE(warnings.full_containment.load());
-    CHECK_FALSE(warnings.intersection_processing_failed.load());
+    CHECK(warnings.failed_fragments.load() == 0);
     check_square_boundary(perimeter);
 }
 
@@ -436,7 +436,7 @@ TEST_CASE("A gap on the closing edge preserves the complementary seam segment", 
     }
     CHECK_FALSE(warnings.multiple_intersections.load());
     CHECK_FALSE(warnings.full_containment.load());
-    CHECK_FALSE(warnings.intersection_processing_failed.load());
+    CHECK(warnings.failed_fragments.load() == 0);
     check_square_boundary(perimeter);
 }
 
@@ -540,7 +540,7 @@ TEST_CASE("Weak processing applies every ready interval and leaves gaps unchange
     }
     CHECK_FALSE(warnings.multiple_intersections.load());
     CHECK_FALSE(warnings.full_containment.load());
-    CHECK_FALSE(warnings.intersection_processing_failed.load());
+    CHECK(warnings.failed_fragments.load() == 0);
     check_square_boundary(perimeter);
 }
 
@@ -595,7 +595,7 @@ TEST_CASE("Weak full containment keeps its warning and leaves the perimeter unch
     CHECK(perimeter.points == original);
     CHECK(warnings.full_containment.load());
     CHECK_FALSE(warnings.multiple_intersections.load());
-    CHECK_FALSE(warnings.intersection_processing_failed.load());
+    CHECK(warnings.failed_fragments.load() == 0);
 }
 
 TEST_CASE("Unsupported strong modifier sections are skipped with the appropriate warning", "[PreciseSeam]")
@@ -716,7 +716,7 @@ TEST_CASE("Strong compares all segments of structured modifier regions", "[Preci
     CHECK(*seam == mm(16, 0));
     CHECK(warnings.multiple_intersections.load());
     CHECK_FALSE(warnings.full_containment.load());
-    CHECK_FALSE(warnings.intersection_processing_failed.load());
+    CHECK(warnings.failed_fragments.load() == 0);
     check_square_boundary(perimeter);
 }
 
