@@ -1243,129 +1243,10 @@ static EnforcedBlockedSeamPoint convert_weak_modifier_type(ModelVolumeType type)
     return EnforcedBlockedSeamPoint::Neutral;
 }
 
-// Collect all weak modifier segments for given perimeter
-// Process weak modifiers (ENFORCED/BLOCKED/NEUTRAL) and collect segment boundaries
-// Also insert boundary points into perimeter polygon (sorted by descending arc length)
-// Split enforced edges into small segments (≤ enforcer_oversampling_distance) for precise seam placement
-// Return ordered vector of segments with updated coordinates (in same order as weak_volumes list)
-std::vector<WeakModifierSegment> collect_weak_modifier_segments(
-    const std::vector<const ModelVolume*> &weak_volumes,
-    Polygon &polygon,
-    const Layer *layer,
-    const ModifierSlicesCache &slices_cache,
-    PreciseSeamWarnings* warnings)
+// Consume ready boundaries in modifier priority order; geometry extraction is separate.
+static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
+    std::vector<WeakModifierSegment> result, Polygon &polygon)
 {
-    std::vector<WeakModifierSegment> result;
-
-    // Check input parameters
-    if (weak_volumes.empty() || layer == nullptr) {
-        return result; // Empty vector
-    }
-
-    // layer->id() is offset by raft layer count, but modifier_slices is 0-based
-    // (built from PrintObject::layers() via slice_single_volume). Subtract raft
-    // offset to get the correct index into the cache.
-    const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
-    size_t layer_id = layer->id() - raft_layers;
-
-    // The perimeter is not modified until all weak segments have been collected.
-    const BoundingBox perimeter_bbox(polygon.points);
-
-    // Iterate through all weak modifiers in hierarchy order
-    for (const ModelVolume* modifier_volume : weak_volumes) {
-        // Look up pre-sliced polygons from cache (sliced once in SeamPlacer::init).
-        // TODO: slice_single_volume() converts ExPolygons to flat Polygons, losing
-        // the association between outer contours and their holes. This makes correct
-        // handling of multiply-connected modifier regions (e.g. a torus cross-section)
-        // impossible. Consider a variant returning std::vector<ExPolygons> and adapting
-        // the algorithm to work with multiply-connected domains.
-        auto it = slices_cache.find(modifier_volume);
-        if (it == slices_cache.end())
-            continue; // modifier not in cache (should not happen)
-        const std::vector<Polygons> &modifier_slices = it->second;
-
-        // Check if slices exist for given layer
-        if (layer_id >= modifier_slices.size()) {
-            continue; // No slices for this layer
-        }
-
-        const Polygons &modifier_polygons = modifier_slices[layer_id];
-
-        // Check for multiply-connected regions (holes = CW polygons).
-        // slice_single_volume() flattens ExPolygons into Polygons, but preserves
-        // orientation: CCW = outer contour, CW = hole. If any CW polygon is present,
-        // the modifier is multiply-connected and cannot be processed correctly.
-        bool has_holes = std::any_of(modifier_polygons.begin(), modifier_polygons.end(),
-            [](const Polygon &p) { return p.is_clockwise(); });
-        if (has_holes) {
-            if (warnings)
-                warnings->multiply_connected.store(true, std::memory_order_relaxed);
-            continue;
-        }
-
-        // Iterate through all modifier polygons on this layer
-        for (const Polygon &modifier_polygon : modifier_polygons) {
-            // Preserve touching and contained pairs for the existing clipping and warning logic.
-            if (!perimeter_bbox.overlap(BoundingBox(modifier_polygon.points)))
-                continue;
-            // Find intersection with perimeter
-            Polygons intersection_polygons = intersection(Polygons{polygon}, Polygons{modifier_polygon});
-
-            // Note: intersection_polygons.size() > 1 is NOT flagged as a warning here.
-            // For weak modifiers, multiple intersection polygons are expected (the modifier
-            // may legitimately cross the perimeter in several places).
-            // Only through-body intersections (detected by diff below) are abnormal.
-
-            // Diff check: if modifier minus perimeter yields >1 polygon, the modifier
-            // passes through the model body, creating a through-body intersection.
-            // CW polygon in diff = hole from full containment, not through-body.
-            // Full containment is detected separately in common_segment_in_intersection().
-            if (warnings && !warnings->through_body.load(std::memory_order_relaxed)) {
-                Polygons diff_polygons = diff(Polygons{modifier_polygon}, Polygons{polygon});
-                if (diff_polygons.size() > 1) {
-                    bool has_cw = std::any_of(diff_polygons.begin(), diff_polygons.end(),
-                        [](const Polygon &p) { return p.is_clockwise(); });
-                    if (!has_cw)
-                        warnings->through_body.store(true, std::memory_order_relaxed);
-                }
-            }
-
-            // Process each intersection polygon
-            for (Polygon &intersection_polygon : intersection_polygons) {
-                // Convert intersection_polygon to CCW to guarantee same traversal direction as perimeter
-                intersection_polygon.make_counter_clockwise();
-
-                // Search for perimeter segment in this intersection
-                std::optional<SegmentData> segment = common_segment_in_intersection_fast(
-                    intersection_polygon,
-                    polygon,
-                    warnings
-                );
-
-                if (!segment.has_value()) {
-                    continue; // Segment not found
-                }
-
-                // Get left (first) point of segment
-                std::optional<std::pair<Point, size_t>> left = segment_left(segment.value());
-
-                // Get right (last) point of segment
-                std::optional<std::pair<Point, size_t>> right = segment_right(segment.value());
-
-                // If both boundaries found, add segment to result
-                if (left.has_value() && right.has_value()) {
-                    result.push_back({
-                        convert_weak_modifier_type(modifier_volume->type()),  // Type: Enforced/Blocked/Neutral
-                        left->first,                                          // Left point coordinates
-                        left->second,                                         // Perimeter vertex index for left point
-                        right->first,                                         // Right point coordinates
-                        right->second                                         // Perimeter vertex index for right point
-                    });
-                }
-            }
-        }
-    }
-
     // If no segments, return empty vector
     if (result.empty()) {
         return result;
@@ -1550,6 +1431,45 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     polygon.points = std::move(new_points);
 
     return result;
+}
+
+// Collect every modifier's ready segments before insertions can shift source edge indices.
+std::vector<WeakModifierSegment> collect_weak_modifier_segments(
+    const std::vector<const ModelVolume*> &weak_volumes,
+    Polygon &polygon,
+    const Layer *layer,
+    const ModifierRegionsCache &slices_cache,
+    PreciseSeamWarnings* warnings)
+{
+    std::vector<WeakModifierSegment> result;
+    if (weak_volumes.empty() || layer == nullptr || polygon.size() < 3)
+        return result;
+
+    // Modifier cache indices exclude raft layers, unlike Layer::id().
+    const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
+    const size_t layer_id = layer->id() - raft_layers;
+    for (const ModelVolume *modifier_volume : weak_volumes) {
+        const auto it = slices_cache.find(modifier_volume);
+        if (it == slices_cache.end() || layer_id >= it->second.size())
+            continue;
+        const ExtractionContext context{layer, modifier_volume, warnings};
+        const SegmentExtraction extracted = extract_perimeter_segments(polygon, it->second[layer_id], context);
+        if (!extracted.valid)
+            continue;
+        // Keep the existing full-containment policy until it is changed explicitly.
+        if (extracted.full_containment) {
+            if (warnings)
+                warnings->full_containment.store(true, std::memory_order_relaxed);
+            continue;
+        }
+        const auto type = convert_weak_modifier_type(modifier_volume->type());
+        for (const PerimeterSegment &segment : extracted.segments) {
+            result.push_back({type, segment.polyline.points.front(), segment.begin.edge_index,
+                                   segment.polyline.points.back(), segment.end.edge_index});
+        }
+    }
+    // Boundary insertion, refinement and last-write-wins priority use the established path.
+    return prepare_weak_modifier_segments(std::move(result), polygon);
 }
 
 // Apply weak modifier types to perimeter points based on segment boundaries.

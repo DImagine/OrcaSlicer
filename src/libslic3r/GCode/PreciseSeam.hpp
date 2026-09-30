@@ -13,34 +13,10 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "SeamPlacer.hpp"
 
-// CURRENT STATUS:
-// Strong modifiers (Center/Left/Right): only one intersection per perimeter is supported,
-// since there can be only one seam. Additional intersections are ignored.
-//
-// Weak modifiers (Enforced/Blocked/Neutral): multiple intersections are supported,
-// but none of them should pass through the model entirely. A through-body intersection
-// produces multiple segments, of which only one will be processed.
-//
-// In both cases, a pop-up warning is shown when unsupported intersections are detected.
-//
-// If any modifier has a multiply-connected cross-section (e.g. a hollow shape),
-// it is skipped and a corresponding notification is shown.
-//
-// Full containment of the perimeter within modifier is not handled.
-//
-// FUTURE DIRECTION:
-// A lightweight algorithm is needed to detect and handle through-body intersections
-// for Weak modifiers. The algorithm must not slow down the 99.9% common case.
-// Possible approach: if intersection passes the diff check (no through-body),
-// use the current fast algorithm. If diff check fails, fall back to a heavier
-// method: compute midpoints of intersection polygon edges, then check which
-// midpoints lie strictly inside the modifier (not on boundary) using
-// point_in_polygon. Those edges originate from the perimeter; the rest
-// originate from the modifier boundary. Collect perimeter edges into a polyline.
-// Additionally, multiply-connected cross-sections could be supported instead of
-// being skipped entirely (e.g. by decomposing them into simple polygons).
-// For Enforced and Neutral weak modifiers, full containment of the perimeter
-// within modifier could be handled (currently ignored).
+// Strong modifiers use polygon intersections and retain their single-segment limitations.
+// Weak modifiers consume all segments from structured perimeter extraction, then apply
+// the existing boundary insertion, refinement and priority rules. Full containment is skipped.
+// Failed extraction fragments are ignored with diagnostics; successful fragments remain usable.
 
 namespace Slic3r {
 namespace PreciseSeam {
@@ -51,7 +27,7 @@ using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 // Pre-sliced modifier cache: ModelVolume pointer → per-layer Polygons.
 // Built once in SeamPlacer::init(), then passed read-only into per-perimeter functions.
 using ModifierSlicesCache = std::unordered_map<const ModelVolume*, std::vector<Polygons>>;
-// Structured slices for the new extractor; legacy consumers keep their existing cache until migration.
+// Structured slices used by weak extraction; strong modifiers retain ModifierSlicesCache.
 using ModifierRegionsCache = std::unordered_map<const ModelVolume*, std::vector<ExPolygons>>;
 
 // Warning flags set during Precise Seam processing (thread-safe)
@@ -146,6 +122,7 @@ std::optional<Point> insert_strong_seam_point(
 
 // Collect all weak modifier segments for a perimeter polygon
 // Processes weak modifiers (ENFORCED/BLOCKED/NEUTRAL) and collects segment boundaries
+// Passes the ready boundary array to preparation only after all modifiers are collected.
 // Also inserts boundary points into the perimeter polygon (sorted by descending arc length)
 // Refines enforced edges by subdividing them into segments ≤ enforcer_oversampling_distance
 // Parameters:
@@ -159,7 +136,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
     const Layer *layer,
-    const ModifierSlicesCache &slices_cache,
+    const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings = nullptr);
 
 // Apply weak modifier types to perimeter points based on segment boundaries

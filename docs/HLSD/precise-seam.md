@@ -85,9 +85,10 @@ changes the solid and modifier volume lists and reslices as before.
 
 `SeamPlacer::init()` collects the Precise Seam volumes of each object once:
 strong ones in priority order and weak ones reversed. It slices each volume
-separately with `PrintObject::slice_single_volume()`, which shares
-`slice_modifier_volumes()` with support blockers and enforcers but does not
-merge volumes, so each keeps its own priority. The result is cached per volume
+separately: strong modifiers use `PrintObject::slice_single_volume()` and weak
+modifiers use `slice_single_volume_regions()`. The latter retains each region's
+outer contour and holes as an `ExPolygon`. Volumes are not merged, so each keeps
+its own priority. The result is cached per volume
 and indexed by object layer; `Layer::id()` includes raft layers, which are
 subtracted. Seam candidates are then gathered in parallel over the layers and
 read the cache without locking.
@@ -98,7 +99,7 @@ duplicate points and the repeated closing point of each extrusion loop.
 Zero-length edges at path junctions would otherwise prevent point insertion
 there. Distinct visits to one point of a self-touching contour are kept.
 
-## Finding the wall segment
+## Finding the strong wall segment
 
 The seam placer works on the external perimeter loops of each layer, both
 outer contours and holes, each made counter-clockwise. For every modifier
@@ -146,8 +147,23 @@ their seam from the external seam as usual, including staggering.
 
 ## Weak modifiers
 
-Weak modifiers produce one segment per intersection polygon, so one modifier can
-mark several zones on one perimeter. All segment boundaries are inserted into
+Weak extraction clips the perimeter line against the cached regions of one
+modifier, rejecting each region by its bounding box first. It returns all ready
+segments with their endpoints and source edge indices. The boundary consumer
+does not inspect modifier geometry: it receives the collected segments in
+modifier priority order. All boundaries are collected before the perimeter is
+modified, so their source edge indices refer to the same contour.
+
+Binding first tries exact interior vertex sequences; cut endpoints use projection
+with the clipping-rounding tolerance. The projection fallback searches globally
+for the first edge, then follows only that edge or its neighbor in the chosen
+direction. Two-point fragments take the first matching edge. Failed bindings
+discard only their own fragment, set a warning flag and log a compact diagnostic
+marker with the object, modifier and layer context. Successful fragments remain
+usable. Boundary contacts are accepted as returned by clipping, without offsets
+or additional contact rules.
+
+`prepare_weak_modifier_segments()` inserts all segment boundaries into
 the perimeter in order of decreasing arc length. Each insertion then leaves the
 indices of the pending, shorter ones unchanged; a point on the closing edge is
 appended rather than inserted at index zero. A helper point is added 1 µm
@@ -174,14 +190,17 @@ They are detected cheaply and reported rather than guessed:
 
 - A strong modifier that crosses a perimeter in more than one place uses only
   its first valid segment. The other crossings are ignored.
-- A modifier that crosses the whole region enclosed by the perimeter is
+- A strong modifier that crosses the whole region enclosed by the perimeter is
   detected when the modifier outline minus that region leaves more than one
   piece, none of them a hole. Its intersection holds two wall runs, and only
   one of them is used.
-- A modifier whose slice has a hole on a layer, found as a clockwise polygon in
+- A strong modifier whose slice has a hole on a layer, found as a clockwise polygon in
   the flattened slice, is skipped on that layer. The flattened slice no longer
   records which hole belongs to which contour.
 - A perimeter that lies entirely inside a modifier is ignored by that modifier.
+- A weak intersection whose fragment cannot be bound continuously to the
+  perimeter is ignored with an "unable to process intersection" warning.
+  Multiple weak segments and holes do not themselves produce warnings.
 
 The conditions are atomic flags shared by all layers and objects. After all
 objects are processed, `SeamPlacer::init()` issues at most one non-critical

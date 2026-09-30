@@ -311,10 +311,12 @@ struct GlobalModelInfo {
   // Precise Seam modifiers: weak modifiers (ENFORCED/BLOCKED/NEUTRAL) provide hints for seam placement
   std::vector<const ModelVolume*> precise_seam_weak_volumes;
 
-  // Pre-sliced modifier polygons, keyed by ModelVolume pointer.
+  // Pre-sliced strong modifier polygons, keyed by ModelVolume pointer.
   // Populated once in SeamPlacer::init() to avoid re-slicing on every perimeter.
   // Each value is a per-layer vector of Polygons for that modifier volume.
   std::unordered_map<const ModelVolume*, std::vector<Polygons>> precise_seam_slices;
+  // Weak extraction keeps structured regions; its consumer only receives ready segments.
+  PreciseSeam::ModifierRegionsCache precise_seam_weak_slices;
 
   bool is_enforced(const Vec3f &position, float radius) const {
     if (enforcers.empty()) {
@@ -508,7 +510,7 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   // Process weak modifiers (ENFORCED/BLOCKED/NEUTRAL) only if no strong modifier was inserted
   std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
   if (!inserted_seam_position.has_value()) {
-    weak_segments = PreciseSeam::collect_weak_modifier_segments(weak_volumes, polygon, layer, global_model_info.precise_seam_slices, warnings);
+    weak_segments = PreciseSeam::collect_weak_modifier_segments(weak_volumes, polygon, layer, global_model_info.precise_seam_weak_slices, warnings);
   }
 
   float angle_arm_len = region != nullptr ? region->flow(FlowRole::frExternalPerimeter).nozzle_diameter() : 0.5f;
@@ -1507,12 +1509,12 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
           po->model_object());
 
       // Pre-slice all precise seam modifier volumes once per object.
-      // Without this cache, slice_single_volume() would be called for every
+      // Without these caches, slicing would be repeated for every
       // modifier × every perimeter × every layer — thousands of redundant slicing operations.
       for (const ModelVolume* vol : global_model_info.precise_seam_strong_volumes)
           global_model_info.precise_seam_slices[vol] = po->slice_single_volume(vol);
       for (const ModelVolume* vol : global_model_info.precise_seam_weak_volumes)
-          global_model_info.precise_seam_slices[vol] = po->slice_single_volume(vol);
+          global_model_info.precise_seam_weak_slices[vol] = po->slice_single_volume_regions(vol);
 
       throw_if_canceled_func();
       if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {
