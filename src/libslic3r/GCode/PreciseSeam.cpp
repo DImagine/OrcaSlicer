@@ -29,6 +29,22 @@ ModifierSlices prepare_modifier_slices(std::vector<ExPolygons> slices)
     return cached;
 }
 
+PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter) : polygon(perimeter)
+{
+    const size_t count = polygon.size();
+    if (count < 3)
+        return;
+    for (size_t edge = 0; edge < count; ++edge)
+        if (polygon.points[edge] == polygon.points[(edge + 1) % count])
+            return;
+    bounds = BoundingBox(polygon.points);
+    // Close an open polyline explicitly; prepare its storage once for all modifier queries.
+    line.points.reserve(count + 1);
+    line.points.insert(line.points.end(), polygon.points.begin(), polygon.points.end());
+    line.points.push_back(polygon.points.front());
+    valid = true;
+}
+
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
@@ -258,26 +274,20 @@ static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mo
     }
 }
 
-SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ModifierRegions &modifier,
+SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                              ModelVolumeType mode, const ExtractionContext &context)
 {
     using detail::ClippedEdgeInterval;
     SegmentExtraction result;
-    const size_t count = perimeter.size();
-    if (count < 3) {
+    if (!prepared.valid) {
         result.valid = false;
         return result;
     }
-    for (size_t edge = 0; edge < count; ++edge) {
-        if (perimeter.points[edge] == perimeter.points[(edge + 1) % count]) {
-            result.valid = false;
-            return result;
-        }
-    }
-    const BoundingBox perimeter_bounds(perimeter.points);
+    const Polygon &perimeter = prepared.polygon;
+    const size_t count = perimeter.size();
     std::vector<const ExPolygon*> nearby_regions;
     for (const ModifierRegion &region : modifier)
-        if (!region.polygon.empty() && perimeter_bounds.overlap(region.bounds))
+        if (!region.polygon.empty() && prepared.bounds.overlap(region.bounds))
             nearby_regions.push_back(&region.polygon);
     if (nearby_regions.empty())
         return result;
@@ -285,14 +295,11 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const Mod
     // Accept the clipper's boundary behavior without offsets or special contact handling;
     // modifiers should cross the perimeter unambiguously.
     // The open overload avoids coordinate-only recombination at self-touching vertices.
-    Polyline source;
-    source.points = perimeter.points;
-    source.points.push_back(source.points.front());
     std::vector<ClippedEdgeInterval> intervals;
     Polylines fragments;
     // Clip only accepted regions, with their holes still attached to the exterior.
     for (const ExPolygon *region : nearby_regions) {
-        Polylines clipped = intersection_pl(source, *region);
+        Polylines clipped = intersection_pl(prepared.line, *region);
         for (Polyline &fragment : clipped)
             fragments.push_back(std::move(fragment));
     }
@@ -533,11 +540,13 @@ static bool refine_at_vertex(
 std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
+    const PreparedPerimeter &prepared,
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings)
 {
-    if (strong_volumes.empty() || layer == nullptr || polygon.size() < 3)
+    assert(&prepared.polygon == &polygon);
+    if (strong_volumes.empty() || layer == nullptr || !prepared.valid)
         return std::nullopt;
     const size_t layer_id = layer->id() - layer->object()->slicing_parameters().raft_layers();
     for (const ModelVolume *modifier : strong_volumes) {
@@ -545,10 +554,7 @@ std::optional<Point> insert_strong_seam_point(
         if (it == slices_cache.end() || layer_id >= it->second.size())
             continue;
         const SegmentExtraction extracted = extract_perimeter_segments(
-            polygon, it->second[layer_id], modifier->type(), {layer, modifier, warnings});
-        // Invalid input belongs to this unchanged perimeter, regardless of the modifier.
-        if (!extracted.valid)
-            return std::nullopt;
+            prepared, it->second[layer_id], modifier->type(), {layer, modifier, warnings});
         // Full containment retains its existing skip policy, separately from segment selection.
         if (extracted.full_containment) {
             if (warnings)
@@ -787,12 +793,14 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
 std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
+    const PreparedPerimeter &prepared,
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings)
 {
+    assert(&prepared.polygon == &polygon);
     std::vector<WeakModifierSegment> result;
-    if (weak_volumes.empty() || layer == nullptr || polygon.size() < 3)
+    if (weak_volumes.empty() || layer == nullptr || !prepared.valid)
         return result;
 
     // Modifier cache indices exclude raft layers, unlike Layer::id().
@@ -803,10 +811,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         if (it == slices_cache.end() || layer_id >= it->second.size())
             continue;
         const ExtractionContext context{layer, modifier_volume, warnings};
-        const SegmentExtraction extracted = extract_perimeter_segments(polygon, it->second[layer_id], modifier_volume->type(), context);
-        // No modifier can repair an invalid perimeter; boundary insertion has not started yet.
-        if (!extracted.valid)
-            return {};
+        const SegmentExtraction extracted = extract_perimeter_segments(prepared, it->second[layer_id], modifier_volume->type(), context);
         // Keep the existing full-containment policy until it is changed explicitly.
         if (extracted.full_containment) {
             if (warnings)

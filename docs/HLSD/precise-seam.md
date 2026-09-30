@@ -105,7 +105,16 @@ there. Distinct visits to one point of a self-touching contour are kept.
 ## Finding perimeter segments
 
 The seam placer works on external perimeter loops, including holes, normalized
-to counter-clockwise traversal. Extraction clips the perimeter line against each
+to counter-clockwise traversal. Before trying modifiers, it creates one
+`PreparedPerimeter`: validation of consecutive/closing duplicates, the perimeter
+bounding box, and an open clipping line with the first point repeated at the end.
+All strong queries reuse this preparation. If no strong point was inserted, weak
+queries reuse it too; weak collects all boundaries before inserting them. A
+successful strong insertion ends modifier processing. The preparation borrows the
+polygon and must not be used after insertion/refinement changes it. Objects
+without Precise Seam modifiers do not perform this preparation.
+
+Extraction clips the prepared perimeter line against each
 nearby region of one modifier, keeping its holes attached and applying bounding
 box rejection per region using its cached bounds. Geometry and bounds remain
 read-only throughout the seam pass. Both strong and weak consume these ready segments.

@@ -493,20 +493,24 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   const auto& strong_volumes = global_model_info.precise_seam_strong_volumes;
   const auto& weak_volumes = global_model_info.precise_seam_weak_volumes;
 
-  // Use pre-sliced cache from global_model_info instead of re-slicing on every call
-  auto seam_point = PreciseSeam::insert_strong_seam_point(strong_volumes, polygon, layer, global_model_info.precise_seam_slices, warnings);
+  std::optional<Point> seam_point;
+  std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
+  if (layer != nullptr && (!strong_volumes.empty() || !weak_volumes.empty())) {
+    // Share validation, bounds and clipping line across all modifiers while the polygon is unchanged.
+    // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
+    const PreciseSeam::PreparedPerimeter prepared(polygon);
+    seam_point = PreciseSeam::insert_strong_seam_point(
+        strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
+    if (!seam_point.has_value())
+      weak_segments = PreciseSeam::collect_weak_modifier_segments(
+          weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
+  }
 
-  // Store the inserted point position for marking as central_enforcer later
+  // Store the inserted point position for marking as central_enforcer later.
   std::optional<Vec3f> inserted_seam_position;
   if (seam_point.has_value()) {
     Vec2f unscaled_p = unscale(seam_point.value()).cast<float>();
     inserted_seam_position = Vec3f(unscaled_p.x(), unscaled_p.y(), z_coord);
-  }
-
-  // Process weak modifiers (ENFORCED/BLOCKED/NEUTRAL) only if no strong modifier was inserted
-  std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
-  if (!inserted_seam_position.has_value()) {
-    weak_segments = PreciseSeam::collect_weak_modifier_segments(weak_volumes, polygon, layer, global_model_info.precise_seam_slices, warnings);
   }
 
   float angle_arm_len = region != nullptr ? region->flow(FlowRole::frExternalPerimeter).nozzle_diameter() : 0.5f;

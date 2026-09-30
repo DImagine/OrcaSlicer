@@ -57,6 +57,16 @@ struct ExtractionContext {
     PreciseSeamWarnings *warnings = nullptr;
 };
 
+// Borrows the source polygon; use only until insertion/refinement changes that polygon.
+struct PreparedPerimeter {
+    const Polygon &polygon;
+    BoundingBox bounds;
+    Polyline line;
+    bool valid = false;
+
+    explicit PreparedPerimeter(const Polygon &perimeter);
+};
+
 // A vertex is represented by its outgoing edge and parameter zero, including vertex 0.
 struct PerimeterPosition {
     size_t edge_index;
@@ -87,13 +97,13 @@ struct SegmentExtraction {
     size_t discarded_segments = 0; // Failed bindings are ignored, with a warning and diagnostic marker.
 };
 
-// Clip an immutable, implicitly closed perimeter against each nearby modifier region.
+// Clip a prepared, unchanged perimeter against each nearby modifier region.
 // Each exterior keeps its holes; disjoint region bounds are rejected before clipping.
 // Outer contours and holes use nonzero winding. The perimeter must have at least three
 // vertices and no consecutive duplicates; either traversal direction is accepted.
 // Non-contained strong segments receive ready mode points; lengths are measured for Center or comparison.
 // Weak and fully contained results retain geometry and bindings without preparing strong data.
-SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ModifierRegions &modifier,
+SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                              ModelVolumeType mode, const ExtractionContext &context = {});
 
 // Result of weak modifier segment processing
@@ -124,6 +134,7 @@ void init_precise_seam_data(
 // Parameters:
 //   strong_volumes    - list of strong precise seam modifiers
 //   polygon           - perimeter polygon (will be modified if point inserted)
+//   prepared          - preparation of this polygon; valid only until it is modified
 //   layer             - current layer
 //   slices_cache      - pre-sliced modifier polygons (built once in SeamPlacer::init)
 // Returns:
@@ -131,6 +142,7 @@ void init_precise_seam_data(
 std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
+    const PreparedPerimeter &prepared,
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings = nullptr);
@@ -143,6 +155,7 @@ std::optional<Point> insert_strong_seam_point(
 // Parameters:
 //   weak_volumes      - list of weak precise seam modifiers
 //   polygon           - perimeter polygon (will be modified with inserted points and refined edges)
+//   prepared          - preparation of this polygon, shared with unsuccessful strong processing
 //   layer             - current layer
 //   slices_cache      - pre-sliced modifier polygons (built once in SeamPlacer::init)
 // Returns:
@@ -150,6 +163,7 @@ std::optional<Point> insert_strong_seam_point(
 std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
+    const PreparedPerimeter &prepared,
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings = nullptr);

@@ -111,17 +111,60 @@ TEST_CASE("A simple clipped interval has consistent geometry before and after we
     const Polygon cut = corner ? rectangle(-2, -2, 4, 4) : rectangle(2, -2, 8, 2);
     const Point expected_begin = corner ? mm(0, 4) : mm(2, 0);
     const Point expected_end = corner ? mm(4, 0) : mm(8, 0);
-    const auto extracted = PreciseSeam::extract_perimeter_segments(perimeter, PreciseSeam::prepare_modifier_regions(ExPolygons{ExPolygon(cut)}), ModelVolumeType::PRECISE_SEAM_ENFORCED);
+    const auto extracted = PreciseSeam::extract_perimeter_segments(
+        PreciseSeam::PreparedPerimeter(perimeter), PreciseSeam::prepare_modifier_regions(ExPolygons{ExPolygon(cut)}), ModelVolumeType::PRECISE_SEAM_ENFORCED);
     REQUIRE(extracted.valid);
     REQUIRE(extracted.segments.size() == 1);
     CHECK(extracted.segments.front().polyline.points.front() == expected_begin);
     CHECK(extracted.segments.front().polyline.points.back() == expected_end);
     // Boundary insertion must preserve the extractor endpoints on this analytic fixture.
     const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {cut});
-    const auto applied = PreciseSeam::collect_weak_modifier_segments({modifier}, perimeter, fixture.layer, fixture.cache);
+    const auto applied = PreciseSeam::collect_weak_modifier_segments({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(applied.size() == 1);
     CHECK(applied.front().left_point == expected_begin);
     CHECK(applied.front().right_point == expected_end);
+    check_square_boundary(perimeter);
+}
+
+TEST_CASE("Unsuccessful strong modifiers share perimeter preparation with weak processing", "[PreciseSeam][Regression]")
+{
+    SeamFixture fixture;
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    const Points original = perimeter.points;
+    const auto *empty = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {});
+    const auto *distant = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {rectangle(30, 30, 40, 40)});
+    const auto *covering = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {rectangle(-2, -2, 22, 22)});
+    const auto *blocked = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {rectangle(2, -2, 8, 2)});
+    const auto *neutral = fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, {rectangle(4, -2, 6, 2)});
+    const PreciseSeam::PreparedPerimeter prepared(perimeter);
+    REQUIRE(prepared.valid);
+    CHECK(prepared.bounds.min == mm(0, 0));
+    CHECK(prepared.bounds.max == mm(20, 20));
+    REQUIRE(prepared.line.size() == original.size() + 1);
+    CHECK(prepared.line.points.front() == prepared.line.points.back());
+    const Point *line_storage = prepared.line.points.data();
+    PreciseSeam::PreciseSeamWarnings warnings;
+    CHECK_FALSE(PreciseSeam::insert_strong_seam_point(
+        {empty, distant, covering}, perimeter, prepared, fixture.layer, fixture.cache, &warnings).has_value());
+    CHECK(perimeter.points == original);
+    CHECK(prepared.line.points.data() == line_storage);
+    CHECK(warnings.full_containment.load());
+
+    // Weak receives the same preparation; neither consumer needs to reconstruct the clipping line.
+    const auto segments = PreciseSeam::collect_weak_modifier_segments(
+        {blocked, neutral}, perimeter, prepared, fixture.layer, fixture.cache, &warnings);
+    REQUIRE(segments.size() == 2);
+    // Insertion has now changed the polygon: do not use prepared for any further extraction.
+    const auto types = weak_candidate_types(perimeter, segments);
+    for (size_t i = 0; i < perimeter.size(); ++i) {
+        const Point &p = perimeter[i];
+        const bool in_outer = p.y() == 0 && p.x() >= scale_(2.) && p.x() <= scale_(8.);
+        const bool in_inner = p.x() >= scale_(4.) && p.x() <= scale_(6.);
+        const auto expected = in_outer && !in_inner ? SeamPlacerImpl::EnforcedBlockedSeamPoint::Blocked :
+                                                     SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral;
+        CHECK(types[i] == expected);
+    }
+    CHECK_FALSE(warnings.intersection_processing_failed.load());
     check_square_boundary(perimeter);
 }
 
@@ -196,16 +239,16 @@ TEST_CASE("Modifier slices above a raft use object layer indices for strong and 
     Polygon perimeter = original;
     if (is_precise_seam_strong(mode)) {
         const auto seam = PreciseSeam::insert_strong_seam_point(
-            {modifier}, perimeter, fixture.layer, fixture.cache);
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
         REQUIRE(seam.has_value());
         const double x = mode == ModelVolumeType::PRECISE_SEAM_LEFT ? 0. :
                          mode == ModelVolumeType::PRECISE_SEAM_RIGHT ? 4. : 2.;
         CHECK(*seam == origin + mm(x, 2));
         perimeter = original;
-        CHECK_FALSE(PreciseSeam::insert_strong_seam_point({modifier}, perimeter, upper, fixture.cache).has_value());
+        CHECK_FALSE(PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), upper, fixture.cache).has_value());
     } else {
         const auto segments = PreciseSeam::collect_weak_modifier_segments(
-            {modifier}, perimeter, fixture.layer, fixture.cache);
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
         REQUIRE(segments.size() == 1);
         CHECK(segments.front().left_point == origin + mm(0, 2));
         CHECK(segments.front().right_point == origin + mm(4, 2));
@@ -217,7 +260,7 @@ TEST_CASE("Modifier slices above a raft use object layer indices for strong and 
                                        SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral));
         }
         perimeter = original;
-        CHECK(PreciseSeam::collect_weak_modifier_segments({modifier}, perimeter, upper, fixture.cache).empty());
+        CHECK(PreciseSeam::collect_weak_modifier_segments({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), upper, fixture.cache).empty());
     }
     CHECK(perimeter.points == original.points);
 }
@@ -231,7 +274,7 @@ TEST_CASE("Strong seam modes select the requested location on a clipped side", "
     Polygon perimeter(Points{mm(0, 0), mm(2, 0), mm(4, 0), mm(8, 0), mm(20, 0), mm(20, 20), mm(0, 20)});
     const ModelVolume *modifier = fixture.add(mode, {rectangle(1, -2, 13, 2)});
     PreciseSeam::PreciseSeamWarnings warnings;
-    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
     REQUIRE(seam.has_value());
     const double expected_x = mode == ModelVolumeType::PRECISE_SEAM_LEFT ? 1.0 :
                               mode == ModelVolumeType::PRECISE_SEAM_RIGHT ? 13.0 : 7.0;
@@ -251,7 +294,7 @@ TEST_CASE("Center seams preserve the edge order at vertices and across the conto
     // Symmetric cuts put the arc midpoint exactly on an existing vertex, including vertex zero.
     const Polygon cut = wrap ? rectangle(-2, -2, 4, 4) : rectangle(1, -2, 7, 2);
     const ModelVolume *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {cut});
-    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache);
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(seam.has_value());
     CHECK(*seam == (wrap ? mm(0, 0) : mm(4, 0)));
     require_vertex(perimeter, wrap ? mm(0, 0.001) : mm(3.999, 0));
@@ -264,7 +307,7 @@ TEST_CASE("Center seams land on the closing edge", "[PreciseSeam]")
     SeamFixture fixture;
     Polygon perimeter = rectangle(0, 0, 20, 20);
     const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {rectangle(-2, 3, 2, 9)});
-    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache);
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(seam.has_value());
     CHECK(*seam == mm(0, 6));
     require_vertex(perimeter, mm(0, 5.999));
@@ -283,7 +326,7 @@ TEST_CASE("Weak boundaries on the closing edge preserve candidate types", "[Prec
     const Polygon cut = reverse ? rectangle(3, -2, 9, 2) : rectangle(-2, 3, 2, 9);
     const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {cut});
     const auto segments = PreciseSeam::collect_weak_modifier_segments(
-        {modifier}, perimeter, fixture.layer, fixture.cache);
+        {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(segments.size() == 1);
     const auto types = weak_candidate_types(perimeter, segments);
     for (size_t i = 0; i < perimeter.size(); ++i) {
@@ -308,12 +351,13 @@ TEST_CASE("Strong intersection warnings count joined segments across vertex zero
     if (extra_segment)
         regions.emplace_back(rectangle(8, -2, 12, 2));
     // The two fragments at vertex zero form one eight-millimeter segment, longer than the extra one.
-    const auto extracted = PreciseSeam::extract_perimeter_segments(perimeter, PreciseSeam::prepare_modifier_regions(regions), mode);
+    const auto extracted = PreciseSeam::extract_perimeter_segments(
+        PreciseSeam::PreparedPerimeter(perimeter), PreciseSeam::prepare_modifier_regions(regions), mode);
     REQUIRE(extracted.segments.size() == (extra_segment ? 2 : 1));
     const auto *modifier = fixture.add_regions(mode, std::move(regions));
     PreciseSeam::PreciseSeamWarnings warnings;
     const auto seam = PreciseSeam::insert_strong_seam_point(
-        {modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+        {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
     REQUIRE(seam.has_value());
     CHECK(*seam == (mode == ModelVolumeType::PRECISE_SEAM_LEFT ? mm(0, 4) :
                    mode == ModelVolumeType::PRECISE_SEAM_RIGHT ? mm(4, 0) : mm(0, 0)));
@@ -337,14 +381,14 @@ TEST_CASE("A collinear contour origin preserves strong targets and weak candidat
     PreciseSeam::PreciseSeamWarnings warnings;
     if (is_precise_seam_strong(mode)) {
         const auto seam = PreciseSeam::insert_strong_seam_point(
-            {modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
         REQUIRE(seam.has_value());
         const double x = mode == ModelVolumeType::PRECISE_SEAM_CENTER ? 10. :
             ((mode == ModelVolumeType::PRECISE_SEAM_LEFT) != reverse ? 8. : 12.);
         CHECK(*seam == mm(x, 0));
     } else {
         const auto segments = PreciseSeam::collect_weak_modifier_segments(
-            {modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
         REQUIRE(segments.size() == 1);
         const auto types = weak_candidate_types(perimeter, segments);
         for (size_t i = 0; i < perimeter.size(); ++i) {
@@ -374,13 +418,13 @@ TEST_CASE("A gap on the closing edge preserves the complementary seam segment", 
     PreciseSeam::PreciseSeamWarnings warnings;
     if (is_precise_seam_strong(mode)) {
         const auto seam = PreciseSeam::insert_strong_seam_point(
-            {modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
         REQUIRE(seam.has_value());
         CHECK(*seam == (mode == ModelVolumeType::PRECISE_SEAM_LEFT ? mm(0, 8) :
                        mode == ModelVolumeType::PRECISE_SEAM_RIGHT ? mm(0, 12) : mm(20, 10)));
     } else {
         const auto segments = PreciseSeam::collect_weak_modifier_segments(
-            {modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
         REQUIRE(segments.size() == 1);
         const auto types = weak_candidate_types(perimeter, segments);
         for (size_t i = 0; i < perimeter.size(); ++i) {
@@ -404,7 +448,7 @@ TEST_CASE("Coincident weak boundaries do not prevent later boundary refinement",
     const auto *a = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {rectangle(2, -2, 6, 2)});
     const auto *b = fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, {rectangle(2, -2, 6, 2)});
     const auto *c = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {rectangle(10, -2, 14, 2)});
-    const auto segments = PreciseSeam::collect_weak_modifier_segments({c, b, a}, perimeter, fixture.layer, fixture.cache);
+    const auto segments = PreciseSeam::collect_weak_modifier_segments({c, b, a}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(segments.size() == 3);
     for (double x : {1.999, 6.001, 9.999, 14.001})
         require_vertex(perimeter, mm(x, 0));
@@ -424,7 +468,7 @@ TEST_CASE("Weak boundaries on one source edge retain insertion order and modifie
     const auto *neutral = fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, {inner});
     // Priority order is not geometric insertion order; Neutral must win in the overlap.
     const auto segments = PreciseSeam::collect_weak_modifier_segments(
-        {blocked, neutral}, perimeter, fixture.layer, fixture.cache);
+        {blocked, neutral}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(segments.size() == 2);
     CHECK(segments[0].type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Blocked);
     CHECK(segments[1].type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral);
@@ -455,7 +499,7 @@ TEST_CASE("Weak boundaries sharing a vertex refine both sides", "[PreciseSeam]")
     Polygon perimeter = rectangle(0, 0, 20, 20);
     const auto *a = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {rectangle(2, -2, 6, 2)});
     const auto *b = fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, {rectangle(6, -2, 10, 2)});
-    const auto segments = PreciseSeam::collect_weak_modifier_segments({a, b}, perimeter, fixture.layer, fixture.cache);
+    const auto segments = PreciseSeam::collect_weak_modifier_segments({a, b}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(segments.size() == 2);
     require_vertex(perimeter, mm(5.999, 0));
     require_vertex(perimeter, mm(6.001, 0));
@@ -473,7 +517,7 @@ TEST_CASE("Weak processing applies every ready interval and leaves gaps unchange
                                                {area, ExPolygon(rectangle(14, -3, 18, 3))});
     PreciseSeam::PreciseSeamWarnings warnings;
     const auto segments = PreciseSeam::collect_weak_modifier_segments(
-        {modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+        {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
     REQUIRE(segments.size() == 3);
     const Points starts{mm(1, 0), mm(7, 0), mm(14, 0)};
     const Points ends{mm(4, 0), mm(10, 0), mm(18, 0)};
@@ -510,7 +554,7 @@ TEST_CASE("Weak priority and enforcement refinement apply on both crossed sides"
     const auto *low = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, {rectangle(8, -2, 12, 22)});
     const auto *high = fixture.add(high_type, {rectangle(10, -2, 14, 22)});
     const auto segments = PreciseSeam::collect_weak_modifier_segments(
-        {low, high}, perimeter, fixture.layer, fixture.cache);
+        {low, high}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(segments.size() == 4);
     CHECK(segments[0].type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Enforced);
     CHECK(segments[1].type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Enforced);
@@ -546,7 +590,7 @@ TEST_CASE("Weak full containment keeps its warning and leaves the perimeter unch
     const auto *modifier = fixture.add(type, {rectangle(-2, -2, 22, 22)});
     PreciseSeam::PreciseSeamWarnings warnings;
     const auto segments = PreciseSeam::collect_weak_modifier_segments(
-        {modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+        {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
     CHECK(segments.empty());
     CHECK(perimeter.points == original);
     CHECK(warnings.full_containment.load());
@@ -573,7 +617,7 @@ TEST_CASE("Unsupported strong modifier sections are skipped with the appropriate
         fixture.add_regions(ModelVolumeType::PRECISE_SEAM_CENTER, {ExPolygon(slices[0], slices[1])}) :
         fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, std::move(slices));
     PreciseSeam::PreciseSeamWarnings warnings;
-    CHECK_FALSE(PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache, &warnings).has_value());
+    CHECK_FALSE(PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings).has_value());
     CHECK(perimeter.points == original);
     CHECK(warnings.full_containment.load() == (scenario == 2 || scenario == 3));
     CHECK_FALSE(warnings.multiple_intersections.load());
@@ -593,7 +637,7 @@ TEST_CASE("Strong selects the longest arc rather than the longest chord", "[Prec
     if (reverse_regions) std::reverse(regions.begin(), regions.end());
     const auto *modifier = fixture.add_regions(mode, std::move(regions));
     PreciseSeam::PreciseSeamWarnings warnings;
-    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
     REQUIRE(seam.has_value());
     CHECK(*seam == (mode == ModelVolumeType::PRECISE_SEAM_LEFT ? mm(0, 4) :
                    mode == ModelVolumeType::PRECISE_SEAM_RIGHT ? mm(4, 0) : mm(0, 0)));
@@ -609,7 +653,7 @@ TEST_CASE("Equal strong lengths compare the selected mode points", "[PreciseSeam
     Polygon perimeter = rectangle(0, 0, 20, 20);
     // Both arcs are 6 mm: Left/Center prefer the corner; Right prefers the rear straight segment.
     const auto *modifier = fixture.add(mode, {rectangle(10, 18, 16, 22), rectangle(-2, 17, 3, 22)});
-    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache);
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(seam.has_value());
     CHECK(*seam == (mode == ModelVolumeType::PRECISE_SEAM_LEFT ? mm(3, 20) :
                    mode == ModelVolumeType::PRECISE_SEAM_RIGHT ? mm(10, 20) : mm(0, 20)));
@@ -625,7 +669,7 @@ TEST_CASE("Strong length comparison does not merge nearly equal lengths", "[Prec
     second.points[1].x() += extra;
     second.points[2].x() += extra;
     const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_LEFT, {rectangle(2, -2, 6, 2), second});
-    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache);
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(seam.has_value());
     CHECK(*seam == (extra == 0 ? mm(2, 0) : mm(12, 0)));
 }
@@ -636,7 +680,7 @@ TEST_CASE("Strong priority wins over a longer segment in another modifier", "[Pr
     Polygon perimeter = rectangle(0, 0, 20, 20);
     const auto *high = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {rectangle(2, -2, 4, 2)});
     const auto *low = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {rectangle(1, 18, 19, 22)});
-    const auto seam = PreciseSeam::insert_strong_seam_point({high, low}, perimeter, fixture.layer, fixture.cache);
+    const auto seam = PreciseSeam::insert_strong_seam_point({high, low}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(seam.has_value());
     CHECK(*seam == mm(3, 0));
     CHECK(std::find(perimeter.points.begin(), perimeter.points.end(), mm(10, 20)) == perimeter.points.end());
@@ -651,7 +695,7 @@ TEST_CASE("Strong continues past modifiers without usable segments", "[PreciseSe
         {contained ? rectangle(-2, -2, 22, 22) : rectangle(30, 30, 40, 40)});
     const auto *second = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {rectangle(2, -2, 6, 2)});
     PreciseSeam::PreciseSeamWarnings warnings;
-    const auto seam = PreciseSeam::insert_strong_seam_point({first, second}, perimeter, fixture.layer, fixture.cache, &warnings);
+    const auto seam = PreciseSeam::insert_strong_seam_point({first, second}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
     REQUIRE(seam.has_value());
     CHECK(*seam == mm(4, 0));
     CHECK(warnings.full_containment.load() == contained);
@@ -667,7 +711,7 @@ TEST_CASE("Strong compares all segments of structured modifier regions", "[Preci
     const auto *modifier = fixture.add_regions(ModelVolumeType::PRECISE_SEAM_CENTER,
                                                {area, ExPolygon(rectangle(14, -3, 18, 3))});
     PreciseSeam::PreciseSeamWarnings warnings;
-    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
     REQUIRE(seam.has_value());
     CHECK(*seam == mm(16, 0));
     CHECK(warnings.multiple_intersections.load());
@@ -690,7 +734,7 @@ TEST_CASE("Strong tie order uses bed axes after rotating and translating the inp
     for (Point &p : perimeter.points) transform(p);
     for (Point &p : modifier_region.points) transform(p);
     const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {modifier_region});
-    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache);
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(seam.has_value());
     CHECK(*seam == (rotated ? mm(80, 210) : mm(110, 220)));
 }
@@ -703,7 +747,7 @@ TEST_CASE("Strong modifiers warn when another slice polygon also intersects the 
     const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER,
                                        {rectangle(2, -2, 6, 2), rectangle(12, -2, 16, 2)});
     PreciseSeam::PreciseSeamWarnings warnings;
-    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
     REQUIRE(seam.has_value());
     CHECK(*seam == mm(4, 0));
     CHECK(warnings.multiple_intersections.load());
@@ -723,11 +767,11 @@ TEST_CASE("Crossing modifiers choose the rear strong segment and keep both weak 
     const auto *modifier = fixture.add(type, {rectangle(8, -2, 12, 22)});
     PreciseSeam::PreciseSeamWarnings warnings;
     if (strong) {
-        const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+        const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
         REQUIRE(seam.has_value());
         CHECK(*seam == mm(10, 20));
     } else {
-        const auto segments = PreciseSeam::collect_weak_modifier_segments({modifier}, perimeter, fixture.layer, fixture.cache, &warnings);
+        const auto segments = PreciseSeam::collect_weak_modifier_segments({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
         REQUIRE(segments.size() == 2);
         CHECK(segments[0].left_point == mm(8, 0));
         CHECK(segments[0].right_point == mm(12, 0));
@@ -760,12 +804,12 @@ TEST_CASE("Modifier hierarchy keeps strong order and applies the highest weak pr
     CHECK(strong == std::vector<const ModelVolume*>{strong_a, strong_b});
     CHECK(weak == std::vector<const ModelVolume*>{low, high});
     Polygon perimeter = rectangle(0, 0, 20, 20);
-    const auto seam = PreciseSeam::insert_strong_seam_point(strong, perimeter, fixture.layer, fixture.cache);
+    const auto seam = PreciseSeam::insert_strong_seam_point(strong, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(seam.has_value());
     CHECK(*seam == mm(2, 0));
 
     perimeter = rectangle(0, 0, 20, 20);
-    const auto segments = PreciseSeam::collect_weak_modifier_segments(weak, perimeter, fixture.layer, fixture.cache);
+    const auto segments = PreciseSeam::collect_weak_modifier_segments(weak, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
     REQUIRE(segments.size() == 2);
     PrintObjectSeamData::LayerSeams result;
     result.perimeters.emplace_back();
