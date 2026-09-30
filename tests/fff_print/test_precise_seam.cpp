@@ -108,7 +108,7 @@ TEST_CASE("A simple clipped interval has consistent geometry before and after we
     const Polygon cut = corner ? rectangle(-2, -2, 4, 4) : rectangle(2, -2, 8, 2);
     const Point expected_begin = corner ? mm(0, 4) : mm(2, 0);
     const Point expected_end = corner ? mm(4, 0) : mm(8, 0);
-    const auto extracted = PreciseSeam::extract_perimeter_segments(perimeter, ExPolygons{ExPolygon(cut)});
+    const auto extracted = PreciseSeam::extract_perimeter_segments(perimeter, ExPolygons{ExPolygon(cut)}, ModelVolumeType::PRECISE_SEAM_ENFORCED);
     REQUIRE(extracted.valid);
     REQUIRE(extracted.segments.size() == 1);
     CHECK(extracted.segments.front().polyline.points.front() == expected_begin);

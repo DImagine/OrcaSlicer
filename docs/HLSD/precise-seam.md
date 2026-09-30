@@ -115,19 +115,22 @@ rolls back and discards only that fragment, with a diagnostic marker. Overlappin
 source visits are outside the binding contract. Boundary contacts are accepted
 as returned by clipping, without offsets or additional contact rules.
 
-Each segment retains source edge indices and endpoint positions. Strong extraction
-also calculates and retains Euclidean edge lengths; weak disables both total and
-per-edge length calculation. Its boundary insertion and enforcement subdivision
-still perform their own necessary measurements. Neighboring intervals are joined,
-including across contour vertex zero.
+Each segment retains source edge indices and endpoint positions. Neighboring
+intervals are joined, including across contour vertex zero. The extractor takes
+the modifier mode explicitly. For strong modes, it then prepares each complete
+segment's Euclidean arc length and mode point with its source edge index. Weak
+skips both length and target preparation; its boundary insertion and enforcement
+subdivision still perform their own necessary measurements.
 Insertion snaps points within 1 micrometre of an existing vertex to that vertex.
 
 ## Strong modifiers
 
-Strong modifiers are considered in priority order. For every segment of the
-current modifier, its mode point is computed before any insertion: first point
-for Left, last point for Right, or half the arc length for Center. Center reuses
-the edge lengths and source edge indices already computed by extraction.
+Strong modifiers are considered in priority order. Each extracted segment already
+contains its mode point: first point for Left, last point for Right, or half the
+arc length for Center. Center temporarily retains edge lengths while measuring
+one segment, then uses them and source edge indices to locate the midpoint. This
+local array is discarded before processing the next segment; Left and Right do
+not fill it. Selection consumes the ready points before any perimeter insertion.
 
 The longest segment of that modifier wins, using the sum of Euclidean lengths,
 not its chord or vertex count. Exactly equal lengths are resolved by the mode

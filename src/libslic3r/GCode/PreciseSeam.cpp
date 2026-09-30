@@ -198,8 +198,45 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
 }
 } // namespace detail
 
+// Finalize one joined strong segment; only Center needs temporary per-edge lengths.
+static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mode)
+{
+    const bool center = mode == ModelVolumeType::PRECISE_SEAM_CENTER;
+    std::vector<double> edge_lengths;
+    if (center)
+        edge_lengths.reserve(segment.edge_indices.size());
+    for (size_t i = 0; i < segment.edge_indices.size(); ++i) {
+        const double length = (segment.polyline.points[i + 1].cast<double>() -
+                               segment.polyline.points[i].cast<double>()).norm();
+        segment.length += length;
+        if (center)
+            edge_lengths.push_back(length);
+    }
+    if (mode == ModelVolumeType::PRECISE_SEAM_LEFT) {
+        segment.strong_target = StrongSeamTarget{segment.polyline.points.front(), segment.begin.edge_index};
+        return;
+    }
+    segment.strong_target = StrongSeamTarget{segment.polyline.points.back(), segment.end.edge_index};
+    if (!center)
+        return;
+
+    // The total is now known; reuse local lengths to locate its half without new square roots.
+    double remaining = segment.length * 0.5;
+    for (size_t i = 0; i < edge_lengths.size(); ++i) {
+        const double length = edge_lengths[i];
+        if (remaining <= length && length > 0.) {
+            const Point &a = segment.polyline.points[i];
+            const Point &b = segment.polyline.points[i + 1];
+            segment.strong_target = StrongSeamTarget{
+                a + ((remaining / length) * (b - a).cast<double>()).cast<coord_t>(), segment.edge_indices[i]};
+            return;
+        }
+        remaining -= length;
+    }
+}
+
 SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier,
-                                             const ExtractionContext &context, bool calculate_lengths)
+                                             ModelVolumeType mode, const ExtractionContext &context)
 {
     using detail::ClippedEdgeInterval;
     SegmentExtraction result;
@@ -276,12 +313,6 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExP
         segment.polyline.points.push_back(interval.last);
         segment.edge_indices.push_back(interval.edge);
         segment.end = end;
-        // Only strong selection needs arc lengths; weak retains geometry without this work.
-        if (calculate_lengths) {
-            const double length = (interval.last.cast<double>() - interval.first.cast<double>()).norm();
-            segment.edge_lengths.push_back(length);
-            segment.length += length;
-        }
     }
     if (result.segments.size() > 1 && same_position(result.segments.back().end, result.segments.front().begin)) {
         // Only the artificial cut at vertex zero can join the last and first intervals.
@@ -290,11 +321,13 @@ SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExP
         PerimeterSegment &head = result.segments.front();
         tail.polyline.points.insert(tail.polyline.points.end(), head.polyline.points.begin() + 1, head.polyline.points.end());
         tail.edge_indices.insert(tail.edge_indices.end(), head.edge_indices.begin(), head.edge_indices.end());
-        tail.edge_lengths.insert(tail.edge_lengths.end(), head.edge_lengths.begin(), head.edge_lengths.end());
         tail.end = head.end;
-        tail.length += head.length;
         head = std::move(tail);
     }
+    // Compute ready strong targets only after joining across vertex zero; weak needs neither lengths nor targets.
+    if (is_precise_seam_strong(mode))
+        for (PerimeterSegment &segment : result.segments)
+            prepare_strong_segment(segment, mode);
     // A full loop must cover every original edge, not merely have equal endpoint coordinates.
     result.full_containment = merged.size() == count;
     for (size_t i = 0; result.full_containment && i < count; ++i)
@@ -338,29 +371,6 @@ void init_precise_seam_data(
     // Collection already preserves model order, with higher-priority strong modifiers first.
     // Weak modifiers use last-write-wins, so apply the higher-priority ones last.
     std::reverse(weak_volumes_out.begin(), weak_volumes_out.end());
-}
-
-// Compute the selected mode for every candidate before mutating the source perimeter.
-static std::pair<Point, size_t> strong_segment_target(const PerimeterSegment &segment, ModelVolumeType mode)
-{
-    if (mode == ModelVolumeType::PRECISE_SEAM_LEFT)
-        return {segment.polyline.points.front(), segment.begin.edge_index};
-    if (mode == ModelVolumeType::PRECISE_SEAM_RIGHT)
-        return {segment.polyline.points.back(), segment.end.edge_index};
-    assert(mode == ModelVolumeType::PRECISE_SEAM_CENTER);
-    // Reuse extraction lengths and provenance: Center needs no global edge search.
-    double remaining = segment.length * 0.5;
-    for (size_t i = 0; i < segment.edge_lengths.size(); ++i) {
-        const double length = segment.edge_lengths[i];
-        if (remaining <= length && length > 0.) {
-            const Point &a = segment.polyline.points[i];
-            const Point &b = segment.polyline.points[i + 1];
-            return {a + ((remaining / length) * (b - a).cast<double>()).cast<coord_t>(),
-                    segment.edge_indices[i]};
-        }
-        remaining -= length;
-    }
-    return {segment.polyline.points.back(), segment.end.edge_index};
 }
 
 // Insert point into perimeter with proximity check to existing vertices
@@ -512,7 +522,7 @@ std::optional<Point> insert_strong_seam_point(
         if (it == slices_cache.end() || layer_id >= it->second.size())
             continue;
         const SegmentExtraction extracted = extract_perimeter_segments(
-            polygon, it->second[layer_id], {layer, modifier, warnings});
+            polygon, it->second[layer_id], modifier->type(), {layer, modifier, warnings});
         if (!extracted.valid)
             continue;
         // Full containment retains its existing skip policy, separately from segment selection.
@@ -526,20 +536,21 @@ std::optional<Point> insert_strong_seam_point(
         if (warnings && extracted.segments.size() > 1)
             warnings->multiple_intersections.store(true, std::memory_order_relaxed);
 
-        std::pair<Point, size_t> target{Point(0, 0), 0};
+        StrongSeamTarget target{Point(0, 0), 0};
         double longest = -1.;
         for (const PerimeterSegment &segment : extracted.segments) {
-            const auto candidate = strong_segment_target(segment, modifier->type());
+            assert(segment.strong_target.has_value());
+            const StrongSeamTarget &candidate = *segment.strong_target;
             // Slice coordinates already include object rotation and retain bed axes.
             // Centering/instance translation cannot change rear (+Y), then left (-X) ordering.
-            const bool farther_or_left = candidate.first.y() > target.first.y() ||
-                (candidate.first.y() == target.first.y() && candidate.first.x() < target.first.x());
+            const bool farther_or_left = candidate.point.y() > target.point.y() ||
+                (candidate.point.y() == target.point.y() && candidate.point.x() < target.point.x());
             if (segment.length > longest || (segment.length == longest && farther_or_left)) {
                 longest = segment.length;
                 target = candidate;
             }
         }
-        auto result = insert_point_into_perimeter(target.first, target.second, polygon);
+        auto result = insert_point_into_perimeter(target.point, target.edge_index, polygon);
         if (!result)
             return std::nullopt;
         // Preserve the insertion order: refining before first would shift the seam index.
@@ -787,7 +798,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         if (it == slices_cache.end() || layer_id >= it->second.size())
             continue;
         const ExtractionContext context{layer, modifier_volume, warnings};
-        const SegmentExtraction extracted = extract_perimeter_segments(polygon, it->second[layer_id], context, false);
+        const SegmentExtraction extracted = extract_perimeter_segments(polygon, it->second[layer_id], modifier_volume->type(), context);
         if (!extracted.valid)
             continue;
         // Keep the existing full-containment policy until it is changed explicitly.

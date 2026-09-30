@@ -46,14 +46,20 @@ struct PerimeterPosition {
     double parameter;
 };
 
+// Prepared against the immutable perimeter, before insertion shifts its edge indices.
+struct StrongSeamTarget {
+    Point point;
+    size_t edge_index;
+};
+
 struct PerimeterSegment {
     Polyline polyline;
     // One bound source edge per polyline interval.
     std::vector<size_t> edge_indices;
     PerimeterPosition begin;
     PerimeterPosition end;
-    std::vector<double> edge_lengths; // Reused by Center; empty when length calculation is disabled.
-    double length = 0.; // Euclidean arc length in scaled coordinates; zero when not calculated.
+    std::optional<StrongSeamTarget> strong_target; // Absent for weak modifiers.
+    double length = 0.; // Euclidean arc length in scaled coordinates; not calculated for weak.
 };
 
 struct SegmentExtraction {
@@ -67,9 +73,9 @@ struct SegmentExtraction {
 // Each exterior keeps its holes; disjoint region bounds are rejected before clipping.
 // Outer contours and holes use nonzero winding. The perimeter must have at least three
 // vertices and no consecutive duplicates; either traversal direction is accepted.
-// Weak callers disable length calculation: they consume only geometry and bindings.
+// Strong modes also receive arc lengths and ready mode points; weak receives only geometry and bindings.
 SegmentExtraction extract_perimeter_segments(const Polygon &perimeter, const ExPolygons &modifier,
-                                             const ExtractionContext &context = {}, bool calculate_lengths = true);
+                                             ModelVolumeType mode, const ExtractionContext &context = {});
 
 // Result of weak modifier segment processing
 struct WeakModifierSegment {

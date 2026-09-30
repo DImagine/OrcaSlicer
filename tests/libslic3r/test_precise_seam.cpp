@@ -23,14 +23,9 @@ void check_provenance(const Polygon &perimeter, const PreciseSeam::SegmentExtrac
     for (const auto &segment : result.segments) {
         REQUIRE(segment.polyline.size() >= 2);
         REQUIRE(segment.edge_indices.size() + 1 == segment.polyline.size());
-        REQUIRE(segment.edge_lengths.size() == segment.edge_indices.size());
-        double cached_length = 0.;
-        for (double length : segment.edge_lengths) {
-            CHECK(length > 0.);
-            cached_length += length;
-        }
-        // Wrapped segments must carry their lengths in the same order as their source edges.
-        CHECK_THAT(cached_length, Catch::Matchers::WithinRel(segment.length, 1e-12));
+        REQUIRE(segment.strong_target.has_value());
+        REQUIRE(segment.strong_target->edge_index < perimeter.size());
+        CHECK_THAT(segment.polyline.length(), Catch::Matchers::WithinRel(segment.length, 1e-12));
         CHECK(segment.length > 0.);
         const std::pair<PreciseSeam::PerimeterPosition, Point> endpoints[] = {
             {segment.begin, segment.polyline.points.front()}, {segment.end, segment.polyline.points.back()}};
@@ -63,15 +58,18 @@ void check_provenance(const Polygon &perimeter, const PreciseSeam::SegmentExtrac
 }
 } // namespace
 
-TEST_CASE("Skipping segment lengths preserves geometry and source bindings", "[PreciseSeam][SegmentExtraction]")
+TEST_CASE("Weak extraction preserves geometry and bindings without preparing strong data", "[PreciseSeam][SegmentExtraction]")
 {
     const int scenario = GENERATE(0, 1, 2);
     const Polygon perimeter = rectangle(0, 0, 20, 20);
     // Cover separate intervals, joining across vertex zero, and full containment.
     const ExPolygons modifier{ExPolygon(scenario == 0 ? rectangle(8, -2, 12, 22) :
                                         scenario == 1 ? rectangle(-2, -2, 4, 4) : rectangle(-2, -2, 22, 22))};
-    const auto measured = PreciseSeam::extract_perimeter_segments(perimeter, modifier);
-    const auto unmeasured = PreciseSeam::extract_perimeter_segments(perimeter, modifier, {}, false);
+    const auto measured = PreciseSeam::extract_perimeter_segments(perimeter, modifier, ModelVolumeType::PRECISE_SEAM_CENTER);
+    const auto weak_mode = GENERATE(ModelVolumeType::PRECISE_SEAM_ENFORCED,
+                                    ModelVolumeType::PRECISE_SEAM_BLOCKED,
+                                    ModelVolumeType::PRECISE_SEAM_NEUTRAL);
+    const auto unmeasured = PreciseSeam::extract_perimeter_segments(perimeter, modifier, weak_mode);
     check_provenance(perimeter, measured);
     CHECK(unmeasured.valid == measured.valid);
     CHECK(unmeasured.full_containment == measured.full_containment);
@@ -86,9 +84,39 @@ TEST_CASE("Skipping segment lengths preserves geometry and source bindings", "[P
         CHECK(actual.end.edge_index == expected.end.edge_index);
         CHECK_THAT(actual.begin.parameter, Catch::Matchers::WithinAbs(expected.begin.parameter, 1e-12));
         CHECK_THAT(actual.end.parameter, Catch::Matchers::WithinAbs(expected.end.parameter, 1e-12));
-        CHECK(actual.edge_lengths.empty());
+        CHECK_FALSE(actual.strong_target.has_value());
         CHECK_THAT(actual.length, Catch::Matchers::WithinAbs(0., 1e-12));
     }
+}
+
+TEST_CASE("Strong extraction prepares the mode point on the complete joined segment", "[PreciseSeam][SegmentExtraction]")
+{
+    const auto mode = GENERATE(ModelVolumeType::PRECISE_SEAM_LEFT,
+                               ModelVolumeType::PRECISE_SEAM_RIGHT,
+                               ModelVolumeType::PRECISE_SEAM_CENTER);
+    const bool reverse = GENERATE(false, true);
+    const double width = GENERATE(4., 6.);
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    if (reverse)
+        std::reverse(perimeter.points.begin(), perimeter.points.end());
+    // The forward contour crosses vertex zero; Center is either that vertex or inside an edge.
+    const auto result = PreciseSeam::extract_perimeter_segments(
+        perimeter, {ExPolygon(rectangle(-2, -2, width, 4))}, mode);
+    check_provenance(perimeter, result);
+    REQUIRE(result.segments.size() == 1);
+    const auto &segment = result.segments.front();
+    CHECK_THAT(segment.length, Catch::Matchers::WithinAbs(scale_(width + 4.), 1e-6));
+
+    Point expected_point = mm((width - 4.) / 2., 0);
+    size_t expected_edge = reverse ? 2 : (width == 4. ? 3 : 0);
+    if (mode != ModelVolumeType::PRECISE_SEAM_CENTER) {
+        const bool vertical = (mode == ModelVolumeType::PRECISE_SEAM_LEFT) != reverse;
+        expected_point = vertical ? mm(0, 4) : mm(width, 0);
+        expected_edge = vertical ? 3 : (reverse ? 2 : 0);
+    }
+    REQUIRE(segment.strong_target.has_value());
+    CHECK(segment.strong_target->point == expected_point);
+    CHECK(segment.strong_target->edge_index == expected_edge);
 }
 
 TEST_CASE("Projection binding follows the same edge and its neighbor in either direction", "[PreciseSeam][SegmentExtraction]")
@@ -176,7 +204,7 @@ TEST_CASE("A crossing modifier extracts both perimeter intervals without a body 
     Polygon perimeter = rectangle(0, 0, 20, 20);
     if (reverse) perimeter.reverse();
     const Points original = perimeter.points;
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(8, -2, 12, 22))});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(8, -2, 12, 22))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     CHECK(perimeter.points == original);
     REQUIRE(result.segments.size() == 2);
@@ -196,7 +224,7 @@ TEST_CASE("A corner interval remains connected when the contour origin changes",
     const size_t origin = GENERATE(size_t(0), size_t(1), size_t(2), size_t(3));
     Polygon perimeter = rectangle(0, 0, 20, 20);
     std::rotate(perimeter.points.begin(), perimeter.points.begin() + origin, perimeter.points.end());
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-2, -2, 4, 4))});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-2, -2, 4, 4))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 1);
     const auto &segment = result.segments.front();
@@ -209,7 +237,7 @@ TEST_CASE("A corner interval remains connected when the contour origin changes",
 TEST_CASE("Collinear perimeter vertices retain their original edge provenance", "[PreciseSeam][SegmentExtraction]")
 {
     const Polygon perimeter(Points{mm(0, 0), mm(2, 0), mm(4, 0), mm(8, 0), mm(20, 0), mm(20, 20), mm(0, 20)});
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(1, -2, 13, 2))});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(1, -2, 13, 2))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 1);
     const auto &segment = result.segments.front();
@@ -231,7 +259,7 @@ TEST_CASE("Interior vertices retain their sequence between two cut endpoints", "
     perimeter.points.push_back(mm(0, 10));
     if (reverse) perimeter.reverse();
     std::rotate(perimeter.points.begin(), perimeter.points.begin() + origin, perimeter.points.end());
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(2.5, -2, 8.5, 3))});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(2.5, -2, 8.5, 3))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 1);
     const auto &segment = result.segments.front();
@@ -251,7 +279,7 @@ TEST_CASE("Neighboring vertices distinguish repeated anchors on different lobes"
     Polygon perimeter(Points{mm(0, 0), mm(4, 0), mm(4, 4), mm(0, 4),
                              mm(0, 0), mm(-4, 0), mm(-4, -4), mm(0, -4)});
     if (reverse) perimeter.reverse();
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-1, -5, 1, 5))});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-1, -5, 1, 5))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 2);
     std::vector<size_t> edges;
@@ -270,7 +298,7 @@ TEST_CASE("Modifier holes subtract coverage while separate components add interv
     area.holes.push_back(rectangle(4, -1, 7, 1));
     area.holes.back().reverse();
     const auto result = PreciseSeam::extract_perimeter_segments(perimeter,
-        {area, ExPolygon(rectangle(14, -3, 18, 3))});
+        {area, ExPolygon(rectangle(14, -3, 18, 3))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 3);
     const std::vector<Point> starts{mm(1, 0), mm(7, 0), mm(14, 0)};
@@ -291,7 +319,7 @@ TEST_CASE("Full coverage is distinct from an empty or point-only intersection", 
     if (scenario == 1) modifier = {ExPolygon(rectangle(2, 2, 4, 4))};
     if (scenario == 2) modifier = {ExPolygon(rectangle(30, 30, 40, 40))};
     if (scenario == 3) modifier = {ExPolygon(rectangle(20, 20, 25, 25))};
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, modifier);
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, modifier, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     CHECK(result.full_containment == (scenario == 0));
     if (scenario == 0) {
@@ -306,7 +334,7 @@ TEST_CASE("Repeated visits to a coordinate stay on their original perimeter edge
 {
     // Two visits to the origin belong to different lobes, not to one shared vertex.
     const Polygon perimeter(Points{mm(0, 0), mm(4, 0), mm(4, 4), mm(0, 0), mm(-4, 0), mm(-4, -4)});
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-1, -1, 1, 1))});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-1, -1, 1, 1))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 2);
     std::vector<size_t> edges;
@@ -320,7 +348,7 @@ TEST_CASE("Two-point fragments accept the first matching perimeter edge", "[Prec
 {
     // Policy: do not search for duplicate bindings on overlapping source edges.
     const Polygon perimeter(Points{mm(0, 0), mm(10, 0), mm(0, 0), mm(0, 10)});
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(2, -1, 8, 1))});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(2, -1, 8, 1))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 1);
     CHECK(result.segments[0].edge_indices == std::vector<size_t>{0});
@@ -335,7 +363,7 @@ TEST_CASE("Unnormalized perimeter input is reported instead of silently losing c
     Polygon perimeter;
     if (scenario == 1) perimeter.points = {mm(0, 0), mm(20, 0)};
     if (scenario == 2) perimeter.points = {mm(0, 0), mm(20, 0), mm(20, 0), mm(0, 20)};
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-2, -2, 22, 22))});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-2, -2, 22, 22))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     CHECK_FALSE(result.valid);
     CHECK(result.segments.empty());
     CHECK_FALSE(result.full_containment);
@@ -344,7 +372,7 @@ TEST_CASE("Unnormalized perimeter input is reported instead of silently losing c
 TEST_CASE("Segment lengths measure diagonal arcs rather than squared distances", "[PreciseSeam][SegmentExtraction]")
 {
     const Polygon perimeter(Points{mm(0, 0), mm(10, 10), mm(0, 10)});
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(2, -1, 6, 11))});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(2, -1, 6, 11))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 2);
     CHECK(result.segments[0].polyline.points.front() == mm(2, 2));
@@ -358,7 +386,7 @@ TEST_CASE("An endpoint at an original vertex uses its outgoing edge including ve
     const size_t origin = GENERATE(size_t(0), size_t(1));
     Polygon perimeter(Points{mm(0, 0), mm(5, 5), mm(0, 10)});
     std::rotate(perimeter.points.begin(), perimeter.points.begin() + origin, perimeter.points.end());
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-1, -1, 6, 5))});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {ExPolygon(rectangle(-1, -1, 6, 5))}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 1);
     const auto &segment = result.segments.front();
@@ -374,7 +402,7 @@ TEST_CASE("A one-unit uncovered gap is not bridged by the projection tolerance",
     const ExPolygons modifier{
         ExPolygon(Polygon(Points{Point(3, -2), Point(8, -2), Point(8, 2), Point(3, 2)})),
         ExPolygon(Polygon(Points{Point(9, -2), Point(14, -2), Point(14, 2), Point(9, 2)}))};
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, modifier);
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, modifier, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 2);
     CHECK(result.segments[0].polyline.points.back() == Point(8, 0));
@@ -394,7 +422,7 @@ TEST_CASE("Distant modifier areas do not change nearby coverage or detach its ho
     distant.holes.back().reverse();
     ExPolygons modifier{distant, nearby, ExPolygon(rectangle(14, -3, 18, 3))};
     if (reverse_areas) std::reverse(modifier.begin(), modifier.end());
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, modifier);
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, modifier, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 3);
     const Points starts{mm(1, 0), mm(7, 0), mm(14, 0)};
@@ -414,7 +442,7 @@ TEST_CASE("Rounded intersections on an inclined edge retain their original edge"
     Polygon perimeter(Points{Point(0, 0), Point(10, 3), Point(10, 20), Point(0, 20)});
     if (reverse) perimeter.reverse();
     const ExPolygon area(Polygon(Points{Point(3, -2), Point(7, -2), Point(7, 5), Point(3, 5)}));
-    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {area});
+    const auto result = PreciseSeam::extract_perimeter_segments(perimeter, {area}, ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 1);
     const auto &segment = result.segments.front();
