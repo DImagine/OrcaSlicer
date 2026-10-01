@@ -559,7 +559,11 @@ every volume type.
 `Print::apply()` compares the Precise Seam volumes of each object by type, ID
 and transformation. Adding, removing, moving, reordering or retyping one cancels
 background processing and invalidates only `psGCodeExport`; the sliced layers
-are kept. `model_volume_list_update_supports_and_seams()` then brings the
+are kept, as long as the printable volumes do not change. One upstream exception
+changes them: deleting a volume so that only one remains makes
+`ModelObject::delete_volume()` fold that volume's transformation into the
+instances and give it a new ID, so removing the last helper of a single-part
+object reslices it, as removing any last modifier would. `model_volume_list_update_supports_and_seams()` then brings the
 support and Precise Seam volumes of the print's model copy in line with the new
 model in one pass. A volume may switch between these two families, since neither
 affects object slicing; such a switch also changes the support volumes, so the
@@ -600,7 +604,8 @@ object as before.
   exposes the binding internals to tests.
 - [SeamPlacer.cpp](../../src/libslic3r/GCode/SeamPlacer.cpp) fills the cache,
   normalizes perimeters, calls both consumers while gathering candidates,
-  restores strong positions after alignment and issues the warning.
+  restores strong positions after alignment and prepares the warning text, which
+  [GCode.cpp](../../src/libslic3r/GCode.cpp) issues during G-code export.
 - [Model.hpp](../../src/libslic3r/Model.hpp) defines the types and their order,
   [PrintApply.cpp](../../src/libslic3r/PrintApply.cpp) handles invalidation, and
   [PrintObjectSlice.cpp](../../src/libslic3r/PrintObjectSlice.cpp) slices single

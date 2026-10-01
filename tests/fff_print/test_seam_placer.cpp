@@ -293,11 +293,16 @@ TEST_CASE("Precise Seam volume changes invalidate only G-code export", "[SeamPla
     CAPTURE(change);
     PipelineFixture fixture;
     ModelObject *model_object = fixture.model.objects.front();
+    // A second helper stays in the object throughout: deleting down to a single volume makes
+    // ModelObject::delete_volume() fold the volume transform into the instances and renew the volume
+    // ID, which legitimately reslices the object regardless of Precise Seam.
+    ModelVolume *keeper = model_object->add_volume(make_cube(1, 1, 1));
+    keeper->set_type(ModelVolumeType::PRECISE_SEAM_NEUTRAL);
     if (change != 0) {
         ModelVolume *seam = model_object->add_volume(make_cube(1, 1, 1));
         seam->set_type(ModelVolumeType::PRECISE_SEAM_CENTER);
-        fixture.print.apply(fixture.model, fixture.config);
     }
+    fixture.print.apply(fixture.model, fixture.config);
     // A full export marks every step done, so an invalidated step is visible afterwards.
     Test::gcode(fixture.print);
     REQUIRE(fixture.print.objects().size() == 1);
@@ -319,8 +324,9 @@ TEST_CASE("Precise Seam volume changes invalidate only G-code export", "[SeamPla
     fixture.print.apply(fixture.model, fixture.config);
 
     // The helper takes no part in slicing: the object and its layers are kept, only export reruns.
+    // REQUIRE, not CHECK: a recreated PrintObject means the old one was freed and must not be read.
     REQUIRE(fixture.print.objects().size() == 1);
-    CHECK(fixture.print.objects().front() == object);
+    REQUIRE(fixture.print.objects().front() == object);
     CHECK_FALSE(fixture.print.is_step_done(psGCodeExport));
     CHECK(object->is_step_done(posSlice));
     CHECK(object->is_step_done(posPerimeters));
