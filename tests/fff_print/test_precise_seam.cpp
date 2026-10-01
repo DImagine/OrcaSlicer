@@ -536,7 +536,7 @@ TEST_CASE("Weak boundaries on one source edge retain insertion order and modifie
 TEST_CASE("Weak zones overwrite painted candidate types inside their boundaries only", "[PreciseSeam][Regression]")
 {
     using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
-    // Paint the bottom side Enforced and the top side Blocked; the vertical sides stay Neutral.
+    // The bottom side is painted Enforced or Blocked, the top side Blocked; the vertical sides stay Neutral.
     const Type painted_bottom = GENERATE(Type::Enforced, Type::Blocked);
     const auto zone_type = GENERATE(ModelVolumeType::PRECISE_SEAM_ENFORCED, ModelVolumeType::PRECISE_SEAM_BLOCKED,
                                     ModelVolumeType::PRECISE_SEAM_NEUTRAL);

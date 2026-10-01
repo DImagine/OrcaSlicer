@@ -114,7 +114,9 @@ static bool append_exact_fragment(const Polyline &fragment, const Polygon &perim
 {
     const size_t size = fragment.size();
     const size_t count = perimeter.size();
-    if (size < 3 || size > count + 2)
+    assert(size >= 3); // bind_fragment() sends only fragments with interior points here.
+    // A longer sequence cannot be one exact pass over this contour.
+    if (size > count + 2)
         return false;
     for (size_t anchor = 0; anchor < count; ++anchor) {
         if (fragment.points[1] != perimeter.points[anchor])
@@ -203,9 +205,11 @@ bool append_projected_fragment(const Polyline &fragment, const Polygon &perimete
             if (!matched && end == (forward ? 1. : 0.) && fragment.points[i - 1] == perimeter.points[vertex]) {
                 const size_t edge = forward ? vertex : (previous.edge + count - 1) % count;
                 matched = interval_on_edge(fragment.points[i - 1], fragment.points[i], edge, perimeter);
-                if (matched && (is_forward(*matched) != forward ||
-                                (forward ? matched->begin != 0. : matched->end != 1.)))
+                if (matched && is_forward(*matched) != forward)
                     matched.reset();
+                // The shared point is exactly the neighbor's start (forward) or end (backward) vertex,
+                // so parameter_on_edge() returns exactly 0 or 1 for it.
+                assert(!matched || (forward ? matched->begin == 0. : matched->end == 1.));
             }
         }
         if (!matched) {
@@ -560,16 +564,11 @@ void init_precise_seam_data(
     // Collect and categorize precise seam modifiers
     for (const ModelVolume* volume : model_object->volumes) {
         if (volume->is_precise_seam()) {
-            ModelVolumeType type = volume->type();
-            // Categorization: strong modifiers have priority
-            if (type == ModelVolumeType::PRECISE_SEAM_CENTER ||
-                type == ModelVolumeType::PRECISE_SEAM_LEFT ||
-                type == ModelVolumeType::PRECISE_SEAM_RIGHT) {
+            // Strong (Center/Left/Right) and weak (Enforced/Blocked/Neutral) go to separate lists.
+            if (volume->is_precise_seam_strong())
                 strong_volumes_out.push_back(volume);
-            } else {
-                // ENFORCED, BLOCKED, NEUTRAL - weak modifiers (processed later)
+            else
                 weak_volumes_out.push_back(volume);
-            }
         }
     }
 
@@ -638,22 +637,17 @@ static std::pair<Point, size_t> insert_point_into_perimeter(
 // Insert new point at distance TOLERANCE_LINEAR from specified perimeter vertex
 // Insertion direction specified by direction parameter: +1 = after vertex, -1 = before vertex
 // If target edge length < 2*TOLERANCE_LINEAR, insertion not performed (new point would be too close to edge end)
-// Returns true if point was inserted, false otherwise
 // point_idx is index of perimeter vertex from which insertion is performed
-static bool refine_at_vertex(
+// Preconditions: at least three vertices (callers run on a valid PreparedPerimeter and only add
+// vertices) and direction +1 or -1.
+static void refine_at_vertex(
     size_t point_idx,
     int direction,
     Polygon &perimeter_polygon
 )
 {
-    // Check input data
-    if (perimeter_polygon.points.size() < 3) {
-        return false;  // Polygon must be at least a triangle
-    }
-
-    if (direction != 1 && direction != -1) {
-        return false;  // Direction must be +1 or -1
-    }
+    assert(perimeter_polygon.points.size() >= 3);
+    assert(direction == 1 || direction == -1);
 
     size_t perim_max = perimeter_polygon.points.size();
 
@@ -681,7 +675,7 @@ static bool refine_at_vertex(
     // New point must be at distance TOLERANCE_LINEAR from start
     // and at distance >= TOLERANCE_LINEAR from end
     if (edge_length < 2.0 * TOLERANCE_LINEAR) {
-        return false;  // Edge too short - new point would be too close to end
+        return;  // Edge too short - new point would be too close to end
     }
 
     // Calculate new point coordinates: edge_start + TOLERANCE_LINEAR * direction_normalized
@@ -707,8 +701,6 @@ static bool refine_at_vertex(
             new_point
         );
     }
-
-    return true;
 }
 
 // Strong priority is per modifier, never a global maximum across different modifiers.
@@ -770,9 +762,10 @@ std::optional<Point> insert_strong_seam_point(
 }
 
 // Convert ModelVolumeType of weak modifier to EnforcedBlockedSeamPoint.
-// Precondition: called only with weak precise-seam types (filtered via is_precise_seam_weak()).
+// Precondition: a weak precise-seam type; init_precise_seam_data() puts only those in the weak list.
 // Exhaustive switch (no default) so -Wswitch flags any future PRECISE_SEAM_* additions.
 static EnforcedBlockedSeamPoint convert_weak_modifier_type(ModelVolumeType type) {
+    assert(is_precise_seam_weak(type));
     switch (type) {
         case ModelVolumeType::PRECISE_SEAM_ENFORCED:
             return EnforcedBlockedSeamPoint::Enforced;
@@ -857,27 +850,21 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
     // Determine type pattern for each polygon edge (sequential application of hierarchy)
     std::vector<EnforcedBlockedSeamPoint> edge_types(polygon.size(), EnforcedBlockedSeamPoint::Neutral);
 
-    // Helper lambda: search for point index in modified polygon by coordinates.
+    // Find a boundary in the modified polygon by coordinates. Every boundary was inserted or snapped
+    // to an existing vertex above, and later steps only add vertices, so it is always present.
     // Linear scan is intentional — O(N×M) is acceptable for typical M ≤ 5 weak segments.
-    auto find_point_index = [&](const Point &pt) -> std::optional<size_t> {
-        for (size_t i = 0; i < polygon.size(); ++i) {
-            if (polygon[i] == pt) return i;
-        }
-        return std::nullopt;
+    auto find_point_index = [&](const Point &pt) -> size_t {
+        const auto it = std::find(polygon.points.begin(), polygon.points.end(), pt);
+        assert(it != polygon.points.end());
+        return size_t(it - polygon.points.begin());
     };
 
     // Apply types sequentially: segments are sorted low-priority-first
     // (bottom of object tree first), so higher-priority modifiers overwrite
     // lower-priority ones via last-write-wins.
     for (const auto &segment : result) {
-        // Find boundary point indices in modified polygon
-        std::optional<size_t> left_idx = find_point_index(segment.left_point);
-        std::optional<size_t> right_idx = find_point_index(segment.right_point);
-
-        if (!left_idx.has_value() || !right_idx.has_value()) {
-            BOOST_LOG_TRIVIAL(error) << "PreciseSeam: boundary point not found in modified polygon, skipping segment";
-            continue;
-        }
+        const size_t left_idx = find_point_index(segment.left_point);
+        const size_t right_idx = find_point_index(segment.right_point);
 
         // Edge i joins vertices i and i+1, so the zone covers edges [left_idx, right_idx).
         // The edge starting at the right boundary lies outside the zone and must not be subdivided;
@@ -885,7 +872,7 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
         // this must not rely on it.
         // Edge types drive oversampling only: candidate types are assigned per point, including
         // both boundaries, in apply_weak_modifiers_to_perimeter. A zero-length zone marks no edge.
-        for (size_t idx = left_idx.value(); idx != right_idx.value(); idx = (idx + 1) % polygon.size())
+        for (size_t idx = left_idx; idx != right_idx; idx = (idx + 1) % polygon.size())
             edge_types[idx] = segment.type;
     }
 
