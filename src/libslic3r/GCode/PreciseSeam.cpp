@@ -735,11 +735,13 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
             continue;
         }
 
-        // Set type for edges [left_idx, right_idx]
-        for (size_t idx = left_idx.value(); ; idx = (idx + 1) % polygon.size()) {
+        // Edge i joins vertices i and i+1, so the zone covers edges [left_idx, right_idx).
+        // The edge starting at the right boundary lies outside the zone and must not be subdivided;
+        // the 1 µm helper after the boundary keeps that edge too short to split, but this must not rely on it.
+        // Edge types drive oversampling only: candidate types are assigned per point, including
+        // both boundaries, in apply_weak_modifiers_to_perimeter. A zero-length zone marks no edge.
+        for (size_t idx = left_idx.value(); idx != right_idx.value(); idx = (idx + 1) % polygon.size())
             edge_types[idx] = segment.type;
-            if (idx == right_idx.value()) break;
-        }
     }
 
     // Split enforced edges into small segments

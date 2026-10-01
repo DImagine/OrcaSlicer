@@ -440,6 +440,43 @@ TEST_CASE("A gap on the closing edge preserves the complementary seam segment", 
     check_square_boundary(perimeter);
 }
 
+TEST_CASE("Enforced oversampling stays inside a zone that wraps around a gap", "[PreciseSeam][Regression]")
+{
+    SeamFixture fixture;
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    ExPolygon region(rectangle(-2, -2, 22, 22));
+    region.holes.push_back(rectangle(-1, 8, 1, 12));
+    region.holes.back().reverse();
+    // The zone runs from (0, 8) around the square to (0, 12); the edge after its right boundary is the gap.
+    // Boundary helpers already keep that edge too short to split, so this guards the invariant, not a visible bug.
+    const auto *modifier = fixture.add_regions(ModelVolumeType::PRECISE_SEAM_ENFORCED, {region});
+    const auto segments = PreciseSeam::collect_weak_modifier_segments(
+        {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
+    REQUIRE(segments.size() == 1);
+    CHECK(segments[0].left_point == mm(0, 8));
+    CHECK(segments[0].right_point == mm(0, 12));
+
+    const auto types = weak_candidate_types(perimeter, segments);
+    Points gap_points;
+    size_t enforced_count = 0;
+    for (size_t i = 0; i < perimeter.size(); ++i) {
+        const Point &p = perimeter[i];
+        const bool gap = p.x() == 0 && p.y() > scale_(8.) && p.y() < scale_(12.);
+        if (gap)
+            gap_points.push_back(p);
+        else
+            ++enforced_count;
+        CHECK(types[i] == (gap ? SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral :
+                                SeamPlacerImpl::EnforcedBlockedSeamPoint::Enforced));
+    }
+    // Only the two boundary refinement helpers may lie in the gap; no oversampling points.
+    std::sort(gap_points.begin(), gap_points.end(), [](const Point &a, const Point &b) { return a.y() < b.y(); });
+    CHECK(gap_points == Points{mm(0, 8.001), mm(0, 11.999)});
+    // The 76 mm zone itself is oversampled: far more candidates than its corners and boundaries.
+    CHECK(enforced_count > 76. / SeamPlacer::enforcer_oversampling_distance - 10);
+    check_square_boundary(perimeter);
+}
+
 TEST_CASE("Coincident weak boundaries do not prevent later boundary refinement", "[PreciseSeam][Regression]")
 {
     SeamFixture fixture;
