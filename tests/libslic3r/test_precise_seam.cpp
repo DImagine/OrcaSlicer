@@ -280,6 +280,181 @@ TEST_CASE("A rejected intersection warns without removing successful fragments",
     CHECK(intervals.back().edge == 1);
 }
 
+TEST_CASE("A cut rounded past its adjacent source vertex is snapped instead of discarding the fragment", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon perimeter = rectangle(0, 0, 20, 20);
+    const Point corner = mm(20, 0);
+    const bool at_start = GENERATE(false, true);
+    const bool reversed = GENERATE(false, true);
+    // 1 nm: the cut projects to the corner's parameter, giving a zero-length pair.
+    // 5 nm: the cut lies on neither neighbouring edge within clipping precision.
+    const coord_t offset = GENERATE(coord_t(1), coord_t(5));
+    CAPTURE(at_start, reversed, offset);
+    Polyline fragment;
+    if (at_start)
+        fragment.points = {Point(corner.x() + offset, corner.y()), corner, mm(20, 20), mm(10, 20)};
+    else
+        fragment.points = {mm(10, 0), corner, Point(corner.x(), corner.y() - offset)};
+    if (reversed)
+        fragment.reverse();
+    PreciseSeam::PreciseSeamWarnings warnings;
+    PreciseSeam::ExtractionContext context;
+    context.warnings = &warnings;
+    std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
+    REQUIRE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 0));
+    CHECK(warnings.failed_fragments.load() == 0);
+    // The rest of the fragment is kept, and the dropped cut leaves the boundary exactly at the corner.
+    std::sort(intervals.begin(), intervals.end(), [](const auto &a, const auto &b) { return a.edge < b.edge; });
+    if (at_start) {
+        REQUIRE(intervals.size() == 2);
+        CHECK(intervals[0].edge == 1);
+        CHECK(intervals[0].begin == 0.);
+        CHECK(intervals[0].end == 1.);
+        CHECK(intervals[0].first == corner);
+        CHECK(intervals[1].edge == 2);
+        CHECK(intervals[1].begin == 0.);
+        CHECK_THAT(intervals[1].end, Catch::Matchers::WithinAbs(0.5, 1e-12));
+    } else {
+        REQUIRE(intervals.size() == 1);
+        CHECK(intervals[0].edge == 0);
+        CHECK_THAT(intervals[0].begin, Catch::Matchers::WithinAbs(0.5, 1e-12));
+        CHECK(intervals[0].end == 1.);
+        CHECK(intervals[0].last == corner);
+    }
+
+    // A two-point contact shorter than the snapping distance leaves nothing to bind and is not a failure.
+    Polyline contact;
+    contact.points = {Point(corner.x() + offset, corner.y()), corner};
+    if (reversed)
+        contact.reverse();
+    intervals.clear();
+    CHECK(PreciseSeam::detail::append_fragment(contact, perimeter, intervals, context, 1));
+    CHECK(intervals.empty());
+    CHECK(warnings.failed_fragments.load() == 0);
+
+    // Beyond the 1 um snapping distance the cleanup does not apply: the fragment is still a failure.
+    Polyline distant;
+    distant.points = {Point(corner.x() + coord_t(scale_(0.002)), corner.y()), corner, mm(20, 20), mm(10, 20)};
+    if (reversed)
+        distant.reverse();
+    CHECK_FALSE(PreciseSeam::detail::append_fragment(distant, perimeter, intervals, context, 2));
+    CHECK(intervals.empty());
+    CHECK(warnings.failed_fragments.load() == 1);
+}
+
+TEST_CASE("A cut beside the start of its chain's edge is replaced by that vertex only", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon perimeter = rectangle(0, 0, 20, 20);
+    const Point corner = mm(20, 0);
+    const bool reversed = GENERATE(false, true);
+    CAPTURE(reversed);
+    PreciseSeam::PreciseSeamWarnings warnings;
+    PreciseSeam::ExtractionContext context;
+    context.warnings = &warnings;
+    std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
+
+    // The cut stands 2 nm beside the corner, off both edges, while the fragment continues from the
+    // next vertex (20, 20): the corner shares an edge with that neighbour, so the cut becomes the corner.
+    Polyline fragment;
+    fragment.points = {Point(corner.x() + 2, corner.y() - 2), mm(20, 20), mm(10, 20)};
+    if (reversed)
+        fragment.reverse();
+    REQUIRE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 0));
+    CHECK(warnings.failed_fragments.load() == 0);
+    std::sort(intervals.begin(), intervals.end(), [](const auto &a, const auto &b) { return a.edge < b.edge; });
+    REQUIRE(intervals.size() == 2);
+    CHECK(intervals[0].edge == 1);
+    CHECK(intervals[0].begin == 0.);
+    CHECK(intervals[0].end == 1.);
+    CHECK(intervals[0].first == corner);
+    CHECK(intervals[1].edge == 2);
+
+    // The same cut next to a vertex that is not on the fragment's chain is never snapped there:
+    // (0, 20) does not share an edge with the corner, so the fragment stays a failure.
+    Polyline detached;
+    detached.points = {Point(corner.x() + 2, corner.y() - 2), mm(0, 20), mm(0, 10)};
+    if (reversed)
+        detached.reverse();
+    intervals.clear();
+    CHECK_FALSE(PreciseSeam::detail::append_fragment(detached, perimeter, intervals, context, 1));
+    CHECK(intervals.empty());
+    CHECK(warnings.failed_fragments.load() == 1);
+}
+
+TEST_CASE("Real clipping that rounds a cut beside a vertex is recovered on the fragment's own chain", "[PreciseSeam][SegmentExtraction]")
+{
+    // Inputs found by a randomized search against this Clipper (the search tool is kept outside the
+    // repository): the border crosses the perimeter at a vertex, and Clipper rounds the cut to the
+    // vertex height but 1-2 nm beside it. Both binding paths reject such a fragment.
+    // If a Clipper change stops producing these cuts, the case only warns that it no longer exercises
+    // the fallback; the general extraction checks below remain valid and still apply.
+    const auto nm = [](coord_t x, coord_t y) { return Point(x, y); };
+    struct Case {
+        Points perimeter;
+        Points modifier;
+        Point cut;
+        Point vertex;
+    };
+    const Case cases[] = {
+        // Cut 1 nm beside its neighbour in the fragment: dropped as a rounded copy of that vertex.
+        {{nm(120701295, -128335579), nm(120586940, -128250619), nm(120582237, -128248720), nm(120594985, -128327864),
+          nm(120504023, -128324788), nm(120782884, -128380054), nm(120729765, -128355229)},
+         {nm(157083968, -426144373), nm(84375562, 169433907), nm(-213413578, 133079704), nm(-140705172, -462498576)},
+         nm(120729764, -128355229), nm(120729765, -128355229)},
+        // Cut 2 nm beside the vertex before its neighbour: replaced by that chain vertex.
+        {{nm(42606838, 119780952), nm(42638884, 119963549), nm(42573013, 119810910), nm(42578384, 120014121),
+          nm(42272085, 119667500), nm(42436134, 119614299), nm(42534337, 119521867), nm(42780062, 119646533)},
+         {nm(331854259, 41295522), nm(-247310081, 198039476), nm(-325682058, -91542694), nm(253482282, -248286648)},
+         nm(42272083, 119667500), nm(42272085, 119667500)},
+    };
+    const size_t index = GENERATE(size_t(0), size_t(1));
+    CAPTURE(index);
+    const Case &c = cases[index];
+    const Polygon perimeter(c.perimeter);
+    const ExPolygon modifier{Polygon(c.modifier)};
+    const PreciseSeam::PreparedPerimeter prepared(perimeter);
+    REQUIRE(prepared.valid);
+
+    // The case is relevant only while Clipper still produces the special cut (beside the vertex, not
+    // on it) and the projection path still rejects that fragment; the search also confirmed that the
+    // exact path fails on these fragments. Otherwise warn instead of failing: the input went stale.
+    const Polylines fragments = intersection_pl(prepared.line, modifier);
+    const auto special = std::find_if(fragments.begin(), fragments.end(), [&c](const Polyline &fragment) {
+        return fragment.points.front() == c.cut || fragment.points.back() == c.cut;
+    });
+    bool reproduces = special != fragments.end();
+    if (reproduces) {
+        std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
+        PreciseSeam::detail::FragmentBindingFailure failure;
+        reproduces = !PreciseSeam::detail::append_projected_fragment(*special, perimeter, intervals, failure);
+    }
+    if (!reproduces)
+        WARN("Case " << index << " no longer reproduces the rounded cut beside a vertex with this Clipper: "
+             "the snapping fallback is not exercised here. Find fresh inputs with the randomized search.");
+
+    PreciseSeam::PreciseSeamWarnings warnings;
+    PreciseSeam::ExtractionContext context;
+    context.warnings = &warnings;
+    const auto result = PreciseSeam::extract_perimeter_segments(
+        prepared, PreciseSeam::prepare_modifier_regions({modifier}), ModelVolumeType::PRECISE_SEAM_CENTER, context);
+    check_provenance(perimeter, result);
+    CHECK(warnings.failed_fragments.load() == 0);
+    // Nothing is lost: the extracted coverage equals Clipper's within the snapping distance.
+    double clipped = 0., extracted = 0.;
+    for (const Polyline &fragment : fragments)
+        clipped += fragment.length();
+    for (const auto &segment : result.segments)
+        extracted += segment.polyline.length();
+    CHECK(std::abs(clipped - extracted) < scale_(0.001));
+    // While the case reproduces, the recovered boundary lies exactly on the vertex of the fragment's chain.
+    if (reproduces) {
+        const bool on_vertex = std::any_of(result.segments.begin(), result.segments.end(), [&c](const auto &segment) {
+            return segment.polyline.points.front() == c.vertex || segment.polyline.points.back() == c.vertex;
+        });
+        CHECK(on_vertex);
+    }
+}
+
 TEST_CASE("Rejected fragments remain counted beyond the diagnostic limit", "[PreciseSeam][SegmentExtraction]")
 {
     const Polygon perimeter = rectangle(0, 0, 10, 10);

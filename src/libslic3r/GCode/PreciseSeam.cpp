@@ -208,28 +208,128 @@ bool append_projected_fragment(const Polyline &fragment, const Polygon &perimete
     return intervals.size() > original_size;
 }
 
+// Exact binding first, projection as the general path; both leave intervals unchanged on failure.
+static bool bind_fragment(const Polyline &fragment, const Polygon &perimeter,
+                          std::vector<ClippedEdgeInterval> &intervals, FragmentBindingFailure &failure)
+{
+    if (fragment.size() > 2 && append_exact_fragment(fragment, perimeter, intervals))
+        return true;
+    return append_projected_fragment(fragment, perimeter, intervals, failure);
+}
+
+// Safety net for an extremely unlikely case: the modifier boundary must cross the perimeter within
+// about a nanometre of a source vertex. Not part of the normal binding path; used only after binding
+// has failed. Clipper may place a cut at a vertex's height but a few nanometres to the side of it
+// (scanbeam clamping, X taken from the modifier edge). The end pair then either collapses to the
+// vertex parameter (rejected as zero-length) or misses both neighbouring edges, and the whole
+// fragment is lost. Reproduced on OrcaSlicer's own Clipper by a randomized search with borders
+// passing within 5 nm of a vertex: about 1 fragment in 20 000 of those needed this cleanup.
+//
+// The end cut is replaced by a vertex of the fragment's own chain, never by a nearest vertex found
+// elsewhere on the perimeter. Candidates are only the cut's neighbour in the fragment, when that is
+// a source vertex (the cut is a rounded copy of it and is dropped), or a vertex sharing a source
+// edge with that neighbour (the cut stands for the start of that edge). Two different candidates
+// (an edge shorter than the radius, or a self-touching contour) leave the fragment unchanged.
+// The radius is TOLERANCE_LINEAR, the distance at which boundary insertion snaps to an existing
+// vertex anyway, so the result matches a successful binding. The caller re-binds with the usual
+// strict direction and continuity rules, so a wrong candidate can only fail, never bind elsewhere.
+// Returns false when nothing was changed, so the caller does not retry.
+static bool snap_cuts_to_adjacent_vertices(Polyline &fragment, const Polygon &perimeter)
+{
+    const size_t count = perimeter.size();
+    // Strict comparison matches the vertex snapping in insert_point_into_perimeter.
+    const auto close = [](const Point &a, const Point &b) {
+        return (a - b).cast<double>().squaredNorm() < double(TOLERANCE_SQUARED);
+    };
+    const auto snap_target = [&](const Point &cut, const Point &neighbour) -> std::optional<Point> {
+        if (cut == neighbour)
+            return std::nullopt;
+        bool neighbour_is_vertex = false;
+        std::optional<Point> target;
+        // Every visit of the neighbour's coordinate contributes its two chain-adjacent vertices.
+        for (size_t j = 0; j < count; ++j) {
+            if (perimeter[j] != neighbour)
+                continue;
+            neighbour_is_vertex = true;
+            for (const Point &candidate : {perimeter[(j + count - 1) % count], perimeter[(j + 1) % count]}) {
+                if (!close(cut, candidate))
+                    continue;
+                if (target && *target != candidate)
+                    return std::nullopt; // Ambiguous: keep the failure rather than guess.
+                target = candidate;
+            }
+        }
+        // A cut between two arbitrary points of one edge is not this rounding case.
+        if (!neighbour_is_vertex)
+            return std::nullopt;
+        // The neighbour itself takes precedence: the cut is then just a rounded copy of it.
+        if (close(cut, neighbour))
+            return neighbour;
+        return target;
+    };
+    bool changed = false;
+    if (fragment.size() >= 2)
+        if (const auto target = snap_target(fragment.points.front(), fragment.points[1])) {
+            if (*target == fragment.points[1])
+                fragment.points.erase(fragment.points.begin());
+            else
+                fragment.points.front() = *target;
+            changed = true;
+        }
+    if (fragment.size() >= 2)
+        if (const auto target = snap_target(fragment.points.back(), fragment.points[fragment.size() - 2])) {
+            if (*target == fragment.points[fragment.size() - 2])
+                fragment.points.pop_back();
+            else
+                fragment.points.back() = *target;
+            changed = true;
+        }
+    return changed;
+}
+
+// Location fields shared by the failure and recovery markers, enough to find the layer in a saved project.
+static std::string fragment_location(const ExtractionContext &context, size_t fragment_index)
+{
+    const Layer *layer = context.layer;
+    const ModelObject *object = layer && layer->object() ? layer->object()->model_object() : nullptr;
+    return " object=" + std::to_string(object ? object->id().id : 0) +
+           " modifier=" + std::to_string(context.modifier ? context.modifier->id().id : 0) +
+           " layer=" + (layer ? std::to_string(layer->id()) : std::string("unknown")) +
+           " z=" + (layer ? std::to_string(layer->slice_z) : std::string("unknown")) +
+           " fragment=" + std::to_string(fragment_index);
+}
+
 bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
                      std::vector<ClippedEdgeInterval> &intervals,
                      const ExtractionContext &context, size_t fragment_index)
 {
-    if (fragment.size() > 2 && append_exact_fragment(fragment, perimeter, intervals))
-        return true;
     FragmentBindingFailure failure;
-    if (append_projected_fragment(fragment, perimeter, intervals, failure))
+    if (bind_fragment(fragment, perimeter, intervals, failure))
         return true;
+    // Fallback for an extremely unlikely rounding case: retry the same binding rules once on the
+    // cleaned fragment. The normal path never gets here. A recovery is not a failure (no counter,
+    // no user warning), but it leaves its own marker so that any later problem can be traced to it.
+    // A full failure falls through to the usual failure marker with the original reason.
+    Polyline cleaned = fragment;
+    if (snap_cuts_to_adjacent_vertices(cleaned, perimeter)) {
+        FragmentBindingFailure retry_failure;
+        // Only a contact shorter than the snapping distance may remain: nothing to bind, nothing lost.
+        if (cleaned.size() < 2 || bind_fragment(cleaned, perimeter, intervals, retry_failure)) {
+            BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamFragmentRecovered] Rare case: cut rounded next to a"
+                << " source vertex was snapped to it and the fragment was bound on retry"
+                << fragment_location(context, fragment_index) << " original_pair=" << failure.pair_index
+                << " original_reason=" << failure.reason << " fragment_points=" << fragment.size()
+                << " cleaned_points=" << cleaned.size() << " perimeter_points=" << perimeter.size();
+            return true;
+        }
+    }
     // Reserve a log slot atomically before formatting; callers without shared state log every failure.
     if (context.warnings &&
         context.warnings->failed_fragments.fetch_add(1, std::memory_order_relaxed) >= failed_fragment_log_limit)
         return false;
-    const Layer *layer = context.layer;
-    const ModelObject *object = layer && layer->object() ? layer->object()->model_object() : nullptr;
     // Keep a small marker for investigating a saved project, not a full geometry dump.
     BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamIntersectionFailed] Unable to process intersection"
-        << " object=" << (object ? object->id().id : 0)
-        << " modifier=" << (context.modifier ? context.modifier->id().id : 0)
-        << " layer=" << (layer ? std::to_string(layer->id()) : "unknown")
-        << " z=" << (layer ? std::to_string(layer->slice_z) : "unknown")
-        << " fragment=" << fragment_index << " pair=" << failure.pair_index
+        << fragment_location(context, fragment_index) << " pair=" << failure.pair_index
         << " reason=" << failure.reason << " fragment_points=" << fragment.size()
         << " perimeter_points=" << perimeter.size();
     return false;

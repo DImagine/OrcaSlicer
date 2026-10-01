@@ -123,7 +123,14 @@ The fast binding path anchors on the second fragment point and matches interior
 vertices exactly, trying either direction and later occurrences of the anchor.
 Only cut endpoints need projection. Two-point fragments go straight to the
 projection path, which accepts the first matching source edge. Subsequent pairs
-must continue on that edge or its neighbor in the established direction. Failure
+must continue on that edge or its neighbor in the established direction.
+Clipper can round a cut to a vertex's height but a few nanometres beside it; the
+end pair then collapses or misses both neighbouring edges, and both paths reject
+the fragment. Only after such a failure, an end cut closer than 1 µm (the
+insertion snapping distance) to a vertex of the fragment's own chain is snapped
+to it: either its neighbour in the fragment, or a vertex sharing a source edge
+with that neighbour. An ambiguous choice is left as a failure. Binding is then
+retried once with the same rules. Failure
 rolls back and discards only that fragment, with a diagnostic marker. Overlapping
 source visits are outside the binding contract. Boundary contacts are accepted
 as returned by clipping, without offsets or additional contact rules.
@@ -215,6 +222,9 @@ precedence over painting, and Neutral clears painting inside its zone.
 - An intersection that cannot be bound continuously is discarded with an
   "unable to process intersection" warning and a compact log marker containing
   the object, modifier, layer and failure location. Other segments remain usable.
+  A fragment saved by the vertex-snapping retry is not a failure and shows no
+  user warning, but logs its own `[PreciseSeamFragmentRecovered]` marker with the
+  same location fields and the original failure reason.
 - Through-body intersections and modifier holes need no separate warnings.
   Multiple weak segments are accepted without a warning.
 - Self-touching perimeters are a known limitation, without a warning. Extraction
