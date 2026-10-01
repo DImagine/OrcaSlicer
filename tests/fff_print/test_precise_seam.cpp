@@ -5,6 +5,7 @@
 #include "libslic3r/GCode/PreciseSeam.hpp"
 
 #include <algorithm>
+#include <functional>
 
 using namespace Slic3r;
 
@@ -81,9 +82,11 @@ void require_vertex(const Polygon &polygon, const Point &point)
 }
 
 std::vector<SeamPlacerImpl::EnforcedBlockedSeamPoint> weak_candidate_types(
-    const Polygon &polygon, const std::vector<PreciseSeam::WeakModifierSegment> &segments)
+    const Polygon &polygon, const std::vector<PreciseSeam::WeakModifierSegment> &segments,
+    const std::function<SeamPlacerImpl::EnforcedBlockedSeamPoint(const Point &)> &painted = {})
 {
     // Use the same coordinate conversion as production when applying prepared boundaries.
+    // Optional painted types stand in for seam painting, which production assigns before weak zones.
     PrintObjectSeamData::LayerSeams candidates;
     candidates.perimeters.emplace_back();
     auto &loop = candidates.perimeters.back();
@@ -91,7 +94,7 @@ std::vector<SeamPlacerImpl::EnforcedBlockedSeamPoint> weak_candidate_types(
     for (const Point &point : polygon.points) {
         const Vec2f position = unscale(point).cast<float>();
         candidates.points.emplace_back(Vec3f(position.x(), position.y(), 0), loop, 0,
-                                       SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral);
+                                       painted ? painted(point) : SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral);
     }
     loop.end_index = candidates.points.size();
     bool enforced = false;
@@ -528,6 +531,36 @@ TEST_CASE("Weak boundaries on one source edge retain insertion order and modifie
     }
     // Ascending insertion on one edge would retrace the contour or lose pending boundaries.
     check_square_boundary(perimeter);
+}
+
+TEST_CASE("Weak zones overwrite painted candidate types inside their boundaries only", "[PreciseSeam][Regression]")
+{
+    using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    // Paint the bottom side Enforced and the top side Blocked; the vertical sides stay Neutral.
+    const Type painted_bottom = GENERATE(Type::Enforced, Type::Blocked);
+    const auto zone_type = GENERATE(ModelVolumeType::PRECISE_SEAM_ENFORCED, ModelVolumeType::PRECISE_SEAM_BLOCKED,
+                                    ModelVolumeType::PRECISE_SEAM_NEUTRAL);
+    CAPTURE(int(painted_bottom), int(zone_type));
+    const Type expected_zone = zone_type == ModelVolumeType::PRECISE_SEAM_ENFORCED ? Type::Enforced :
+                               zone_type == ModelVolumeType::PRECISE_SEAM_BLOCKED  ? Type::Blocked : Type::Neutral;
+    SeamFixture fixture;
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    // The zone covers x in [6, 14] on the bottom side only.
+    const auto *modifier = fixture.add(zone_type, {rectangle(6, -2, 14, 2)});
+    const auto segments = PreciseSeam::collect_weak_modifier_segments(
+        {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
+    REQUIRE(segments.size() == 1);
+    const auto painted = [painted_bottom](const Point &p) {
+        return p.y() == 0 ? painted_bottom : p.y() == mm(0, 20).y() ? Type::Blocked : Type::Neutral;
+    };
+    const auto types = weak_candidate_types(perimeter, segments, painted);
+    for (size_t i = 0; i < perimeter.size(); ++i) {
+        const Point &p = perimeter[i];
+        CAPTURE(p.x(), p.y());
+        const bool inside = p.y() == 0 && p.x() >= mm(6, 0).x() && p.x() <= mm(14, 0).x();
+        // Inside the zone the weak type wins over painting, Neutral clearing it; outside, painting stays.
+        CHECK(types[i] == (inside ? expected_zone : painted(p)));
+    }
 }
 
 TEST_CASE("Weak boundaries sharing a vertex refine both sides", "[PreciseSeam]")

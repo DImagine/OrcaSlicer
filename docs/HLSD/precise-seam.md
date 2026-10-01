@@ -12,9 +12,10 @@ seam along any trajectory.
 
 The modifier is non-printing geometry. It takes no part in object slicing,
 region assignment, filament selection or brim adhesion, and it affects only seam
-placement during G-code export. Perimeters that no modifier reaches, and
-objects without Precise Seam volumes, follow the regular seam placement
-unchanged.
+placement during G-code export. Objects without Precise Seam volumes follow the
+regular seam placement unchanged. In objects that have them, every external
+perimeter is normalized first (see [Perimeter preparation](#perimeter-preparation));
+perimeters that no modifier reaches then use the regular seam placement.
 
 Precise Seam does not replace the seam placer. It feeds it: a modifier inserts
 the points it needs into the perimeter and changes the enforced/blocked type of
@@ -333,12 +334,17 @@ inspect modifier geometry.
    further than that. Coincident boundaries share their helpers.
 3. **Enforced subdivision.** Zone types are resolved for the polygon's edges in
    priority order. The edges of a zone are those from its left boundary up to,
-   but not including, its right boundary. Enforced edges are subdivided into
-   steps of at most `SeamPlacer::enforcer_oversampling_distance` (0.2 mm), so the
-   middle candidate of the longest enforced patch lies close to the geometric
-   middle of the zone. That patch is measured in candidates and across the
-   closing edge, independently of where the contour starts; the same rule
-   applies to painted seams.
+   but not including, its right boundary. Enforced edges longer than
+   `SeamPlacer::enforcer_oversampling_distance` (0.2 mm) are subdivided into
+   steps of at most that length; shorter edges and existing vertices are kept.
+   The seam placer then takes the middle candidate, by count, of the longest
+   enforced patch, measured in candidates and across the closing edge,
+   independently of where the contour starts; the same rule applies to painted
+   seams. Subdivision brings that candidate near the geometric middle of a zone
+   whose source vertices are sparse or evenly spaced. Densely spaced source
+   vertices in one part of the zone pull it toward that part, so a weak Enforced
+   zone does not guarantee an arc-length midpoint the way a strong Center
+   modifier does.
 
 When candidates are built, painting assigns their types first.
 `apply_weak_modifiers_to_perimeter()` then overwrites the types of the

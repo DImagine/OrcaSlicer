@@ -48,12 +48,12 @@ PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter) : polygon(perimet
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
-// Machine precision for checking exact coordinate matching (squared distance)
-// Ideally, intersection points should match perimeter vertices bitwise,
-// but we account for possible machine rounding errors in Clipper calculations
-// Actual deviations: maximum ~0.27, using 2.5 with margin.
-// In scaled units on purpose: Clipper rounds to whole units whatever SCALING_FACTOR is
-// (1 nm by default, 10 nm on large beds), so this tolerance must not follow the physical scale.
+// Point coincidence tolerance (squared distance, in coordinate units). Clipper rounds intersection
+// points to whole units, so they deviate from the source edge by about half a unit; ad-hoc tests
+// observed at most ~0.52 (squared ~0.27). 2.5 (~1.6 units) gives a ~3x margin; such a deviation is
+// irrelevant for printing, so no finer tuning is needed. Points within it are treated as coincident.
+// A technical integer-grid parameter, not tied to physical units: Clipper rounds to whole units
+// whatever SCALING_FACTOR is (1 nm by default, 10 nm on large beds).
 static constexpr double MACHINE_PRECISION_SQUARED = 2.5;
 
 // Snapping radius for inserting seam points into the perimeter, shared by every Precise Seam rule
@@ -584,17 +584,15 @@ void init_precise_seam_data(
 // If point is close to vertex (< TOLERANCE_SQUARED) - use existing vertex
 // Returns pair: {final coordinates, point index in polygon}
 // edge_start_idx is start vertex of edge containing point
-static std::optional<std::pair<Point, size_t>> insert_point_into_perimeter(
+// Precondition: at least three vertices. Both callers run only on a valid PreparedPerimeter,
+// and insertions only add vertices, so insertion cannot fail.
+static std::pair<Point, size_t> insert_point_into_perimeter(
     const Point &point,
     size_t edge_start_idx,
     Polygon &perimeter_polygon
 )
 {
-    // Check input data
-    if (perimeter_polygon.points.size() < 3) {
-        return std::nullopt;  // Polygon must be at least a triangle
-    }
-
+    assert(perimeter_polygon.points.size() >= 3);
     size_t perim_max = perimeter_polygon.points.size();
 
     // Determine edge start and end
@@ -762,13 +760,11 @@ std::optional<Point> insert_strong_seam_point(
                 target = candidate;
             }
         }
-        auto result = insert_point_into_perimeter(target.point, target.edge_index, polygon);
-        if (!result)
-            return std::nullopt;
+        const auto [seam_point, seam_index] = insert_point_into_perimeter(target.point, target.edge_index, polygon);
         // Preserve the insertion order: refining before first would shift the seam index.
-        refine_at_vertex(result->second, +1, polygon);
-        refine_at_vertex(result->second, -1, polygon);
-        return result->first; // No later strong modifier or weak processing for this perimeter.
+        refine_at_vertex(seam_index, +1, polygon);
+        refine_at_vertex(seam_index, -1, polygon);
+        return seam_point; // No later strong modifier or weak processing for this perimeter.
     }
     return std::nullopt;
 }
@@ -832,48 +828,16 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
                   return a.position.parameter > b.position.parameter;
               });
 
-    std::vector<bool> segment_valid(result.size(), true);
-    bool any_insertion_failed = false;
-
     for (const PointToInsert &pt : points_to_insert) {
         WeakModifierSegment &seg = result[pt.segment_idx];
         Point &point_coords = pt.is_left ? seg.left_point : seg.right_point;
-        const size_t edge_idx = pt.position.edge_index;
-
-        // Insert point with tolerance check
-        std::optional<std::pair<Point, size_t>> insert_result =
-            insert_point_into_perimeter(point_coords, edge_idx, polygon);
-
-        if (insert_result.has_value()) {
-            // Update coordinates in result (if point coincided with existing vertex, take its coordinates)
-            point_coords = insert_result->first;
-        } else {
-            // Failed to insert point - segment becomes invalid
-            segment_valid[pt.segment_idx] = false;
-            any_insertion_failed = true;
-        }
-    }
-
-    // Remove segments whose boundaries could not be inserted
-    if (any_insertion_failed) {
-        // Critical error: boundary point not inserted (shouldn't happen in normal conditions)
-        BOOST_LOG_TRIVIAL(error) << "PreciseSeam: boundary point insertion failed, performing segment compaction";
-
-        // Remove invalid segments (array compaction)
-        size_t write_pos = 0;
-        for (size_t read_pos = 0; read_pos < result.size(); ++read_pos) {
-            if (segment_valid[read_pos]) {
-                if (write_pos != read_pos) {
-                    result[write_pos] = std::move(result[read_pos]);
-                }
-                ++write_pos;
-            }
-        }
-        result.resize(write_pos);
+        // Take the final coordinates: a boundary close to an existing vertex snaps to it.
+        point_coords = insert_point_into_perimeter(point_coords, pt.position.edge_index, polygon).first;
     }
 
     // Group coincident boundaries by their snapped vertex, including wraparound to vertex 0.
-    // Scan original vertices backwards so insertions cannot shift pending vertex indices.
+    // Scan original vertices (those present before helper insertion) backwards, so insertions
+    // cannot shift pending vertex indices.
     // O(vertices * segments), matching the boundary lookup below; typically only a few segments.
     for (size_t poly_idx = polygon.size(); poly_idx-- > 0; ) {
         bool refine_before = false;
@@ -917,12 +881,18 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
 
         // Edge i joins vertices i and i+1, so the zone covers edges [left_idx, right_idx).
         // The edge starting at the right boundary lies outside the zone and must not be subdivided;
-        // the 1 µm helper after the boundary keeps that edge too short to split, but this must not rely on it.
+        // the helper placed TOLERANCE_LINEAR after the boundary keeps that edge too short to split, but
+        // this must not rely on it.
         // Edge types drive oversampling only: candidate types are assigned per point, including
         // both boundaries, in apply_weak_modifiers_to_perimeter. A zero-length zone marks no edge.
         for (size_t idx = left_idx.value(); idx != right_idx.value(); idx = (idx + 1) % polygon.size())
             edge_types[idx] = segment.type;
     }
+
+    // Boundaries and helpers are already in place; without enforced edges nothing is subdivided,
+    // so skip rebuilding the polygon.
+    if (std::find(edge_types.begin(), edge_types.end(), EnforcedBlockedSeamPoint::Enforced) == edge_types.end())
+        return result;
 
     // Split enforced edges into small segments
     const double STEP_SCALED = scale_(SeamPlacer::enforcer_oversampling_distance);

@@ -503,7 +503,8 @@ TEST_CASE("Real clipping that rounds a cut beside a vertex is recovered on the f
     const auto special = std::find_if(fragments.begin(), fragments.end(), [&c](const Polyline &fragment) {
         return fragment.points.front() == c.cut || fragment.points.back() == c.cut;
     });
-    bool reproduces = special != fragments.end();
+    const bool cut_present = special != fragments.end();
+    bool reproduces = cut_present;
     if (reproduces) {
         std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
         PreciseSeam::detail::FragmentBindingFailure failure;
@@ -519,10 +520,13 @@ TEST_CASE("Real clipping that rounds a cut beside a vertex is recovered on the f
         CHECK_FALSE(intervals.empty());
         CHECK(fallback_warnings.recovered_fragments.load() == 1);
         CHECK(fallback_warnings.failed_fragments.load() == 0);
-    } else
-        WARN("Case " << index << " no longer reproduces the rounded cut beside a vertex with this Clipper: "
-             "the snapping fallback is not exercised here. Refresh the inputs by clipping perimeters against "
-             "half-planes whose border passes a few nanometres from a vertex.");
+    } else if (!cut_present)
+        WARN("Case " << index << ": Clipper no longer returns the rounded cut beside a vertex, so the snapping "
+             "fallback is not exercised here. Refresh the inputs by clipping perimeters against half-planes "
+             "whose border passes a few nanometers from a vertex.");
+    else
+        WARN("Case " << index << ": Clipper still returns the rounded cut, but regular binding now accepts it, "
+             "so the snapping fallback is not exercised here. Check whether binding changed on purpose.");
 
     PreciseSeam::PreciseSeamWarnings warnings;
     PreciseSeam::ExtractionContext context;
