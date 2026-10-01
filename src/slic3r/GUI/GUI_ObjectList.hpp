@@ -88,7 +88,6 @@ struct MeshErrorsInfo
 class ObjectList : public wxDataViewCtrl
 {
 public:
-
     enum SELECTION_MODE
     {
         smUndef     = 0,

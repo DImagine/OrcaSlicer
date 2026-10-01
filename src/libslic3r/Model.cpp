@@ -1230,7 +1230,6 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
         this->volumes.emplace_back(new ModelVolume(*model_volume));
         this->volumes.back()->set_model_object(this);
     }
-
     this->clear_instances();
 	this->instances.reserve(rhs.instances.size());
     for (const ModelInstance *model_instance : rhs.instances) {
@@ -1269,7 +1268,6 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
 	rhs.volumes.clear();
     for (ModelVolume *model_volume : this->volumes)
         model_volume->set_model_object(this);
-
     this->clear_instances();
 	this->instances = std::move(rhs.instances);
 	rhs.instances.clear();
@@ -1393,9 +1391,7 @@ ModelVolume* ModelObject::add_volume_with_shared_mesh(const ModelVolume &other, 
 void ModelObject::delete_volume(size_t idx)
 {
     ModelVolumePtrs::iterator i = this->volumes.begin() + idx;
-    ModelVolume* volume_to_delete = *i;
-
-    delete volume_to_delete;
+    delete *i;
     this->volumes.erase(i);
 
     if (this->volumes.size() == 1)
@@ -1488,6 +1484,7 @@ void ModelObject::sort_volumes(bool full_sort)
             return vl_type < vr_type;
         });
 }
+
 ModelInstance* ModelObject::add_instance()
 {
     ModelInstance* i = new ModelInstance(this);
@@ -3836,7 +3833,6 @@ bool model_volume_list_changed(const ModelObject &model_object_old, const ModelO
         return std::find(types.begin(), types.end(), t) != types.end();
     });
 }
-
 
 template< typename TypeFilterFn, typename CompareFn>
 bool model_property_changed(const ModelObject &model_object_old, const ModelObject &model_object_new, TypeFilterFn type_filter, CompareFn compare)

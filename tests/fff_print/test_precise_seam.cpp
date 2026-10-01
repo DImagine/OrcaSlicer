@@ -1001,3 +1001,68 @@ TEST_CASE("Modifier hierarchy keeps strong order and applies the highest weak pr
     }
     CHECK(result.points.front().type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral);
 }
+
+TEST_CASE("Volume sorting keeps strong before weak Precise Seam modifiers and the user order inside each group", "[PreciseSeam][Model]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    // Enum order inside a group (Center < Right, Enforced < Neutral) is deliberately reversed here:
+    // only the group may move a volume, the user's order inside it must survive.
+    const auto add = [object](ModelVolumeType type) {
+        ModelVolume *volume = object->add_volume(Test::cube(1));
+        volume->set_type(type);
+        return volume;
+    };
+    ModelVolume *part = add(ModelVolumeType::MODEL_PART);
+    ModelVolume *modifier = add(ModelVolumeType::PARAMETER_MODIFIER);
+    ModelVolume *second_part = add(ModelVolumeType::MODEL_PART);
+    ModelVolume *weak_neutral = add(ModelVolumeType::PRECISE_SEAM_NEUTRAL);
+    ModelVolume *strong_right = add(ModelVolumeType::PRECISE_SEAM_RIGHT);
+    ModelVolume *weak_enforced = add(ModelVolumeType::PRECISE_SEAM_ENFORCED);
+    ModelVolume *strong_center = add(ModelVolumeType::PRECISE_SEAM_CENTER);
+    const ModelVolumePtrs original = object->volumes;
+
+    // A full sort orders parts before modifiers; a partial one keeps parts and modifiers as they are.
+    const bool full_sort = GENERATE(false, true);
+    CAPTURE(full_sort);
+    object->volumes = original;
+    object->sort_volumes(full_sort);
+    const ModelVolumePtrs expected_head = full_sort ? ModelVolumePtrs{part, second_part, modifier}
+                                                    : ModelVolumePtrs{part, modifier, second_part};
+    ModelVolumePtrs expected = expected_head;
+    for (ModelVolume *volume : {strong_right, strong_center, weak_neutral, weak_enforced})
+        expected.push_back(volume);
+    CHECK(object->volumes == expected);
+}
+
+TEST_CASE("Restoring Precise Seam positions overrides alignment only on perimeters with a strong point", "[PreciseSeam]")
+{
+    std::vector<PrintObjectSeamData::LayerSeams> layers(1);
+    PrintObjectSeamData::LayerSeams &layer = layers.front();
+    // Two perimeters of three candidates each; alignment has already finalized both.
+    for (size_t loop_idx = 0; loop_idx < 2; ++loop_idx) {
+        layer.perimeters.emplace_back();
+        SeamPlacerImpl::Perimeter &loop = layer.perimeters.back();
+        loop.start_index = layer.points.size();
+        for (size_t i = 0; i < 3; ++i)
+            layer.points.emplace_back(Vec3f(float(i), float(loop_idx), 0.f), loop, 0.f,
+                                      SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral);
+        loop.end_index = layer.points.size();
+        loop.finalized = true;
+        loop.seam_index = loop.start_index;
+        loop.final_seam_position = Vec3f(0.5f, float(loop_idx), 0.f);
+    }
+    SeamPlacerImpl::Perimeter &strong = layer.perimeters[0];
+    SeamPlacerImpl::Perimeter &plain = layer.perimeters[1];
+    strong.precise_seam_point = Vec3f(2.f, 0.f, 0.f);
+    strong.precise_seam_index = 2;
+
+    PreciseSeam::restore_precise_seam_positions(layers);
+
+    // The strong point and its candidate index replace the aligned position.
+    CHECK(strong.final_seam_position == Vec3f(2.f, 0.f, 0.f));
+    CHECK(strong.seam_index == 2);
+    // A perimeter without a strong point keeps whatever alignment chose.
+    CHECK(plain.final_seam_position == Vec3f(0.5f, 1.f, 0.f));
+    CHECK(plain.seam_index == plain.start_index);
+}

@@ -606,7 +606,8 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
         patches_starts_ends.push_back(next_index(i));
       }
     }
-    //if patches_starts_ends are empty, it means that the whole perimeter is enforced.. don't do anything in that case
+    // If patches_starts_ends are empty, the whole perimeter is enforced, or no point is enforced any more
+    // (Precise Seam weak zones retyped every painted enforcer); don't do anything in either case.
     if (!patches_starts_ends.empty()) {
       //if the first point in the patches is not enforced, it marks a patch end. in that case, put it to the end and start on next
       // to simplify the processing
@@ -774,6 +775,11 @@ void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
   auto obj_transform = po->trafo_centered();
 
   for (const ModelVolume *mv : po->model_object()->volumes) {
+    // Precise Seam helpers are not printed and the seam gizmo neither shows nor edits their painting,
+    // so painting kept from before a type change must not act invisibly. Other non-part volumes keep
+    // the existing behaviour.
+    if (mv->is_precise_seam())
+      continue;
     if (mv->is_seam_painted()) {
       auto model_transformation = obj_transform * mv->get_matrix();
 

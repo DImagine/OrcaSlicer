@@ -70,7 +70,9 @@ modifier must reach clearly past the surface to cross it unambiguously.
 First and last are taken along the perimeter oriented counter-clockwise as seen
 from above. On an outer wall seen from outside, Left is therefore the left end
 of the intersection. On the wall of a hole seen from inside the hole, the two
-ends are swapped.
+ends are swapped. Mirroring an object does not mirror the mode: perimeters stay
+counter-clockwise, so Left remains the left end seen from outside, and the seam
+moves to the other end of the modifier instead of following the mirrored model.
 
 ## Priority
 
@@ -210,9 +212,9 @@ normal path never pays for them:
   parameter or misses both neighboring edges. An end cut closer than the
   snapping radius to a vertex of the fragment's own chain is snapped to that
   vertex: either its neighbor in the fragment (the cut is a rounded copy of it
-  and is dropped) or a vertex that shares a source edge with that neighbor. There
-  is no search for
-  the nearest vertex elsewhere on the perimeter. Ends that are themselves source
+  and is dropped) or a vertex that shares a source edge with that neighbor. The
+  neighbor wins whenever it is within the radius. There is no search for the
+  nearest vertex elsewhere on the perimeter. Ends that are themselves source
   vertices and ambiguous choices are left unchanged. Binding is then retried
   once with the same strict rules, so a wrong candidate can only fail again.
 - **Contact.** A fragment that still fails but is shorter than the snapping
@@ -287,9 +289,14 @@ that has one. Exactly equal lengths are resolved by the prepared target points:
 greater bed Y first, then smaller X; a complete tie keeps the first segment.
 Slice coordinates already include instance rotation and have the bed axes;
 centering and XY translation do not change this order. Nearly equal lengths are
-not treated as equal, so exact ties occur mainly on axis-aligned geometry. More
-than one segment raises the "multiple intersections" warning, counted after
-joining across vertex zero, and the longest segment is still used.
+not treated as equal, so exact ties occur mainly on axis-aligned geometry.
+Geometrically equal segments, such as a symmetric modifier crossing both faces
+of a thin wall, differ only by rounding noise that varies between layers, so
+the chosen face may alternate. This is accepted deliberately: such a modifier is
+ambiguous by itself, and the user is warned and expected to make it cross the
+perimeter once. More than one segment raises the "multiple intersections"
+warning, counted after joining across vertex zero, and the longest segment is
+still used.
 
 The selected point is inserted on its source edge. A point within 1 µm of an
 existing vertex is snapped to that vertex. Helper points are added 1 µm on both
@@ -360,8 +367,9 @@ larger than 2147 mm switches `SCALING_FACTOR`. Both Precise Seam tolerances are
 deliberately defined in units rather than physical distances. Clipper rounds to
 whole units at any scale, so the on-edge tolerance must follow the unit. The
 snapping radius following the unit keeps a similar margin over single-precision
-candidate coordinates, which are coarser at large-bed coordinates (about 0.25 µm
-per step at 3 m). Distances quoted in this document in nanometers and
+candidate coordinates. They are centred on the object, so their step grows with
+the object's size, which only large beds allow (about 0.25 µm per step 3 m from
+the object's centre). Distances quoted in this document in nanometers and
 micrometers assume the default unit; on large printers they are ten times
 larger. The enforced subdivision step is a physical distance and stays 0.2 mm.
 The design separates two scales: the rounding error of clipping, and the
@@ -458,8 +466,19 @@ intersections and with full containment. The remaining limitations are:
 
 ## Integration with the application
 
-The remaining sections describe how Precise Seam volumes are stored, how their
-changes reach the print, and how the user works with them.
+The remaining sections describe how Precise Seam volumes relate to other seam
+settings, how they are stored, how their changes reach the print, and how the
+user works with them.
+
+### Other seam settings
+
+- Precise Seam takes part only in outer and hole perimeter seam placement. In
+  spiral vase mode the seam placer is not used for perimeters, so the modifiers
+  have no effect.
+- Scarf seams, the seam gap and wiping start from the chosen point exactly as
+  they would from an ordinary seam.
+- Seam painting left on a volume from before it became a Precise Seam modifier
+  is ignored: the seam gizmo neither shows nor edits it.
 
 ### Model storage and 3MF compatibility
 
@@ -475,6 +494,8 @@ On load, the mode is applied after all other volume metadata, regardless of XML
 key order, and only when the base type is a modifier. A missing or unknown mode
 leaves an ordinary modifier, and seam metadata on any other base type is
 ignored. Files that stored the seam mode directly as the volume type still load.
+A project saved again by an earlier release loses the seam mode for good: the
+volumes stay ordinary modifiers without settings.
 
 A Precise Seam volume keeps any per-volume settings it had as a part or
 modifier, but they are inactive and the object list shows no settings item for

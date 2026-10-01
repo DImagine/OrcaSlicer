@@ -383,6 +383,43 @@ TEST_CASE("A cut beside the start of its chain's edge is replaced by that vertex
     CHECK(warnings.failed_fragments.load() == 1);
 }
 
+TEST_CASE("A cut close to its neighbour and to both of the neighbour's chain vertices snaps to the neighbour", "[PreciseSeam][SegmentExtraction]")
+{
+    // Edges P -> N and N -> Q are 0.5 um long, so a cut 2 nm beside N is within 1 um of P, N and Q.
+    // P and Q are ambiguous edge-start candidates, but the cut is a rounded copy of N, which wins.
+    const Point n = mm(20, 0);
+    const coord_t half_um = coord_t(scale_(0.0005));
+    const Point p(n.x() - half_um, n.y());
+    const Point q(n.x(), n.y() + half_um);
+    const Polygon perimeter(Points{mm(0, 0), p, n, q, mm(20, 20), mm(0, 20)});
+    const bool reversed = GENERATE(false, true);
+    CAPTURE(reversed);
+    Polyline fragment;
+    fragment.points = {Point(n.x() + 2, n.y() - 2), n, q, mm(20, 20), mm(10, 20)};
+    if (reversed)
+        fragment.reverse();
+    PreciseSeam::PreciseSeamWarnings warnings;
+    PreciseSeam::ExtractionContext context;
+    context.warnings = &warnings;
+    std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
+    REQUIRE(PreciseSeam::detail::append_fragment(fragment, perimeter, intervals, context, 0));
+    CHECK(warnings.failed_fragments.load() == 0);
+    CHECK(warnings.recovered_fragments.load() == 1);
+    // The dropped cut leaves the boundary exactly at N: edges N -> Q and Q -> (20, 20) are whole.
+    std::sort(intervals.begin(), intervals.end(), [](const auto &a, const auto &b) { return a.edge < b.edge; });
+    REQUIRE(intervals.size() == 3);
+    CHECK(intervals[0].edge == 2);
+    CHECK(intervals[0].first == n);
+    CHECK_THAT(intervals[0].begin, Catch::Matchers::WithinAbs(0., 0.));
+    CHECK_THAT(intervals[0].end, Catch::Matchers::WithinAbs(1., 0.));
+    CHECK(intervals[1].edge == 3);
+    CHECK_THAT(intervals[1].begin, Catch::Matchers::WithinAbs(0., 0.));
+    CHECK_THAT(intervals[1].end, Catch::Matchers::WithinAbs(1., 0.));
+    CHECK(intervals[2].edge == 4);
+    CHECK_THAT(intervals[2].begin, Catch::Matchers::WithinAbs(0., 0.));
+    CHECK_THAT(intervals[2].end, Catch::Matchers::WithinAbs(0.5, 1e-12));
+}
+
 TEST_CASE("A fragment end that is itself a source vertex is never treated as a rounded cut", "[PreciseSeam][SegmentExtraction]")
 {
     // The closing edge v4 -> v0 is only 0.5 um long. The fragment starts with a cut 2 nm beside v3 (so

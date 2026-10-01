@@ -59,8 +59,9 @@ static constexpr double MACHINE_PRECISION_SQUARED = 2.5;
 // Snapping radius for inserting seam points into the perimeter, shared by every Precise Seam rule
 // that must match insertion (rounding fallback, contacts, sub-micron full containment).
 // In scaled units, deliberately not physical: 1 um by default, 10 um when large beds switch
-// SCALING_FACTOR to 10 nm units, where single-precision candidate coordinates are coarser too
-// (about 0.25 um per step at 3 m). A physical 1 um would leave only a few float steps there.
+// SCALING_FACTOR to 10 nm units. Seam candidates are single-precision and centred on the object, so
+// their step grows with the object's size, which only large beds allow (about 0.25 um per step 3 m
+// from the object's centre). A physical 1 um would leave only a few float steps there.
 static constexpr coord_t TOLERANCE_LINEAR = 1000;
 static constexpr coord_t TOLERANCE_SQUARED = TOLERANCE_LINEAR * TOLERANCE_LINEAR;
 
@@ -243,8 +244,9 @@ bool bind_fragment(const Polyline &fragment, const Polygon &perimeter,
 // The end cut is replaced by a vertex of the fragment's own chain, never by a nearest vertex found
 // elsewhere on the perimeter. Candidates are only the cut's neighbour in the fragment, when that is
 // a source vertex (the cut is a rounded copy of it and is dropped), or a vertex sharing a source
-// edge with that neighbour (the cut stands for the start of that edge). Two different candidates
-// (an edge shorter than the radius, or a self-touching contour) leave the fragment unchanged, and so
+// edge with that neighbour (the cut stands for the start of that edge). The neighbour wins whenever
+// it is within the radius. Otherwise two different candidates (an edge shorter than the radius, or a
+// self-touching contour) leave the fragment unchanged, and so
 // does an end that is itself a source vertex (the open line's start/end or an exact cut): it is not
 // a rounded cut, and moving it could drop a real edge shorter than the radius.
 // The radius is TOLERANCE_LINEAR, the distance at which boundary insertion snaps to an existing
@@ -262,8 +264,11 @@ static bool snap_cuts_to_adjacent_vertices(Polyline &fragment, const Polygon &pe
         if (cut == neighbour)
             return std::nullopt;
         bool neighbour_is_vertex = false;
+        bool ambiguous = false;
         std::optional<Point> target;
         // Every visit of the neighbour's coordinate contributes its two chain-adjacent vertices.
+        // The whole perimeter is scanned before any decision: the "cut is a real vertex" check must
+        // see every vertex, and the neighbour rule below must not be pre-empted by an ambiguity.
         for (size_t j = 0; j < count; ++j) {
             if (perimeter[j] == cut)
                 return std::nullopt; // A real vertex, not a rounded cut.
@@ -274,16 +279,20 @@ static bool snap_cuts_to_adjacent_vertices(Polyline &fragment, const Polygon &pe
                 if (!close(cut, candidate))
                     continue;
                 if (target && *target != candidate)
-                    return std::nullopt; // Ambiguous: keep the failure rather than guess.
+                    ambiguous = true;
                 target = candidate;
             }
         }
         // A cut between two arbitrary points of one edge is not this rounding case.
         if (!neighbour_is_vertex)
             return std::nullopt;
-        // The neighbour itself takes precedence: the cut is then just a rounded copy of it.
+        // The neighbour itself takes precedence, even when both of its chain vertices are close too
+        // (edges shorter than the radius on both sides): the cut is then just a rounded copy of it.
         if (close(cut, neighbour))
             return neighbour;
+        // Two different edge-start candidates: keep the failure rather than guess.
+        if (ambiguous)
+            return std::nullopt;
         return target;
     };
     bool changed = false;
@@ -501,7 +510,8 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     // boundary pokes a few nm across and leaves a real gap; the single segment then covers everything
     // but that gap. Weak insertion would snap both its boundaries onto one vertex (1 um radius) and turn
     // the intended zone into one candidate, and strong would put the seam at the touch. Treat such a
-    // gap as full containment instead, exactly when insertion would collapse it:
+    // gap as full containment instead, exactly when insertion would collapse it (up to edges shorter
+    // than 2 um, where an end may snap to the start of its own edge rather than the shared vertex):
     // - the uncovered length is below the snapping distance (a gap inside one edge collapses onto the
     //   boundary inserted first), or
     // - the gap spans exactly one vertex and both ends lie within the snapping distance of it (each
@@ -738,6 +748,11 @@ std::optional<Point> insert_strong_seam_point(
         if (warnings && extracted.segments.size() > 1)
             warnings->multiple_intersections.store(true, std::memory_order_relaxed);
 
+        // Policy: lengths are compared exactly. Geometrically equal segments (e.g. a symmetric modifier
+        // crossing both faces of a thin wall) differ only by cut rounding noise, which varies from layer
+        // to layer, so the chosen face may alternate between layers. This is accepted deliberately: such a
+        // modifier is ambiguous by itself, the user gets the "multiple intersections" warning and is
+        // expected to make the modifier cross the perimeter once.
         StrongSeamTarget target{Point(0, 0), 0};
         double longest = -1.;
         for (const PerimeterSegment &segment : extracted.segments) {
@@ -865,6 +880,13 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
     for (const auto &segment : result) {
         const size_t left_idx = find_point_index(segment.left_point);
         const size_t right_idx = find_point_index(segment.right_point);
+        // Practically unreachable (see find_point_index), but a miss would make the loop below write
+        // past edge_types in Release builds. The check costs almost nothing, so it was added anyway:
+        // skip the zone, as apply_weak_modifiers_to_perimeter does.
+        if (left_idx == polygon.size() || right_idx == polygon.size()) {
+            BOOST_LOG_TRIVIAL(error) << "PreciseSeam: weak boundary not found in perimeter, skipping zone";
+            continue;
+        }
 
         // Edge i joins vertices i and i+1, so the zone covers edges [left_idx, right_idx).
         // The edge starting at the right boundary lies outside the zone and must not be subdivided;

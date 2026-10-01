@@ -5752,6 +5752,7 @@ void ObjectList::change_part_type()
   return;
 }
 #endif
+
 ModelVolumeType ObjectList::get_selected_volume_type()
 {
     ModelVolume* volume = get_selected_model_volume();
