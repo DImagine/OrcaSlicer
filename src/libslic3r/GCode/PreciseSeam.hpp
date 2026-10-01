@@ -2,6 +2,7 @@
 #define slic3r_PreciseSeam_hpp_
 
 #include <atomic>
+#include <cassert>
 #include <optional>
 #include <vector>
 #include <unordered_map>
@@ -17,7 +18,8 @@
 
 // Both modifier kinds consume ready perimeter segments. Strong chooses the longest
 // within the first matching modifier; weak applies all segments in priority order.
-// Full containment is skipped; failed fragments are ignored with diagnostics.
+// Full containment is skipped by strong and Blocked; Enforced and Neutral then type the whole
+// perimeter. Failed fragments are ignored with diagnostics.
 
 namespace Slic3r {
 namespace PreciseSeam {
@@ -49,9 +51,12 @@ inline constexpr size_t failed_fragment_log_limit = 10;
 
 // Shared by all layers and objects in one SeamPlacer::init(); a new pass starts fresh.
 struct PreciseSeamWarnings {
-    std::atomic<bool> multiple_intersections{false};  // modifier intersects perimeter in multiple separate places (strong only)
-    std::atomic<bool> full_containment{false};        // modifier fully contains perimeter, no intersection edges
-    std::atomic<size_t> failed_fragments{0}; // Also triggers the user warning when nonzero.
+    // Masks of the Precise Seam types that caused each warning reason, one bit per type (type_bit()).
+    // The user warning lists the types instead of naming modifiers.
+    std::atomic<unsigned> multiple_intersections{0}; // Center/Left/Right with several segments on a perimeter.
+    std::atomic<unsigned> full_containment{0};       // Skipped for a perimeter fully inside: Center/Left/Right, Blocked.
+    std::atomic<unsigned> failed_types{0};           // Types with at least one discarded fragment.
+    std::atomic<size_t> failed_fragments{0}; // Total discarded fragments, for the log summary.
     // Fragments saved by the rare-case fallback or accepted as contacts; log only, no user warning.
     // Clipper is deterministic, so a prismatic model can repeat the same case on every layer.
     std::atomic<size_t> recovered_fragments{0};
@@ -64,6 +69,20 @@ struct PreciseSeamWarnings {
         std::atomic<bool> reached{false}; // Gave a segment, full containment or a discarded fragment.
     };
     std::unordered_map<const ModelVolume*, ModifierUsage> modifier_usage;
+
+    // Bit of a Precise Seam type in the masks above, in menu order (Center is bit 0).
+    static unsigned type_bit(ModelVolumeType type)
+    {
+        assert(is_precise_seam(type));
+        return 1u << (int(type) - int(ModelVolumeType::PRECISE_SEAM_CENTER));
+    }
+    // Load before fetch_or: most calls find the bit already set, so shared cache lines stay clean.
+    static void mark(std::atomic<unsigned> &mask, ModelVolumeType type)
+    {
+        const unsigned bit = type_bit(type);
+        if ((mask.load(std::memory_order_relaxed) & bit) == 0)
+            mask.fetch_or(bit, std::memory_order_relaxed);
+    }
 };
 
 // Optional caller identity for concise diagnostics when an intersection is discarded.
@@ -130,6 +149,9 @@ struct WeakModifierSegment {
     PerimeterPosition left_position; // Position on the source perimeter before insertion/refinement.
     Point right_point;              // Coordinates of right (last) point of segment
     PerimeterPosition right_position; // Retained provenance, not an index into the modified polygon.
+    // Full containment of an Enforced or Neutral modifier: the zone is the whole perimeter, without
+    // boundaries (the points and positions above are unused and nothing is inserted for it).
+    bool whole_perimeter = false;
 };
 
 // Initialize Precise Seam data by populating provided vectors and flag

@@ -1601,8 +1601,9 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
   // each re-pushing ALL current warnings via Plater handler, causing NotificationManager::append()
   // to duplicate text within each popup.
   {
-      const bool mi = precise_seam_warnings.multiple_intersections.load(std::memory_order_relaxed);
-      const bool fc = precise_seam_warnings.full_containment.load(std::memory_order_relaxed);
+      const unsigned failed_types = precise_seam_warnings.failed_types.load(std::memory_order_relaxed);
+      const unsigned mi = precise_seam_warnings.multiple_intersections.load(std::memory_order_relaxed);
+      const unsigned fc = precise_seam_warnings.full_containment.load(std::memory_order_relaxed);
       const size_t failed = precise_seam_warnings.failed_fragments.load(std::memory_order_relaxed);
       // All workers have finished; cancellation before this point may omit the summary.
       if (failed > PreciseSeam::failed_fragment_log_limit)
@@ -1617,13 +1618,29 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
               << " fragments recovered; first " << PreciseSeam::failed_fragment_log_limit
               << " logged (parallel processing order), " << (recovered - PreciseSeam::failed_fragment_log_limit)
               << " omitted";
+      // Reasons name the modifier types, as the menu does, not individual modifiers: "Seam Left, Seam
+      // Enforced" in menu order, each type once. The same msgids as the menu share its translations.
+      const auto type_list = [](unsigned mask) {
+          const std::pair<ModelVolumeType, std::string> types[] = {
+              {ModelVolumeType::PRECISE_SEAM_CENTER, _u8L("Seam Center")},
+              {ModelVolumeType::PRECISE_SEAM_LEFT, _u8L("Seam Left")},
+              {ModelVolumeType::PRECISE_SEAM_RIGHT, _u8L("Seam Right")},
+              {ModelVolumeType::PRECISE_SEAM_ENFORCED, _u8L("Seam Enforced")},
+              {ModelVolumeType::PRECISE_SEAM_BLOCKED, _u8L("Seam Blocked")},
+              {ModelVolumeType::PRECISE_SEAM_NEUTRAL, _u8L("Seam Neutral")}};
+          std::string list;
+          for (const auto &[type, name] : types)
+              if (mask & PreciseSeam::PreciseSeamWarnings::type_bit(type))
+                  list += (list.empty() ? "" : ", ") + name;
+          return list;
+      };
       std::vector<std::string> parts;
-      if (failed > 0)
-          parts.push_back(_u8L("unable to process intersection"));
-      if (mi)
-          parts.push_back(_u8L("multiple intersections with a perimeter detected"));
-      if (fc)
-          parts.push_back(_u8L("perimeter is fully contained inside modifier and was ignored"));
+      if (failed_types != 0)
+          parts.push_back((boost::format(_u8L("failed to process some intersections (%1%)")) % type_list(failed_types)).str());
+      if (mi != 0)
+          parts.push_back((boost::format(_u8L("multiple intersections with a perimeter, the longest one was used (%1%)")) % type_list(mi)).str());
+      if (fc != 0)
+          parts.push_back((boost::format(_u8L("a perimeter is fully inside a modifier, the modifier was not applied to it (%1%)")) % type_list(fc)).str());
       // Modifiers evaluated on some perimeter that never gave an intersection there. Only the effect is
       // certain: where a higher strong modifier decided a perimeter, this one was not evaluated, so the
       // cause is given as a likely hint. Print and volume order make the named modifier deterministic.

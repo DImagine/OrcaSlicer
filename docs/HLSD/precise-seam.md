@@ -89,14 +89,16 @@ there.
   strong point is placed, no later strong modifier and no weak modifier is
   processed for that perimeter.
 - **Weak:** every weak modifier applies. They are applied from the lowest
-  priority to the highest, so the highest one overwrites overlapping zones.
+  priority to the highest, so the highest one overwrites overlapping zones. A
+  Blocked modifier that fully contains a perimeter is the exception: it is
+  skipped there (see [Full containment](#full-containment)).
 
 A modifier without a usable segment on a perimeter passes the turn to the next
 one. This includes a modifier that crosses the perimeter but whose fragments
 were all discarded (see [Binding fragments](#binding-fragments-to-source-edges)).
 The seam on that layer then comes from a lower-priority modifier, or from weak
-or regular placement, and the user is told through the "unable to process
-intersection" warning.
+or regular placement, and the user is told through the "failed to process some
+intersections" warning.
 
 ## Data flow
 
@@ -240,10 +242,25 @@ modifier types, including for debugging.
 
 ### Full containment
 
-A modifier that covers the whole perimeter does not intersect it in any useful
-sense. Both consumers skip that modifier for the perimeter and report full
-containment to the user. Geometry and bindings stay in the result, but no strong
-data are prepared.
+A modifier that covers the whole perimeter has no boundaries on it. The policy
+follows seam painting, where painting a whole perimeter green is a meaningful
+choice and forbidding the seam all round is not:
+
+- **Seam Enforced** types the whole perimeter, like a perimeter painted green all
+  round. It says that the seam position does not matter on this part of the
+  model: every edge is subdivided and the placer picks the best spot on the
+  refined contour.
+- **Seam Neutral** types the whole perimeter Neutral, like an unmarked perimeter,
+  clearing painting and lower zones.
+- **Seam Blocked** is skipped for the perimeter, with the full-containment
+  warning. The seam cannot avoid the whole perimeter, so the modifier does not
+  override anything below it: lower zones and painting stay in effect.
+- **Seam Center, Left and Right** are skipped with the same warning: there is no
+  intersection to place the point on.
+
+Enforced and Neutral take part in the usual priority order (see
+[Weak modifiers](#weak-modifiers)) and give no warning. Geometry and bindings
+stay in the extraction result, but no strong data are prepared.
 
 The perimeter is fully contained when the united intervals cover every source
 edge from parameter 0 to 1. A modifier boundary that merely touches the
@@ -318,7 +335,9 @@ staggering.
 `collect_weak_modifier_segments()` extracts the segments of every weak modifier
 before the polygon is modified, so all positions refer to the same contour. Each
 segment becomes a zone with a type and two boundaries, kept in application
-order, lowest priority first. The boundaries carry their positions on the source
+order, lowest priority first. Full containment of an Enforced or Neutral
+modifier becomes a whole-perimeter zone at its place in that order: it has no
+boundaries and takes part in no insertion or helper step below. The boundaries carry their positions on the source
 contour; these remain as provenance after insertion and are not indices into the
 modified polygon. The consumer receives only these ready boundaries; it does not
 inspect modifier geometry.
@@ -341,7 +360,8 @@ inspect modifier geometry.
    further than that. Coincident boundaries share their helpers.
 3. **Enforced subdivision.** Zone types are resolved for the polygon's edges in
    priority order. The edges of a zone are those from its left boundary up to,
-   but not including, its right boundary. Enforced edges longer than
+   but not including, its right boundary; a whole-perimeter zone types every
+   edge. Enforced edges longer than
    `SeamPlacer::enforcer_oversampling_distance` (0.2 mm) are subdivided into
    steps of at most that length; shorter edges and existing vertices are kept.
    The seam placer then takes the middle candidate, by count, of the longest
@@ -356,8 +376,9 @@ inspect modifier geometry.
 When candidates are built, painting assigns their types first.
 `apply_weak_modifiers_to_perimeter()` then overwrites the types of the
 candidates between the boundaries of each zone, both boundaries included,
-lowest priority first. Blocked and Enforced zones therefore take precedence over
-painting, and Neutral clears painting inside its zone. Several weak segments per
+lowest priority first; a whole-perimeter zone types every candidate. Blocked and
+Enforced zones therefore take precedence over painting, and Neutral clears
+painting inside its zone. Several weak segments per
 modifier, holes and through-body intersections need no special handling.
 
 ## Numeric tolerances
@@ -414,13 +435,19 @@ its active step, as one non-critical warning with the ID
 `SlicingPreciseSeamWarning`. It is a single line, "Precise Seam: <causes>. Seam placement may differ from
 expected.", because the export warnings dialog shows only the first line of each
 warning. Repeated warning events replace the notification instead of appending
-to it. The causes are:
+to it. Except for the "had no effect" cause, the causes name the modifier
+types involved, as the menu names them, in menu order and each type once, for
+example "(Seam Left, Seam Enforced)". Atomic per-cause type masks collect them.
+The causes are:
 
-- **unable to process intersection:** at least one fragment was discarded by
-  binding. Other segments remain usable.
-- **multiple intersections with a perimeter detected:** a strong modifier had
-  more than one segment on a perimeter. The longest was used.
-- **perimeter is fully contained inside modifier and was ignored.**
+- **failed to process some intersections (types):** at least one fragment was
+  discarded by binding. Other segments remain usable.
+- **multiple intersections with a perimeter, the longest one was used (types):**
+  a Seam Center, Left or Right modifier had more than one segment on a
+  perimeter.
+- **a perimeter is fully inside a modifier, the modifier was not applied to it
+  (types):** a Seam Center, Left, Right or Blocked modifier was skipped for a
+  perimeter (see [Full containment](#full-containment)).
 - **modifier "<name>" of "<object>" had no effect on the seam (it might not reach
   the centerline of the printed perimeter):** a modifier was evaluated on at
   least one perimeter and never gave a segment, full containment or a discarded
@@ -435,8 +462,8 @@ to it. The causes are:
   reaching the perimeter. `SeamPlacer::init()` registers every modifier before
   the parallel phase, and workers only set two atomic flags per modifier.
 
-Multiple weak segments, modifier holes and through-body intersections produce
-no warning.
+Multiple weak segments, modifier holes, through-body intersections and full
+containment by Seam Enforced or Neutral produce no warning.
 
 The log carries compact markers for investigating a saved project, not geometry
 dumps:
@@ -471,7 +498,8 @@ intersections and with full containment. The remaining limitations are:
   effect" warning; sub-micron results behave like points (see
   [Numeric tolerances](#numeric-tolerances)). Several near-touches on inclined
   edges can leave several segments separated by gaps of a few units; their zones
-  then cover nearly the whole perimeter instead of being skipped.
+  then cover nearly the whole perimeter instead of being treated as full
+  containment.
 - **Self-touching perimeters.** Extraction keeps distinct visits of one
   coordinate apart through its source-edge bindings, but the consumers locate
   inserted points by coordinates. A weak zone is typed and subdivided from the
@@ -589,7 +617,8 @@ object as before.
   consumers: strong targets in every mode, including a midpoint on an existing
   vertex or the closing edge, longest-arc selection and tie order in bed axes,
   priorities, weak boundaries that coincide or share an edge, enforced
-  subdivision, every warning, raft layer indexing and structured slices.
+  subdivision, whole-perimeter weak zones with painting and priorities, the
+  warning type masks, raft layer indexing and structured slices.
 - [Seam placer tests](../../tests/fff_print/test_seam_placer.cpp) cover
   enforced-patch selection independent of the contour start, fully painted
   contours, duplicate removal, and `Print::apply()` synchronization through type

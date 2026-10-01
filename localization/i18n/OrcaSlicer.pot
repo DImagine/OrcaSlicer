@@ -22857,7 +22857,18 @@ msgid "Avoid warping\nDid you know that when printing materials that are prone t
 msgstr ""
 
 #: src/libslic3r/GCode/SeamPlacer.cpp
-msgid "unable to process intersection"
+#, possible-boost-format
+msgid "failed to process some intersections (%1%)"
+msgstr ""
+
+#: src/libslic3r/GCode/SeamPlacer.cpp
+#, possible-boost-format
+msgid "multiple intersections with a perimeter, the longest one was used (%1%)"
+msgstr ""
+
+#: src/libslic3r/GCode/SeamPlacer.cpp
+#, possible-boost-format
+msgid "a perimeter is fully inside a modifier, the modifier was not applied to it (%1%)"
 msgstr ""
 
 #: src/libslic3r/GCode/SeamPlacer.cpp

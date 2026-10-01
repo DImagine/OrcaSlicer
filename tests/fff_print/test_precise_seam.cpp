@@ -364,7 +364,7 @@ TEST_CASE("Strong intersection warnings count joined segments across vertex zero
     REQUIRE(seam.has_value());
     CHECK(*seam == (mode == ModelVolumeType::PRECISE_SEAM_LEFT ? mm(0, 4) :
                    mode == ModelVolumeType::PRECISE_SEAM_RIGHT ? mm(4, 0) : mm(0, 0)));
-    CHECK(warnings.multiple_intersections.load() == extra_segment);
+    CHECK(warnings.multiple_intersections.load() == (extra_segment ? PreciseSeam::PreciseSeamWarnings::type_bit(mode) : 0u));
     CHECK(warnings.failed_fragments.load() == 0);
     CHECK_FALSE(warnings.full_containment.load());
     check_square_boundary(perimeter);
@@ -650,10 +650,11 @@ TEST_CASE("Weak priority and enforcement refinement apply on both crossed sides"
     check_square_boundary(perimeter);
 }
 
-TEST_CASE("Weak full containment keeps its warning and leaves the perimeter unchanged", "[PreciseSeam]")
+TEST_CASE("Weak full containment follows painting: Enforced and Neutral type the whole perimeter, Blocked is skipped", "[PreciseSeam]")
 {
     const auto type = GENERATE(ModelVolumeType::PRECISE_SEAM_ENFORCED, ModelVolumeType::PRECISE_SEAM_BLOCKED,
                                ModelVolumeType::PRECISE_SEAM_NEUTRAL);
+    CAPTURE(type);
     SeamFixture fixture;
     Polygon perimeter = rectangle(0, 0, 20, 20);
     const Points original = perimeter.points;
@@ -661,11 +662,72 @@ TEST_CASE("Weak full containment keeps its warning and leaves the perimeter unch
     PreciseSeam::PreciseSeamWarnings warnings;
     const auto segments = PreciseSeam::collect_weak_modifier_segments(
         {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
-    CHECK(segments.empty());
-    CHECK(perimeter.points == original);
-    CHECK(warnings.full_containment.load());
+    // Painting of both kinds, so that each type's effect on it is visible.
+    const auto painted = [](const Point &p) {
+        return p.x() < scale_(10.) ? SeamPlacerImpl::EnforcedBlockedSeamPoint::Enforced :
+                                     SeamPlacerImpl::EnforcedBlockedSeamPoint::Blocked;
+    };
+    const auto types = weak_candidate_types(perimeter, segments, painted);
     CHECK_FALSE(warnings.multiple_intersections.load());
     CHECK(warnings.failed_fragments.load() == 0);
+    if (type == ModelVolumeType::PRECISE_SEAM_BLOCKED) {
+        // Forbidding the seam all round cannot be honoured: skipped with a warning, painting stays.
+        CHECK(segments.empty());
+        CHECK(perimeter.points == original);
+        CHECK(warnings.full_containment.load() == PreciseSeam::PreciseSeamWarnings::type_bit(type));
+        for (size_t i = 0; i < perimeter.size(); ++i)
+            CHECK(types[i] == painted(perimeter[i]));
+        return;
+    }
+    REQUIRE(segments.size() == 1);
+    CHECK(segments.front().whole_perimeter);
+    CHECK(warnings.full_containment.load() == 0);
+    // Every candidate takes the zone's type, overriding painting.
+    const auto expected = type == ModelVolumeType::PRECISE_SEAM_ENFORCED ? SeamPlacerImpl::EnforcedBlockedSeamPoint::Enforced :
+                                                                          SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral;
+    for (size_t i = 0; i < perimeter.size(); ++i)
+        CHECK(types[i] == expected);
+    if (type == ModelVolumeType::PRECISE_SEAM_ENFORCED) {
+        // As if painted green all round: every 20 mm edge is subdivided into steps of at most 0.2 mm.
+        CHECK(perimeter.size() >= size_t(80.f / SeamPlacer::enforcer_oversampling_distance));
+        check_square_boundary(perimeter);
+    } else
+        CHECK(perimeter.points == original); // Like an unmarked perimeter: no subdivision.
+}
+
+TEST_CASE("Whole-perimeter weak zones take part in the usual priority order", "[PreciseSeam]")
+{
+    // Volumes are listed low priority first; a later zone overwrites an earlier one.
+    const int scenario = GENERATE(0, 1, 2);
+    CAPTURE(scenario);
+    SeamFixture fixture;
+    const auto *whole_enforced = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, {rectangle(-2, -2, 22, 22)});
+    const auto *whole_neutral = fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, {rectangle(-2, -2, 22, 22)});
+    const auto *whole_blocked = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {rectangle(-2, -2, 22, 22)});
+    const auto *band_blocked = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {rectangle(8, -2, 12, 2)});
+    const auto *band_enforced = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, {rectangle(8, -2, 12, 2)});
+    std::vector<const ModelVolume*> volumes;
+    if (scenario == 0) volumes = {whole_enforced, band_blocked}; // A band forbidden inside a green perimeter.
+    if (scenario == 1) volumes = {band_enforced, whole_neutral}; // A whole Neutral clears the lower band.
+    if (scenario == 2) volumes = {band_enforced, whole_blocked}; // A whole Blocked is skipped; the band stays.
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    PreciseSeam::PreciseSeamWarnings warnings;
+    const auto segments = PreciseSeam::collect_weak_modifier_segments(
+        volumes, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
+    const auto types = weak_candidate_types(perimeter, segments);
+    using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    for (size_t i = 0; i < perimeter.size(); ++i) {
+        const Point &p = perimeter[i];
+        CAPTURE(p.x(), p.y());
+        const bool in_band = p.y() == 0 && p.x() >= scale_(8.) && p.x() <= scale_(12.);
+        const Type expected = scenario == 0 ? (in_band ? Type::Blocked : Type::Enforced) :
+                              scenario == 1 ? Type::Neutral :
+                                              (in_band ? Type::Enforced : Type::Neutral);
+        CHECK(types[i] == expected);
+    }
+    CHECK(warnings.full_containment.load() ==
+          (scenario == 2 ? PreciseSeam::PreciseSeamWarnings::type_bit(ModelVolumeType::PRECISE_SEAM_BLOCKED) : 0u));
+    check_square_boundary(perimeter);
 }
 
 TEST_CASE("Coverage short by a gap under 1 um is full containment while a narrow band keeps its point", "[PreciseSeam][Regression]")
@@ -711,10 +773,12 @@ TEST_CASE("Coverage short by a gap under 1 um is full containment while a narrow
         const auto types = weak_candidate_types(perimeter, segments);
         const size_t enforced = size_t(std::count(types.begin(), types.end(), SeamPlacerImpl::EnforcedBlockedSeamPoint::Enforced));
         if (gap && micro) {
-            // Skipped like an exact touch, instead of collapsing the intended zone into one forced point.
-            CHECK(segments.empty());
-            CHECK(enforced == 0);
-            CHECK(perimeter.points == original);
+            // Full containment like an exact touch, instead of collapsing the intended zone into one forced
+            // point: Enforced then types the whole perimeter, subdivided as if painted green all round.
+            REQUIRE(segments.size() == 1);
+            CHECK(segments.front().whole_perimeter);
+            CHECK(enforced == types.size());
+            CHECK(enforced > 300);
         } else if (gap) {
             REQUIRE(segments.size() == 1);
             CHECK(enforced > 300); // A 4 um gap is real: nearly the whole 80 mm perimeter, oversampled.
@@ -724,8 +788,9 @@ TEST_CASE("Coverage short by a gap under 1 um is full containment while a narrow
             CHECK(enforced == (micro ? 1u : 2u));
         }
     }
-    // Only the sub-micron gap is full containment; nothing here is a binding failure.
-    CHECK(warnings.full_containment.load() == (gap && micro));
+    // Only the sub-micron gap is full containment, and only strong types skip it with a warning;
+    // nothing here is a binding failure.
+    CHECK((warnings.full_containment.load() != 0) == (gap && micro && is_precise_seam_strong(type)));
     CHECK(warnings.failed_fragments.load() == 0);
     check_square_boundary(perimeter);
 }
@@ -747,11 +812,22 @@ TEST_CASE("A modifier touching the perimeter at one point keeps the full contain
     if (is_precise_seam_strong(type))
         CHECK_FALSE(PreciseSeam::insert_strong_seam_point(
             {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings).has_value());
-    else
-        CHECK(PreciseSeam::collect_weak_modifier_segments(
-            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings).empty());
-    CHECK(perimeter.points == original);
-    CHECK(warnings.full_containment.load());
+    else {
+        const auto segments = PreciseSeam::collect_weak_modifier_segments(
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
+        // Enforced and Neutral type the whole perimeter; Blocked is skipped.
+        if (type == ModelVolumeType::PRECISE_SEAM_BLOCKED)
+            CHECK(segments.empty());
+        else {
+            REQUIRE(segments.size() == 1);
+            CHECK(segments.front().whole_perimeter);
+        }
+    }
+    // Only a whole-perimeter Enforced zone subdivides the edges.
+    if (type != ModelVolumeType::PRECISE_SEAM_ENFORCED)
+        CHECK(perimeter.points == original);
+    const bool skipped = is_precise_seam_strong(type) || type == ModelVolumeType::PRECISE_SEAM_BLOCKED;
+    CHECK(warnings.full_containment.load() == (skipped ? PreciseSeam::PreciseSeamWarnings::type_bit(type) : 0u));
     CHECK_FALSE(warnings.multiple_intersections.load());
     CHECK(warnings.failed_fragments.load() == 0);
 }
@@ -777,7 +853,7 @@ TEST_CASE("Unsupported strong modifier sections are skipped with the appropriate
     PreciseSeam::PreciseSeamWarnings warnings;
     CHECK_FALSE(PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings).has_value());
     CHECK(perimeter.points == original);
-    CHECK(warnings.full_containment.load() == (scenario == 2 || scenario == 3));
+    CHECK((warnings.full_containment.load() != 0) == (scenario == 2 || scenario == 3));
     CHECK_FALSE(warnings.multiple_intersections.load());
 }
 
@@ -856,7 +932,7 @@ TEST_CASE("Strong continues past modifiers without usable segments", "[PreciseSe
     const auto seam = PreciseSeam::insert_strong_seam_point({first, second}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
     REQUIRE(seam.has_value());
     CHECK(*seam == mm(4, 0));
-    CHECK(warnings.full_containment.load() == contained);
+    CHECK((warnings.full_containment.load() != 0) == contained);
 }
 
 TEST_CASE("Strong compares all segments of structured modifier regions", "[PreciseSeam][SegmentExtraction]")
@@ -936,7 +1012,7 @@ TEST_CASE("Crossing modifiers choose the rear strong segment and keep both weak 
         CHECK(segments[1].left_point == mm(12, 20));
         CHECK(segments[1].right_point == mm(8, 20));
     }
-    CHECK(warnings.multiple_intersections.load() == strong); // Warn only strong, after collecting all segments.
+    CHECK((warnings.multiple_intersections.load() != 0) == strong); // Warn only strong, after collecting all segments.
     CHECK_FALSE(warnings.full_containment.load());
     check_square_boundary(perimeter);
 }

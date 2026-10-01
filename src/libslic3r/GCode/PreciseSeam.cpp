@@ -549,7 +549,7 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
                 result.full_containment = true;
         }
     }
-    // Full containment is skipped by both consumers; retain geometry but prepare no strong data.
+    // Strong skips full containment and weak handles it by type; neither needs strong data for it.
     if (!result.full_containment && is_precise_seam_strong(mode))
         for (PerimeterSegment &segment : result.segments)
             prepare_strong_segment(segment, mode, result.segments.size() > 1);
@@ -713,15 +713,18 @@ static void refine_at_vertex(
     }
 }
 
-// Records that a modifier was evaluated on a perimeter, and whether it reached it, for the "had no
-// effect" reason. A discarded fragment counts as reached: the modifier crossed the perimeter, and that
-// failure has its own warning. A point contact gives no segment and does not count. Modifiers that were
-// never evaluated (a higher strong modifier decided every perimeter) stay unchecked and are not reported.
-static void record_modifier_usage(PreciseSeamWarnings *warnings, const ModelVolume *modifier,
-                                  const SegmentExtraction &extracted)
+// Records the warning state of one extraction: the type of a modifier with a discarded fragment, and
+// whether the modifier was evaluated on a perimeter and reached it, for the "had no effect" reason.
+// A discarded fragment counts as reached: the modifier crossed the perimeter, and that failure has its
+// own warning. A point contact gives no segment and does not count. Modifiers that were never evaluated
+// (a higher strong modifier decided every perimeter) stay unchecked and are not reported.
+static void record_extraction(PreciseSeamWarnings *warnings, const ModelVolume *modifier,
+                              const SegmentExtraction &extracted)
 {
     if (warnings == nullptr || !extracted.valid)
         return;
+    if (extracted.discarded_fragments > 0)
+        PreciseSeamWarnings::mark(warnings->failed_types, modifier->type());
     const auto it = warnings->modifier_usage.find(modifier);
     if (it == warnings->modifier_usage.end())
         return;
@@ -753,11 +756,11 @@ std::optional<Point> insert_strong_seam_point(
             continue;
         const SegmentExtraction extracted = extract_perimeter_segments(
             prepared, it->second[layer_id], modifier->type(), {layer, modifier, warnings});
-        record_modifier_usage(warnings, modifier, extracted);
-        // Full containment retains its existing skip policy, separately from segment selection.
+        record_extraction(warnings, modifier, extracted);
+        // Full containment leaves no intersection to place the point on: skipped with a warning.
         if (extracted.full_containment) {
             if (warnings)
-                warnings->full_containment.store(true, std::memory_order_relaxed);
+                PreciseSeamWarnings::mark(warnings->full_containment, modifier->type());
             continue;
         }
         // Policy: no usable segment passes the turn to the next modifier by priority. This includes a
@@ -768,7 +771,7 @@ std::optional<Point> insert_strong_seam_point(
         if (extracted.segments.empty())
             continue;
         if (warnings && extracted.segments.size() > 1)
-            warnings->multiple_intersections.store(true, std::memory_order_relaxed);
+            PreciseSeamWarnings::mark(warnings->multiple_intersections, modifier->type());
 
         // Policy: lengths are compared exactly. Geometrically equal segments (e.g. a symmetric modifier
         // crossing both faces of a thin wall) differ only by cut rounding noise, which varies from layer
@@ -845,6 +848,9 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
     points_to_insert.reserve(result.size() * 2);
     for (size_t seg_idx = 0; seg_idx < result.size(); ++seg_idx) {
         const WeakModifierSegment &seg = result[seg_idx];
+        // A whole-perimeter zone has no boundaries to insert.
+        if (seg.whole_perimeter)
+            continue;
         points_to_insert.push_back({seg_idx, true, seg.left_position});
         points_to_insert.push_back({seg_idx, false, seg.right_position});
     }
@@ -873,6 +879,9 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
         bool refine_before = false;
         bool refine_after = false;
         for (const WeakModifierSegment &segment : result) {
+            // Its placeholder points must not match a real vertex.
+            if (segment.whole_perimeter)
+                continue;
             refine_before |= polygon[poly_idx] == segment.left_point;
             refine_after |= polygon[poly_idx] == segment.right_point;
         }
@@ -900,6 +909,12 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
     // (bottom of object tree first), so higher-priority modifiers overwrite
     // lower-priority ones via last-write-wins.
     for (const auto &segment : result) {
+        // A whole-perimeter zone types every edge, so Enforced subdivides the whole perimeter, as
+        // painting it green all round would.
+        if (segment.whole_perimeter) {
+            std::fill(edge_types.begin(), edge_types.end(), segment.type);
+            continue;
+        }
         const size_t left_idx = find_point_index(segment.left_point);
         const size_t right_idx = find_point_index(segment.right_point);
         // Practically unreachable (see find_point_index), but a miss would make the loop below write
@@ -997,14 +1012,26 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
             continue;
         const ExtractionContext context{layer, modifier_volume, warnings};
         const SegmentExtraction extracted = extract_perimeter_segments(prepared, it->second[layer_id], modifier_volume->type(), context);
-        record_modifier_usage(warnings, modifier_volume, extracted);
-        // Keep the existing full-containment policy until it is changed explicitly.
+        record_extraction(warnings, modifier_volume, extracted);
+        const auto type = convert_weak_modifier_type(modifier_volume->type());
+        // Policy for a perimeter fully inside a weak modifier, by analogy with seam painting:
+        // - Enforced is like a perimeter painted green all round: a meaningful choice that the seam
+        //   position does not matter here. Every edge is subdivided and the placer picks the best spot.
+        // - Neutral is like an unmarked perimeter: it clears painting and lower zones.
+        // Both take part in the usual priority order and give no warning. Blocked is skipped with the
+        // full-containment warning: forbidding the seam on the whole perimeter cannot be honoured, so it
+        // does not override anything below it (lower zones and painting stay in effect).
         if (extracted.full_containment) {
-            if (warnings)
-                warnings->full_containment.store(true, std::memory_order_relaxed);
+            if (type == EnforcedBlockedSeamPoint::Blocked) {
+                if (warnings)
+                    PreciseSeamWarnings::mark(warnings->full_containment, modifier_volume->type());
+                continue;
+            }
+            WeakModifierSegment whole{type, Point(), PerimeterPosition{0, 0.}, Point(), PerimeterPosition{0, 0.}};
+            whole.whole_perimeter = true;
+            result.push_back(whole);
             continue;
         }
-        const auto type = convert_weak_modifier_type(modifier_volume->type());
         for (const PerimeterSegment &segment : extracted.segments) {
             result.push_back({type, segment.polyline.points.front(), segment.begin,
                                    segment.polyline.points.back(), segment.end});
@@ -1042,6 +1069,15 @@ void apply_weak_modifiers_to_perimeter(
     // so higher-priority modifiers (higher in object tree) overwrite via last-write-wins.
     for (size_t seg_idx = 0; seg_idx < weak_segments.size(); ++seg_idx) {
         const auto &segment = weak_segments[seg_idx];
+
+        // A whole-perimeter zone types every candidate, including painting's oversampled points.
+        if (segment.whole_perimeter) {
+            for (size_t i = perimeter.start_index; i < perimeter.end_index; ++i)
+                result.points[i].type = segment.type;
+            if (segment.type == EnforcedBlockedSeamPoint::Enforced)
+                some_point_enforced = true;
+            continue;
+        }
 
         // Find boundary point indices in result.points
         std::optional<size_t> left_idx = find_point_index(segment.left_point);
