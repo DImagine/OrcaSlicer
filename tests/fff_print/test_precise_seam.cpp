@@ -481,7 +481,7 @@ TEST_CASE("Coincident weak boundaries do not prevent later boundary refinement",
 {
     SeamFixture fixture;
     Polygon perimeter = rectangle(0, 0, 20, 20);
-    // Duplicate boundaries used to stall the reverse cursor before reaching the separate segment.
+    // Duplicate boundaries must not stop refinement before the separate segment is reached.
     const auto *a = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {rectangle(2, -2, 6, 2)});
     const auto *b = fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, {rectangle(2, -2, 6, 2)});
     const auto *c = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {rectangle(10, -2, 14, 2)});

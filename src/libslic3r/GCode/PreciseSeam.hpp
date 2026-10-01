@@ -43,7 +43,8 @@ using ModifierRegionsCache = std::unordered_map<const ModelVolume*, ModifierSlic
 ModifierRegions prepare_modifier_regions(ExPolygons regions);
 ModifierSlices prepare_modifier_slices(std::vector<ExPolygons> slices);
 
-// Bound diagnostic volume only; every failed fragment is still counted and discarded.
+// Bound diagnostic volume only; every failed or recovered fragment is still counted and handled.
+// The same limit applies separately to failure and recovery markers.
 inline constexpr size_t failed_fragment_log_limit = 10;
 
 // Shared by all layers and objects in one SeamPlacer::init(); a new pass starts fresh.
@@ -51,6 +52,9 @@ struct PreciseSeamWarnings {
     std::atomic<bool> multiple_intersections{false};  // modifier intersects perimeter in multiple separate places (strong only)
     std::atomic<bool> full_containment{false};        // modifier fully contains perimeter, no intersection edges
     std::atomic<size_t> failed_fragments{0}; // Also triggers the user warning when nonzero.
+    // Fragments saved by the rare-case fallback or accepted as contacts; log only, no user warning.
+    // Clipper is deterministic, so a prismatic model can repeat the same case on every layer.
+    std::atomic<size_t> recovered_fragments{0};
 };
 
 // Optional caller identity for concise diagnostics when an intersection is discarded.
@@ -97,7 +101,8 @@ struct SegmentExtraction {
     std::vector<PerimeterSegment> segments;
     bool full_containment = false;
     bool valid = true; // Invalid perimeter input; discarded fragments do not invalidate other segments.
-    size_t discarded_segments = 0; // Failed bindings are ignored, with a warning and diagnostic marker.
+    // Clipped fragments whose binding failed; one segment may consist of several fragments.
+    size_t discarded_fragments = 0; // Failed bindings are ignored, with a warning and diagnostic marker.
 };
 
 // Clip a prepared, unchanged perimeter against each nearby modifier region.

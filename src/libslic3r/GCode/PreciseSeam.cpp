@@ -185,9 +185,13 @@ bool append_projected_fragment(const Polyline &fragment, const Polygon &perimete
             const ClippedEdgeInterval &previous = intervals.back();
             const double end = forward ? previous.end : previous.begin;
             matched = interval_on_edge(fragment.points[i - 1], fragment.points[i], previous.edge, perimeter);
-            if (matched && (is_forward(*matched) != forward ||
-                            (forward ? matched->begin : matched->end) != end))
+            if (matched && is_forward(*matched) != forward)
                 matched.reset();
+            // The shared point is the previous pair's last point on the same edge, so continuity holds by
+            // construction. Reuse its parameter rather than comparing a recomputed one: the two projections
+            // may be compiled differently (e.g. FMA contraction) and differ by an ulp on some platforms.
+            if (matched)
+                (forward ? matched->begin : matched->end) = end;
             // Crossing to the neighbor is allowed only at their actual shared vertex.
             const size_t vertex = forward ? (previous.edge + 1) % count : previous.edge;
             if (!matched && end == (forward ? 1. : 0.) && fragment.points[i - 1] == perimeter.points[vertex]) {
@@ -209,17 +213,18 @@ bool append_projected_fragment(const Polyline &fragment, const Polygon &perimete
 }
 
 // Exact binding first, projection as the general path; both leave intervals unchanged on failure.
-static bool bind_fragment(const Polyline &fragment, const Polygon &perimeter,
-                          std::vector<ClippedEdgeInterval> &intervals, FragmentBindingFailure &failure)
+bool bind_fragment(const Polyline &fragment, const Polygon &perimeter,
+                   std::vector<ClippedEdgeInterval> &intervals, FragmentBindingFailure &failure)
 {
     if (fragment.size() > 2 && append_exact_fragment(fragment, perimeter, intervals))
         return true;
     return append_projected_fragment(fragment, perimeter, intervals, failure);
 }
 
-// Safety net for an extremely unlikely case: the modifier boundary must cross the perimeter within
-// about a nanometre of a source vertex. Not part of the normal binding path; used only after binding
-// has failed. Clipper may place a cut at a vertex's height but a few nanometres to the side of it
+// Safety net for a rare case: the modifier boundary must cross the perimeter within about a
+// nanometre of a source vertex (Clipper is deterministic, so a prismatic model may repeat it on
+// every layer). Not part of the normal binding path; used only after binding has failed.
+// Clipper may place a cut at a vertex's height but a few nanometres to the side of it
 // (scanbeam clamping, X taken from the modifier edge). The end pair then either collapses to the
 // vertex parameter (rejected as zero-length) or misses both neighbouring edges, and the whole
 // fragment is lost. Reproduced on OrcaSlicer's own Clipper by a randomized search with borders
@@ -229,7 +234,9 @@ static bool bind_fragment(const Polyline &fragment, const Polygon &perimeter,
 // elsewhere on the perimeter. Candidates are only the cut's neighbour in the fragment, when that is
 // a source vertex (the cut is a rounded copy of it and is dropped), or a vertex sharing a source
 // edge with that neighbour (the cut stands for the start of that edge). Two different candidates
-// (an edge shorter than the radius, or a self-touching contour) leave the fragment unchanged.
+// (an edge shorter than the radius, or a self-touching contour) leave the fragment unchanged, and so
+// does an end that is itself a source vertex (the open line's start/end or an exact cut): it is not
+// a rounded cut, and moving it could drop a real edge shorter than the radius.
 // The radius is TOLERANCE_LINEAR, the distance at which boundary insertion snaps to an existing
 // vertex anyway, so the result matches a successful binding. The caller re-binds with the usual
 // strict direction and continuity rules, so a wrong candidate can only fail, never bind elsewhere.
@@ -248,6 +255,8 @@ static bool snap_cuts_to_adjacent_vertices(Polyline &fragment, const Polygon &pe
         std::optional<Point> target;
         // Every visit of the neighbour's coordinate contributes its two chain-adjacent vertices.
         for (size_t j = 0; j < count; ++j) {
+            if (perimeter[j] == cut)
+                return std::nullopt; // A real vertex, not a rounded cut.
             if (perimeter[j] != neighbour)
                 continue;
             neighbour_is_vertex = true;
@@ -306,22 +315,35 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
     FragmentBindingFailure failure;
     if (bind_fragment(fragment, perimeter, intervals, failure))
         return true;
-    // Fallback for an extremely unlikely rounding case: retry the same binding rules once on the
-    // cleaned fragment. The normal path never gets here. A recovery is not a failure (no counter,
-    // no user warning), but it leaves its own marker so that any later problem can be traced to it.
+    // Fallback for a rare rounding case: retry the same binding rules once on the cleaned fragment.
+    // The normal path never gets here. A recovery is not a failure (no failure count, no user warning),
+    // but it leaves its own marker so that any later problem can be traced to it.
     // A full failure falls through to the usual failure marker with the original reason.
+    const char *outcome = nullptr;
     Polyline cleaned = fragment;
     if (snap_cuts_to_adjacent_vertices(cleaned, perimeter)) {
         FragmentBindingFailure retry_failure;
         // Only a contact shorter than the snapping distance may remain: nothing to bind, nothing lost.
-        if (cleaned.size() < 2 || bind_fragment(cleaned, perimeter, intervals, retry_failure)) {
-            BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamFragmentRecovered] Rare case: cut rounded next to a"
-                << " source vertex was snapped to it and the fragment was bound on retry"
-                << fragment_location(context, fragment_index) << " original_pair=" << failure.pair_index
-                << " original_reason=" << failure.reason << " fragment_points=" << fragment.size()
-                << " cleaned_points=" << cleaned.size() << " perimeter_points=" << perimeter.size();
-            return true;
-        }
+        if (cleaned.size() < 2)
+            outcome = "contact";
+        else if (bind_fragment(cleaned, perimeter, intervals, retry_failure))
+            outcome = "bound";
+    }
+    // Any failed fragment shorter than the snapping distance is a contact as well, for example two
+    // cuts in the middle of an edge that project to one parameter: insertion would collapse it onto
+    // one point anyway. Accept it as clipping returned it instead of reporting a failure.
+    if (outcome == nullptr && fragment.length() < double(TOLERANCE_LINEAR))
+        outcome = "contact";
+    if (outcome != nullptr) {
+        // Same log budget as failures, counted separately; SeamPlacer::init() reports the total.
+        if (context.warnings == nullptr ||
+            context.warnings->recovered_fragments.fetch_add(1, std::memory_order_relaxed) < failed_fragment_log_limit)
+            BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamFragmentRecovered] Rare case resolved after a binding failure"
+                << " outcome=" << outcome << fragment_location(context, fragment_index)
+                << " original_pair=" << failure.pair_index << " original_reason=" << failure.reason
+                << " fragment_points=" << fragment.size() << " cleaned_points=" << cleaned.size()
+                << " perimeter_points=" << perimeter.size();
+        return true;
     }
     // Reserve a log slot atomically before formatting; callers without shared state log every failure.
     if (context.warnings &&
@@ -407,7 +429,7 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     }
     for (size_t i = 0; i < fragments.size(); ++i)
         if (!detail::append_fragment(fragments[i], perimeter, intervals, context, i))
-            ++result.discarded_segments;
+            ++result.discarded_fragments;
 
     std::sort(intervals.begin(), intervals.end(), [](const auto &a, const auto &b) {
         if (a.edge != b.edge) return a.edge < b.edge;
@@ -417,7 +439,10 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     // Union overlaps on the same occurrence of an edge, never across equal coordinates.
     std::vector<ClippedEdgeInterval> merged;
     for (const ClippedEdgeInterval &interval : intervals) {
-        if (!merged.empty() && merged.back().edge == interval.edge && interval.begin <= merged.back().end) {
+        // Fragments touching on an edge meet at the same integer point. Comparing that point as well keeps
+        // them joined even if its two projections differ by an ulp on some platforms (e.g. FMA contraction).
+        if (!merged.empty() && merged.back().edge == interval.edge &&
+            (interval.begin <= merged.back().end || interval.first == merged.back().last)) {
             if (interval.end > merged.back().end) {
                 merged.back().end = interval.end;
                 merged.back().last = interval.last;
@@ -663,6 +688,11 @@ std::optional<Point> insert_strong_seam_point(
                 warnings->full_containment.store(true, std::memory_order_relaxed);
             continue;
         }
+        // Policy: no usable segment passes the turn to the next modifier by priority. This includes a
+        // modifier that crosses the perimeter but whose fragments were all discarded by binding: the
+        // seam on that layer then comes from a lower-priority modifier (or weak/ordinary placement)
+        // rather than from none, and the user is told through the "unable to process intersection"
+        // warning. Deliberately not distinguished from "does not cross this perimeter".
         if (extracted.segments.empty())
             continue;
         if (warnings && extracted.segments.size() > 1)

@@ -1596,6 +1596,13 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
               << " fragments discarded; first " << PreciseSeam::failed_fragment_log_limit
               << " logged (parallel processing order), " << (failed - PreciseSeam::failed_fragment_log_limit)
               << " omitted";
+      // Recoveries are log-only: no user warning, but the same bounded detail and a total.
+      const size_t recovered = precise_seam_warnings.recovered_fragments.load(std::memory_order_relaxed);
+      if (recovered > PreciseSeam::failed_fragment_log_limit)
+          BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamFragmentRecovered] " << recovered
+              << " fragments recovered; first " << PreciseSeam::failed_fragment_log_limit
+              << " logged (parallel processing order), " << (recovered - PreciseSeam::failed_fragment_log_limit)
+              << " omitted";
       std::vector<std::string> parts;
       if (failed > 0)
           parts.push_back(_u8L("unable to process intersection"));

@@ -129,8 +129,14 @@ end pair then collapses or misses both neighbouring edges, and both paths reject
 the fragment. Only after such a failure, an end cut closer than 1 µm (the
 insertion snapping distance) to a vertex of the fragment's own chain is snapped
 to it: either its neighbour in the fragment, or a vertex sharing a source edge
-with that neighbour. An ambiguous choice is left as a failure. Binding is then
-retried once with the same rules. Failure
+with that neighbour. An ambiguous choice, or an end that is itself a source
+vertex, is left unchanged. Binding is then retried once with the same rules. A
+fragment that still fails but is shorter than 1 µm is accepted as a contact and
+binds nothing: insertion would collapse it onto one point anyway. Within one
+fragment, a pair continuing on the same edge reuses the previous pair's parameter
+for their shared point, and touching fragments on one edge are joined when they
+meet at the same integer point, so parameters recomputed differently by the
+compiler cannot split a continuous interval. Failure
 rolls back and discards only that fragment, with a diagnostic marker. Overlapping
 source visits are outside the binding contract. Boundary contacts are accepted
 as returned by clipping, without offsets or additional contact rules.
@@ -163,6 +169,12 @@ point: largest bed Y first, then smallest X; a complete tie keeps the first
 candidate. Slice coordinates already include instance rotation and have the
 bed axes; centering and XY translation do not change this ordering. Nearly equal
 lengths are not treated as equal.
+
+A modifier without a usable segment passes the turn to the next one. This
+deliberately includes a modifier that crosses the perimeter but whose fragments
+were all discarded: the seam on that layer then comes from a lower-priority
+modifier, or from weak or ordinary placement, and the "unable to process
+intersection" warning tells the user about the discarded intersection.
 
 Once a modifier yields a segment, no later modifier competes with it. Its chosen
 point is inserted with helper points 1 micrometre on either side, after first
@@ -222,8 +234,9 @@ precedence over painting, and Neutral clears painting inside its zone.
 - An intersection that cannot be bound continuously is discarded with an
   "unable to process intersection" warning and a compact log marker containing
   the object, modifier, layer and failure location. Other segments remain usable.
-  A fragment saved by the vertex-snapping retry is not a failure and shows no
-  user warning, but logs its own `[PreciseSeamFragmentRecovered]` marker with the
+  A fragment saved by the vertex-snapping retry or accepted as a contact is not a
+  failure and shows no user warning, but logs its own
+  `[PreciseSeamFragmentRecovered]` marker (`outcome=bound` or `contact`) with the
   same location fields and the original failure reason.
 - Through-body intersections and modifier holes need no separate warnings.
   Multiple weak segments are accepted without a warning.
@@ -247,6 +260,8 @@ counts. Parallel processing determines which failures are logged first. A new
 call starts with a fresh counter; cancellation may omit the final summary.
 Callers without shared warning state retain unlimited diagnostic logging.
 The limit does not affect discarding fragments or showing the user warning.
+Recovered fragments have their own counter with the same limit and final summary:
+Clipper is deterministic, so a prismatic model can repeat one recovery on every layer.
 After all objects are processed, `SeamPlacer::init()` issues at most one non-critical
 warning with the ID `SlicingPreciseSeamWarning`. The warning is a single line
 that lists every cause found, because the export warnings dialog shows only the
@@ -291,6 +306,11 @@ instead of appending text to it.
   strong positions, including a midpoint on an existing vertex or the closing
   edge. They also cover shared and coincident weak boundaries, every warning,
   and the priority order.
+- [Segment extraction tests](../../tests/libslic3r/test_precise_seam.cpp) cover
+  clipping and source-edge binding: holes and components, contour origin and
+  reversal, repeated coordinates, rounding, full coverage and contacts, rollback
+  and diagnostic limits, and the vertex-snapping fallback on synthetic and real
+  Clipper fragments.
 - [Seam placer tests](../../tests/fff_print/test_seam_placer.cpp) cover
   enforced-patch selection independent of the contour start, fully painted
   contours, duplicate removal, and `Print::apply()` synchronization through
