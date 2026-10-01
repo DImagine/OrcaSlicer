@@ -635,6 +635,32 @@ TEST_CASE("Weak full containment keeps its warning and leaves the perimeter unch
     CHECK(warnings.failed_fragments.load() == 0);
 }
 
+TEST_CASE("A modifier touching the perimeter at one point keeps the full containment policy", "[PreciseSeam][Regression]")
+{
+    const auto type = GENERATE(ModelVolumeType::PRECISE_SEAM_CENTER, ModelVolumeType::PRECISE_SEAM_LEFT,
+                               ModelVolumeType::PRECISE_SEAM_RIGHT, ModelVolumeType::PRECISE_SEAM_ENFORCED,
+                               ModelVolumeType::PRECISE_SEAM_BLOCKED, ModelVolumeType::PRECISE_SEAM_NEUTRAL);
+    SeamFixture fixture;
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    const Points original = perimeter.points;
+    // The hole touches the perimeter only at (10, 0): no gap, so the contact must not create segments.
+    ExPolygon region(rectangle(-2, -2, 22, 22));
+    region.holes.push_back(Polygon(Points{mm(10, 0), mm(12, 2), mm(10, 4), mm(8, 2)}));
+    region.holes.back().reverse();
+    const auto *modifier = fixture.add_regions(type, {region});
+    PreciseSeam::PreciseSeamWarnings warnings;
+    if (is_precise_seam_strong(type))
+        CHECK_FALSE(PreciseSeam::insert_strong_seam_point(
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings).has_value());
+    else
+        CHECK(PreciseSeam::collect_weak_modifier_segments(
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings).empty());
+    CHECK(perimeter.points == original);
+    CHECK(warnings.full_containment.load());
+    CHECK_FALSE(warnings.multiple_intersections.load());
+    CHECK(warnings.failed_fragments.load() == 0);
+}
+
 TEST_CASE("Unsupported strong modifier sections are skipped with the appropriate warning", "[PreciseSeam]")
 {
     const int scenario = GENERATE(0, 1, 2, 3);

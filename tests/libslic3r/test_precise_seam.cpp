@@ -453,6 +453,41 @@ TEST_CASE("Full coverage is distinct from an empty or point-only intersection", 
         CHECK(result.segments.empty());
 }
 
+TEST_CASE("Full coverage survives a modifier boundary touching the perimeter at one point", "[PreciseSeam][SegmentExtraction]")
+{
+    const bool reverse = GENERATE(false, true);
+    const size_t origin = GENERATE(size_t(0), size_t(1), size_t(2), size_t(3));
+    const int scenario = GENERATE(0, 1, 2);
+    CAPTURE(reverse, origin, scenario);
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    if (reverse)
+        perimeter.reverse();
+    std::rotate(perimeter.points.begin(), perimeter.points.begin() + origin, perimeter.points.end());
+    ExPolygon modifier(rectangle(-2, -2, 22, 22));
+    if (scenario == 0) {
+        // A hole vertex touches the middle of an edge from inside the body.
+        modifier.holes.push_back(Polygon(Points{mm(10, 0), mm(12, 2), mm(10, 4), mm(8, 2)}));
+        modifier.holes.back().reverse();
+    } else if (scenario == 1) {
+        // A notch in the exterior touches the same point from outside the body.
+        modifier = ExPolygon(Polygon(Points{mm(-2, -2), mm(8, -2), mm(10, 0), mm(12, -2),
+                                            mm(22, -2), mm(22, 22), mm(-2, 22)}));
+    } else {
+        // A hole vertex touches a corner, which is vertex zero for some origins.
+        modifier.holes.push_back(Polygon(Points{mm(0, 0), mm(3, 1), mm(1, 3)}));
+        modifier.holes.back().reverse();
+    }
+    // A single contact point leaves no uncovered length, even if clipping splits the line there:
+    // the split pieces meet at one source position and merge back into complete edges.
+    const auto result = PreciseSeam::extract_perimeter_segments(
+        PreciseSeam::PreparedPerimeter(perimeter), PreciseSeam::prepare_modifier_regions({modifier}), ModelVolumeType::PRECISE_SEAM_CENTER);
+    check_provenance(perimeter, result);
+    CHECK(result.full_containment);
+    REQUIRE(result.segments.size() == 1);
+    CHECK_THAT(unscale<double>(result.segments.front().polyline.length()), Catch::Matchers::WithinAbs(80., 1e-6));
+    CHECK(result.segments.front().edge_indices.size() >= 4);
+}
+
 TEST_CASE("Repeated visits to a coordinate stay on their original perimeter edges", "[PreciseSeam][SegmentExtraction]")
 {
     // Two visits to the origin belong to different lobes, not to one shared vertex.
