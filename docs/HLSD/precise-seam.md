@@ -10,15 +10,16 @@ persistent model object rather than paint on the surface, so it keeps working
 when the design changes. A body swept along a path on the surface can guide the
 seam along any trajectory.
 
-The modifier is non-printing geometry. It takes no part in slicing, region
-assignment, filament selection or brim adhesion, and it affects only seam
+The modifier is non-printing geometry. It takes no part in object slicing,
+region assignment, filament selection or brim adhesion, and it affects only seam
 placement during G-code export. Perimeters that no modifier reaches, and
 objects without Precise Seam volumes, follow the regular seam placement
 unchanged.
 
-Precise Seam does not replace the seam placer. It feeds it: a modifier changes
-the enforced/blocked type of seam candidates, the same mechanism as seam
-painting, and the configured seam position then chooses among them.
+Precise Seam does not replace the seam placer. It feeds it: a modifier inserts
+the points it needs into the perimeter and changes the enforced/blocked type of
+seam candidates, the same typing mechanism as seam painting, and the configured
+seam position then chooses among them.
 
 This document covers the volume types and their priority, the data flow
 through `SeamPlacer`, the extraction of perimeter segments from modifier
@@ -42,14 +43,28 @@ depend on this order.
 | `PRECISE_SEAM_NEUTRAL` | weak | intersection reset to neutral |
 
 A strong modifier fixes a single point. The perimeter gets exactly one enforced
-seam candidate there, and every other candidate is blocked. A weak modifier only
-retypes the candidates inside its intersection, like painting does.
+seam candidate there, and every other candidate is blocked. A weak modifier
+retypes, and where needed adds, the candidates inside its intersection, like
+painting does.
 
 An **intersection** is a continuous part of the external perimeter's centerline
-that lies inside one slice region of the modifier on that layer. It is a portion
-of the perimeter, never a chord through the object. The centerline lies half an
+that lies inside the modifier's slice on that layer. It is a portion of the
+perimeter, never a chord through the object. The centerline lies half an
 extrusion width inside the model surface and depends on print settings, so a
 modifier must reach clearly past the surface to cross it unambiguously.
+
+### Terms
+
+- **Segment:** an intersection as the code represents it (`PerimeterSegment`).
+  User-facing texts call it an intersection.
+- **Fragment:** a piece of the perimeter returned by clipping, before it is tied
+  to the source contour.
+- **Interval:** the bound part of one source edge, given by the edge index and a
+  parameter range on that edge.
+- **Zone:** a weak segment with its type (Enforced, Blocked or Neutral).
+- **Boundary:** an end of a zone, inserted into the perimeter polygon.
+- **Candidate:** a seam candidate of the seam placer, built from the points of
+  the processed perimeter polygon (painted enforcers may add more).
 
 First and last are taken along the perimeter oriented counter-clockwise as seen
 from above. On an outer wall seen from outside, Left is therefore the left end
@@ -83,8 +98,8 @@ intersection" warning.
 ## Data flow
 
 1. **Invalidation.** `Print::apply()` treats a change of Precise Seam volumes as
-   a change of seam placement only and invalidates G-code export; sliced layers
-   are kept (see [Print invalidation](#print-invalidation)).
+   a change of seam placement and invalidates G-code export; the object is not
+   resliced (see [Print invalidation](#print-invalidation)).
 2. **Modifier slices.** `SeamPlacer::init()` collects each object's Precise Seam
    volumes once, slices every volume separately and caches its regions with
    their bounding boxes.
@@ -177,7 +192,7 @@ producing intervals: an edge index with a parameter range on that edge.
   match, are bound by projection. The first source edge that holds both points
   of the first pair, with distinct parameters, establishes the edge and
   direction. Every following pair must continue on the same edge or cross to the
-  neighbouring edge at their actual shared vertex, in the same direction. A pair
+  neighboring edge at their actual shared vertex, in the same direction. A pair
   continuing on the same edge reuses the previous pair's parameter for their
   shared point, so the two projections of one point cannot differ.
 - **Failure.** A fragment that cannot be bound continuously is rolled back and
@@ -188,23 +203,23 @@ producing intervals: an edge index with a parameter range on that edge.
 Two rare rounding cases are handled only after both paths have failed, so the
 normal path never pays for them:
 
-- **Cut beside a vertex.** When a modifier boundary crosses within about a
-  nanometre of a source vertex, Clipper can place the cut at the vertex's height
-  but a few nanometres beside it. The end pair then collapses to the vertex's
-  parameter or misses both neighbouring edges. An end cut closer than 1 µm to a
-  vertex of the fragment's own chain is snapped to that vertex: either its
-  neighbour in the fragment (the cut is a rounded copy of it and is dropped) or a
-  vertex that shares a source edge with that neighbour. There is no search for
+- **Cut beside a vertex.** When a modifier boundary crosses within about one
+  coordinate unit of a source vertex, Clipper can place the cut at the vertex's
+  height but a few units beside it. The end pair then collapses to the vertex's
+  parameter or misses both neighboring edges. An end cut closer than the
+  snapping radius to a vertex of the fragment's own chain is snapped to that
+  vertex: either its neighbor in the fragment (the cut is a rounded copy of it
+  and is dropped) or a vertex that shares a source edge with that neighbor. There
+  is no search for
   the nearest vertex elsewhere on the perimeter. Ends that are themselves source
   vertices and ambiguous choices are left unchanged. Binding is then retried
   once with the same strict rules, so a wrong candidate can only fail again.
-- **Contact.** A fragment that still fails but is shorter than 1 µm is accepted
-  as a contact and binds nothing. Insertion would collapse it onto one point
-  anyway.
+- **Contact.** A fragment that still fails but is shorter than the snapping
+  radius is accepted as a contact and binds nothing. Insertion would collapse it
+  onto one point anyway.
 
 Both outcomes are recoveries, not failures: they show no user warning but leave
-a log marker. Clipper is deterministic, so a prismatic model can repeat the same
-recovery on every layer.
+a log marker.
 
 ### Assembling segments
 
@@ -234,17 +249,18 @@ perimeter counts as well:
 - At a vertex or on an axis-aligned edge, clipping splits the line exactly at the
   touch, the pieces meet at one point, and the coverage is complete.
 - On an inclined edge the touching point is usually not representable on the
-  integer grid. The boundary pokes a few nanometres across and leaves a real
-  gap, so a single segment covers everything except that gap.
+  integer grid. The boundary pokes a few units across and leaves a real gap, so
+  a single segment covers everything except that gap.
 
 Weak insertion would collapse such a segment's boundaries onto one vertex and
 turn the intended zone into a single candidate, and strong would put the seam at
-the touch. A single segment is therefore also full containment exactly when
-insertion would collapse it:
+the touch. A single segment is therefore also full containment in the cases
+where insertion collapses it, exactly up to edges shorter than 2 µm:
 
 - the uncovered length from its end to its begin is below 1 µm, or
-- the gap spans exactly one vertex and both ends lie within 1 µm of that vertex,
-  since each end then snaps onto it from its own edge.
+- the gap spans one vertex, or starts at a vertex and ends on the next edge, and
+  both ends lie within 1 µm of the vertex that ends the first gap edge, since
+  each end then snaps onto it from its own edge.
 
 A cheap filter runs first: both cases bring the segment's ends within 2 µm of
 each other. A narrow band, an outside contact, a sharp spike and nearly touching
@@ -259,13 +275,11 @@ before anything is inserted, together with the source edge it lies on:
 
 - **Left:** the segment's first point.
 - **Right:** the segment's last point.
-- **Center:** the point at half the segment's arc length. The edge lengths
-  measured for the total are kept while that one segment is processed and are
-  reused to locate the midpoint without measuring again.
+- **Center:** the point at half the segment's arc length.
 
 Arc length is the sum of Euclidean edge lengths, not the chord or a vertex count.
-It is measured only for Center and when a modifier has several segments; a
-length of zero means unmeasured.
+Lengths are measured only when needed: for Center and when several segments of
+one modifier compete.
 
 `insert_strong_seam_point()` selects the longest segment of the first modifier
 that has one. Exactly equal lengths are resolved by the prepared target points:
@@ -278,7 +292,8 @@ joining across vertex zero, and the longest segment is still used.
 
 The selected point is inserted on its source edge. A point within 1 µm of an
 existing vertex is snapped to that vertex. Helper points are added 1 µm on both
-sides of it, after first and then before, so the insertion index stays valid.
+sides of it, except on an adjacent edge shorter than 2 µm, which already bounds
+the distance.
 
 When the candidates are built, the candidate at the inserted point is the only
 enforced one and becomes the central enforcer; every other candidate is blocked.
@@ -294,22 +309,27 @@ staggering.
 
 `collect_weak_modifier_segments()` extracts the segments of every weak modifier
 before the polygon is modified, so all positions refer to the same contour. Each
-segment becomes a zone with a type and two boundaries, kept in modifier priority
-order. The consumer receives only these ready boundaries; it does not inspect
-modifier geometry.
+segment becomes a zone with a type and two boundaries, kept in application
+order, lowest priority first. The boundaries carry their positions on the source
+contour; these remain as provenance after insertion and are not indices into the
+modified polygon. The consumer receives only these ready boundaries; it does not
+inspect modifier geometry.
 
 `prepare_weak_modifier_segments()` then changes the polygon:
 
 1. **Boundary insertion.** Insertion events are sorted by decreasing source edge
    and parameter, and the polygon is modified from its end towards its start. A
    pending boundary's source index therefore stays valid, and no arc lengths are
-   measured for sorting. A point on the closing edge is appended rather than
-   inserted at index zero. A boundary within 1 µm of the end of its current edge
-   is snapped to that vertex, so coincident boundaries share a vertex. A zone
-   narrower than 1 µm collapses into a single vertex.
-2. **Helper points.** A helper point is added 1 µm outside every boundary.
-   Random placement picks a position along the edge that follows a candidate;
-   the helpers keep that edge 1 µm long, so a zone can neither extend nor intrude
+   measured for sorting. Vertex zero has the canonical position `(0, 0)` and is
+   processed last, and a point on the closing edge is appended rather than
+   inserted at index zero. A boundary within 1 µm of either endpoint of its
+   current edge, an original vertex or a boundary inserted earlier, is snapped to
+   that point, so coincident boundaries share a vertex. A zone narrower than
+   1 µm collapses into a single vertex.
+2. **Helper points.** A helper point is added 1 µm outside every boundary,
+   unless the edge there is shorter than 2 µm, which already bounds it. Random
+   placement picks a position along the edge that follows a candidate; the
+   helpers keep that edge 1 µm long, so a zone can neither extend nor intrude
    further than that. Coincident boundaries share their helpers.
 3. **Enforced subdivision.** Zone types are resolved for the polygon's edges in
    priority order. The edges of a zone are those from its left boundary up to,
@@ -329,30 +349,36 @@ modifier, holes and through-body intersections need no special handling.
 
 ## Numeric tolerances
 
-Coordinates are integers in units of 1 nm. The design separates two scales: the
-rounding error of clipping, and the distance below which points cannot be told
-apart after insertion.
+Coordinates are integers in scaled units: 1 nm by default, and 10 nm when a bed
+larger than 2147 mm switches `SCALING_FACTOR`. The Precise Seam tolerances are
+fixed in units when the program starts. Distances quoted in this document in
+nanometers and micrometers assume the default unit; on large printers they are
+ten times larger. The design separates two scales: the rounding error of
+clipping, and the distance below which points cannot be told apart after
+insertion.
 
 | Value | Role |
 | --- | --- |
-| `MACHINE_PRECISION_SQUARED` (2.5, about 1.6 nm) | A point lies on an edge if it is this close. It absorbs Clipper's integer rounding of cuts and never bridges a real gap: a one-unit uncovered gap stays a gap. |
-| `TOLERANCE_LINEAR` (1 µm) | Insertion snaps points this close to an existing vertex, and helper points are placed this far from boundaries. The same radius bounds the rounding fallback, contacts and the sub-micron full-containment rule, so those decisions match what insertion would produce anyway. |
+| `MACHINE_PRECISION_SQUARED` (2.5 units², about 1.6 nm) | A point lies on an edge if it is this close. It absorbs Clipper's integer rounding of cuts and never bridges a real gap: a one-unit uncovered gap stays a gap. |
+| `TOLERANCE_LINEAR` (1000 units, 1 µm) | Insertion snaps points this close to an existing vertex, and helper points are placed this far from boundaries. The same radius bounds the rounding fallback, contacts and the sub-micron full-containment rule, so those decisions match what insertion would produce anyway. |
 | `enforcer_oversampling_distance` (0.2 mm) | Maximum step of enforced subdivision. |
 
 Raising the on-edge tolerance would not help with cuts beside a vertex: more
 points past a vertex would be clamped to its parameter and collapse. Lowering it
 would reject ordinary rounded cuts. The snapping radius is kept far above
 clipping precision for robustness: seam candidates hold single-precision
-coordinates, whose step is several nanometres at typical bed coordinates, and
+coordinates, whose step is about 8 to 15 nm at typical object coordinates, and
 weak boundaries and the strong point are located among the candidates by those
 coordinates, so distinct points must stay clearly distinct. 1 µm is also far
 below printing precision.
 
-Binding compares parameters exactly only where they are exact by construction:
-0 and 1 at vertices, and parameters shared between pairs and intervals as
-described above. It therefore does not depend on how a compiler evaluates two
-projections of the same point. The strong tie rule is the one deliberate exact
-comparison of computed values: only identical lengths count as a tie.
+Continuity never depends on two independently computed projections of the same
+point: a continuing pair reuses the previous parameter, and touching fragments
+are also joined at an equal integer point. Other exact comparisons of computed
+parameters, such as rejecting a pair whose two points project to the same
+parameter, only decide whether a pair is degenerate. The strong tie rule is the
+one exact comparison whose outcome changes a policy decision: only identical
+lengths count as a tie.
 
 Boundary contacts are accepted as clipping returns them, without offsets or
 special tangency rules. Users should cross the perimeter unambiguously; the
@@ -390,23 +416,24 @@ dumps:
 Failures and recoveries have separate atomic counters. The first 10 of each per
 `init()` call are logged in detail; later ones are only counted, without
 formatting a message. If a limit is exceeded, one summary marker reports the
-total and the number omitted. Parallel processing determines which records come
-first, and cancellation may omit the summaries. Callers without shared warning
-state, such as direct calls in tests, log every event. The limits never affect
-discarding, recovery or the user warning.
+total and the number omitted. The limit matters for recoveries too: clipping is
+deterministic, so a prismatic model can repeat one recovery on every layer.
+Parallel processing determines which records come first, and cancellation may
+omit the summaries. Callers without shared warning state, such as direct calls
+in tests, log every event. The limits never affect discarding, recovery or the
+user warning.
 
 ## Known limitations
 
-- **One seam per perimeter.** A strong modifier with several intersections uses
-  the longest one and warns.
-- **Full containment.** A modifier covering a whole perimeter is ignored on that
-  perimeter, with a warning.
+The policies above already define what happens with several strong
+intersections and with full containment. The remaining limitations are:
+
 - **The modifier must reach the perimeter centerline.** Boundaries that only
   graze it, within print-setting-dependent distances, are the user's
-  responsibility. Sub-micron results behave like points, as described in
-  [Numeric tolerances](#numeric-tolerances). Several near-touches on inclined
-  edges can leave several segments separated by nanometre gaps; their zones then
-  cover nearly the whole perimeter instead of being skipped.
+  responsibility; sub-micron results behave like points (see
+  [Numeric tolerances](#numeric-tolerances)). Several near-touches on inclined
+  edges can leave several segments separated by gaps of a few units; their zones
+  then cover nearly the whole perimeter instead of being skipped.
 - **Self-touching perimeters.** Extraction keeps distinct visits of one
   coordinate apart through its source-edge bindings, but the consumers locate
   inserted points by coordinates. A weak zone is typed and subdivided from the
@@ -419,7 +446,12 @@ discarding, recovery or the user warning.
   restoration would touch the whole pipeline, so it is not done for this rare
   geometry. Overlapping source visits are likewise outside the binding contract.
 
-## Model storage and 3MF compatibility
+## Integration with the application
+
+The remaining sections describe how Precise Seam volumes are stored, how their
+changes reach the print, and how the user works with them.
+
+### Model storage and 3MF compatibility
 
 Projects must stay readable by earlier releases, and a Precise Seam volume must
 not change a print there. Both 3MF writers therefore store it as an ordinary
@@ -443,7 +475,7 @@ the volume ends up as a Precise Seam type, so the settings return when the user
 changes the type back. Configuration values are XML-escaped in both writers, for
 every volume type.
 
-## Print invalidation
+### Print invalidation
 
 `Print::apply()` compares the Precise Seam volumes of each object by type, ID
 and transformation. Adding, removing, moving, reordering or retyping one cancels
@@ -451,10 +483,12 @@ background processing and invalidates only `psGCodeExport`; the sliced layers
 are kept. `model_volume_list_update_supports_and_seams()` then brings the
 support and Precise Seam volumes of the print's model copy in line with the new
 model in one pass. A volume may switch between these two families, since neither
-affects slicing. A conversion to or from a part or an ordinary modifier changes
-the solid and modifier volume lists and reslices as before.
+affects object slicing; such a switch also changes the support volumes, so the
+support step is invalidated as well. A conversion to or from a part or an
+ordinary modifier changes the solid and modifier volume lists and reslices the
+object as before.
 
-## User interface
+### User interface
 
 - *Add Precise Seam* in the object menu creates a Center modifier from a
   primitive or a loaded mesh. Text and SVG volumes cannot become Precise Seam
@@ -515,4 +549,4 @@ the solid and modifier volume lists and reslices as before.
   [Plugin tests](../../tests/slic3rutils/test_precise_seam_plugin.cpp) cover the
   Python bindings.
 - There is no automated end-to-end test through `SeamPlacer::init()` with a
-  modifier that intersects the object; that path is verified manually.
+  modifier that intersects the object.
