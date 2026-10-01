@@ -230,7 +230,14 @@ precedence over painting, and Neutral clears painting inside its zone.
 
 - More than one segment for a strong modifier produces a warning; the selected
   longest segment is still used. The count is taken after joining across vertex zero.
-- A perimeter fully contained in a modifier is ignored by that modifier.
+- A perimeter fully contained in a modifier is ignored by that modifier. A
+  boundary that only touches the perimeter counts as full containment. On an
+  inclined edge the touch usually pokes a few nanometres across and leaves a real
+  gap, so a single segment whose ends are closer than 1 µm, which passes every
+  source vertex and leaves less than 1 µm uncovered, is also full containment.
+  Otherwise weak insertion would collapse the zone into one candidate. A narrow
+  band or an outside contact covers only one or two edges and stays a normal
+  segment; below 1 µm its boundaries become a single candidate.
 - An intersection that cannot be bound continuously is discarded with an
   "unable to process intersection" warning and a compact log marker containing
   the object, modifier, layer and failure location. Other segments remain usable.

@@ -635,6 +635,68 @@ TEST_CASE("Weak full containment keeps its warning and leaves the perimeter unch
     CHECK(warnings.failed_fragments.load() == 0);
 }
 
+TEST_CASE("Coverage short by a gap under 1 um is full containment while a narrow band keeps its point", "[PreciseSeam][Regression]")
+{
+    // A tip pokes through the bottom edge at x = 10 mm by `depth` nm, so the perimeter line crosses it
+    // over about 2 * depth. As a hole in a large region it leaves that much uncovered (a touch from
+    // inside); as a separate triangle it is that much covered (a narrow band or an outside contact).
+    const auto type = GENERATE(ModelVolumeType::PRECISE_SEAM_ENFORCED, ModelVolumeType::PRECISE_SEAM_CENTER,
+                               ModelVolumeType::PRECISE_SEAM_LEFT, ModelVolumeType::PRECISE_SEAM_RIGHT);
+    const bool gap = GENERATE(true, false);
+    const coord_t depth = GENERATE(coord_t(2), coord_t(2000));
+    CAPTURE(type, gap, depth);
+    SeamFixture fixture;
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    const Points original = perimeter.points;
+    const Point tip(mm(10, 0).x(), gap ? -depth : depth);
+    ExPolygon region;
+    if (gap) {
+        region = ExPolygon(rectangle(-2, -2, 22, 22));
+        region.holes.push_back(Polygon(Points{tip, mm(11, 1), mm(9, 1)}));
+        region.holes.back().reverse();
+    } else {
+        region = ExPolygon(Polygon(Points{mm(9, -1), mm(11, -1), tip}));
+    }
+    const auto *modifier = fixture.add_regions(type, {region});
+    const bool micro = depth < scale_(0.001);
+    PreciseSeam::PreciseSeamWarnings warnings;
+    if (is_precise_seam_strong(type)) {
+        const auto seam = PreciseSeam::insert_strong_seam_point(
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
+        if (gap && micro) {
+            // Skipped like an exact touch, instead of a seam at the touch or on the opposite side.
+            CHECK_FALSE(seam.has_value());
+            CHECK(perimeter.points == original);
+        } else {
+            REQUIRE(seam.has_value());
+            if (!gap) // The band is processed normally: the seam lands on it.
+                CHECK((*seam - mm(10, 0)).cast<double>().norm() <= double(depth) + 1.);
+        }
+    } else {
+        const auto segments = PreciseSeam::collect_weak_modifier_segments(
+            {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache, &warnings);
+        const auto types = weak_candidate_types(perimeter, segments);
+        const size_t enforced = size_t(std::count(types.begin(), types.end(), SeamPlacerImpl::EnforcedBlockedSeamPoint::Enforced));
+        if (gap && micro) {
+            // Skipped like an exact touch, instead of collapsing the intended zone into one forced point.
+            CHECK(segments.empty());
+            CHECK(enforced == 0);
+            CHECK(perimeter.points == original);
+        } else if (gap) {
+            REQUIRE(segments.size() == 1);
+            CHECK(enforced > 300); // A 4 um gap is real: nearly the whole 80 mm perimeter, oversampled.
+        } else {
+            // The band is processed normally; below 1 um its boundaries snap into a single candidate.
+            REQUIRE(segments.size() == 1);
+            CHECK(enforced == (micro ? 1u : 2u));
+        }
+    }
+    // Only the sub-micron gap is full containment; nothing here is a binding failure.
+    CHECK(warnings.full_containment.load() == (gap && micro));
+    CHECK(warnings.failed_fragments.load() == 0);
+    check_square_boundary(perimeter);
+}
+
 TEST_CASE("A modifier touching the perimeter at one point keeps the full containment policy", "[PreciseSeam][Regression]")
 {
     const auto type = GENERATE(ModelVolumeType::PRECISE_SEAM_CENTER, ModelVolumeType::PRECISE_SEAM_LEFT,

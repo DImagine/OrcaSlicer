@@ -485,6 +485,36 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     result.full_containment = merged.size() == count;
     for (size_t i = 0; result.full_containment && i < count; ++i)
         result.full_containment = merged[i].edge == i && merged[i].begin == 0. && merged[i].end == 1.;
+    // A boundary that only touches the perimeter is full containment by policy. On an axis-aligned
+    // edge or at a vertex clipping splits the line exactly at the touch and the check above holds. On
+    // an inclined edge the touching point is usually not representable on the integer grid, so the
+    // boundary pokes a few nm across and leaves a real gap; the single segment then covers everything
+    // but that gap. Weak insertion would snap both its boundaries onto one vertex (1 um radius) and turn
+    // the intended zone into one candidate, and strong would put the seam at the touch. Treat a gap
+    // shorter than the snapping distance as full containment instead. Checked in stages, each only
+    // when the previous one fired: endpoints closer than 1 um (one comparison; a narrow band or an
+    // outside contact also gets here), the segment passing every source vertex (rejects those bands and
+    // contacts, which keep their single point), and the exact uncovered length (a sharp spike vertex can
+    // bring the ends close while its cut-off tip is longer than 1 um).
+    if (!result.full_containment && result.segments.size() == 1) {
+        const PerimeterSegment &only = result.segments.front();
+        const auto edge_length = [&perimeter, count](size_t edge) {
+            return (perimeter[(edge + 1) % count] - perimeter[edge]).cast<double>().norm();
+        };
+        // Uncovered length from the segment's end forward to its begin; stops early once it exceeds the limit.
+        const auto gap_length = [&](const PerimeterPosition &from, const PerimeterPosition &to, double limit) {
+            if (from.edge_index == to.edge_index && from.parameter <= to.parameter)
+                return (to.parameter - from.parameter) * edge_length(from.edge_index);
+            double gap = (1. - from.parameter) * edge_length(from.edge_index);
+            for (size_t edge = (from.edge_index + 1) % count; gap < limit && edge != to.edge_index; edge = (edge + 1) % count)
+                gap += edge_length(edge);
+            return gap + to.parameter * edge_length(to.edge_index);
+        };
+        const double limit = double(TOLERANCE_LINEAR);
+        if ((only.polyline.points.front() - only.polyline.points.back()).cast<double>().squaredNorm() < limit * limit &&
+            only.edge_indices.size() >= count && gap_length(only.end, only.begin, limit) < limit)
+            result.full_containment = true;
+    }
     // Full containment is skipped by both consumers; retain geometry but prepare no strong data.
     if (!result.full_containment && is_precise_seam_strong(mode))
         for (PerimeterSegment &segment : result.segments)
