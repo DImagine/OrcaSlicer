@@ -490,30 +490,44 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     // an inclined edge the touching point is usually not representable on the integer grid, so the
     // boundary pokes a few nm across and leaves a real gap; the single segment then covers everything
     // but that gap. Weak insertion would snap both its boundaries onto one vertex (1 um radius) and turn
-    // the intended zone into one candidate, and strong would put the seam at the touch. Treat a gap
-    // shorter than the snapping distance as full containment instead. Checked in stages, each only
-    // when the previous one fired: endpoints closer than 1 um (one comparison; a narrow band or an
-    // outside contact also gets here), the segment passing every source vertex (rejects those bands and
-    // contacts, which keep their single point), and the exact uncovered length (a sharp spike vertex can
-    // bring the ends close while its cut-off tip is longer than 1 um).
+    // the intended zone into one candidate, and strong would put the seam at the touch. Treat such a
+    // gap as full containment instead, exactly when insertion would collapse it:
+    // - the uncovered length is below the snapping distance (a gap inside one edge collapses onto the
+    //   boundary inserted first), or
+    // - the gap spans exactly one vertex and both ends lie within the snapping distance of it (each
+    //   end snaps onto that vertex from its own edge, even if the gap itself is up to 2 um long).
+    // Stage 1 is a cheap filter on the normal path: both cases bring the ends closer than 2 um. Narrow
+    // bands, outside contacts, sharp spikes and nearly touching contour parts can pass it, but their
+    // uncovered part is long and not around one vertex, so they stay ordinary segments (a band below
+    // 1 um then becomes a single weak candidate, which is its expected result).
     if (!result.full_containment && result.segments.size() == 1) {
         const PerimeterSegment &only = result.segments.front();
-        const auto edge_length = [&perimeter, count](size_t edge) {
-            return (perimeter[(edge + 1) % count] - perimeter[edge]).cast<double>().norm();
-        };
-        // Uncovered length from the segment's end forward to its begin; stops early once it exceeds the limit.
-        const auto gap_length = [&](const PerimeterPosition &from, const PerimeterPosition &to, double limit) {
-            if (from.edge_index == to.edge_index && from.parameter <= to.parameter)
-                return (to.parameter - from.parameter) * edge_length(from.edge_index);
-            double gap = (1. - from.parameter) * edge_length(from.edge_index);
-            for (size_t edge = (from.edge_index + 1) % count; gap < limit && edge != to.edge_index; edge = (edge + 1) % count)
-                gap += edge_length(edge);
-            return gap + to.parameter * edge_length(to.edge_index);
-        };
+        const Point &first = only.polyline.points.front();
+        const Point &last = only.polyline.points.back();
         const double limit = double(TOLERANCE_LINEAR);
-        if ((only.polyline.points.front() - only.polyline.points.back()).cast<double>().squaredNorm() < limit * limit &&
-            only.edge_indices.size() >= count && gap_length(only.end, only.begin, limit) < limit)
-            result.full_containment = true;
+        if ((first - last).cast<double>().squaredNorm() < 4. * limit * limit) {
+            const auto edge_length = [&perimeter, count](size_t edge) {
+                return (perimeter[(edge + 1) % count] - perimeter[edge]).cast<double>().norm();
+            };
+            // Uncovered length from the segment's end forward to its begin; stops early once it exceeds the limit.
+            const auto gap_length = [&](const PerimeterPosition &from, const PerimeterPosition &to) {
+                if (from.edge_index == to.edge_index && from.parameter <= to.parameter)
+                    return (to.parameter - from.parameter) * edge_length(from.edge_index);
+                double gap = (1. - from.parameter) * edge_length(from.edge_index);
+                for (size_t edge = (from.edge_index + 1) % count; gap < limit && edge != to.edge_index; edge = (edge + 1) % count)
+                    gap += edge_length(edge);
+                return gap + to.parameter * edge_length(to.edge_index);
+            };
+            // Strict comparisons match the vertex snapping in insert_point_into_perimeter.
+            const auto within_snap = [limit](const Point &a, const Point &b) {
+                return (a - b).cast<double>().squaredNorm() < limit * limit;
+            };
+            const Point &vertex = perimeter[only.begin.edge_index];
+            const bool around_one_vertex = (only.end.edge_index + 1) % count == only.begin.edge_index &&
+                                           within_snap(last, vertex) && within_snap(first, vertex);
+            if (around_one_vertex || gap_length(only.end, only.begin) < limit)
+                result.full_containment = true;
+        }
     }
     // Full containment is skipped by both consumers; retain geometry but prepare no strong data.
     if (!result.full_containment && is_precise_seam_strong(mode))

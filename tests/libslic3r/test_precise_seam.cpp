@@ -755,6 +755,101 @@ TEST_CASE("Full coverage survives a modifier boundary touching the perimeter at 
     CHECK(result.segments.front().edge_indices.size() >= 4);
 }
 
+TEST_CASE("A touch poking nanometres through an inclined edge is full containment", "[PreciseSeam][SegmentExtraction]")
+{
+    // Square of side 20 mm rotated by atan(3/4), integer vertices. A hole tip near the middle of the first
+    // side pokes outward along the normal (0.6, -0.8): by about 2.2 nm (a touch the integer grid cannot
+    // represent) or 2.2 um (a real gap). Contour origin and winding place the gap inside edge 0, inside
+    // the closing edge or in between.
+    const bool micro = GENERATE(true, false);
+    const bool reverse = GENERATE(false, true);
+    const size_t origin = GENERATE(size_t(0), size_t(1), size_t(2), size_t(3));
+    CAPTURE(micro, reverse, origin);
+    Polygon perimeter(Points{mm(0, 0), mm(16, 12), mm(4, 28), mm(-12, 16)});
+    if (reverse)
+        perimeter.reverse();
+    std::rotate(perimeter.points.begin(), perimeter.points.begin() + origin, perimeter.points.end());
+    const coord_t step = micro ? 1 : 1000;
+    const Point tip(mm(8, 6).x() + step, mm(8, 6).y() - 2 * step);
+    ExPolygon modifier(rectangle(-20, -10, 25, 40));
+    modifier.holes.push_back(Polygon(Points{tip, mm(8.2, 7.4), mm(6.6, 6.2)}));
+    modifier.holes.back().reverse();
+    const auto result = PreciseSeam::extract_perimeter_segments(
+        PreciseSeam::PreparedPerimeter(perimeter), PreciseSeam::prepare_modifier_regions({modifier}), ModelVolumeType::PRECISE_SEAM_CENTER);
+    check_provenance(perimeter, result);
+    REQUIRE(result.segments.size() == 1);
+    CHECK(result.full_containment == micro);
+}
+
+TEST_CASE("A gap around one vertex is full containment exactly when both ends snap to it", "[PreciseSeam][SegmentExtraction]")
+{
+    // A hole bounded by x + y = cut takes the corner (0, 0) off the square. Each end lies `cut` from the
+    // vertex and the uncovered length is 2 * cut: below 1 um at 300 nm; 1.4 um at 700 nm, yet both ends
+    // still snap onto the vertex on insertion; at 1200 nm neither does.
+    const coord_t cut = GENERATE(coord_t(300), coord_t(700), coord_t(1200));
+    CAPTURE(cut);
+    const Polygon perimeter = rectangle(0, 0, 20, 20);
+    ExPolygon modifier(rectangle(-2, -2, 22, 22));
+    const coord_t reach = coord_t(scale_(1.));
+    modifier.holes.push_back(Polygon(Points{Point(-reach, -reach), Point(reach + cut, -reach), Point(-reach, reach + cut)}));
+    modifier.holes.back().reverse();
+    const auto result = PreciseSeam::extract_perimeter_segments(
+        PreciseSeam::PreparedPerimeter(perimeter), PreciseSeam::prepare_modifier_regions({modifier}), ModelVolumeType::PRECISE_SEAM_CENTER);
+    check_provenance(perimeter, result);
+    REQUIRE(result.segments.size() == 1);
+    CHECK(result.full_containment == (cut < 1000));
+}
+
+TEST_CASE("A sub-micron gap that contains a short edge is full containment", "[PreciseSeam][SegmentExtraction]")
+{
+    // The closing edge v4 -> v0 is 500 nm long. The hole boundary through (100, 0) and (0, 600) leaves
+    // 100 + 500 + 100 = 700 nm uncovered across two vertices; the segment does not touch edge 4.
+    const Polygon perimeter(Points{mm(0, 0), mm(20, 0), mm(20, 20), mm(0, 20), Point(coord_t(0), coord_t(500))});
+    ExPolygon modifier(rectangle(-2, -2, 22, 22));
+    modifier.holes.push_back(Polygon(Points{Point(coord_t(100100), coord_t(-600000)), Point(coord_t(-100000), coord_t(600600)),
+                                            Point(coord_t(-1000000), coord_t(-1000000))}));
+    modifier.holes.back().reverse();
+    const auto result = PreciseSeam::extract_perimeter_segments(
+        PreciseSeam::PreparedPerimeter(perimeter), PreciseSeam::prepare_modifier_regions({modifier}), ModelVolumeType::PRECISE_SEAM_CENTER);
+    check_provenance(perimeter, result);
+    REQUIRE(result.segments.size() == 1);
+    CHECK(result.full_containment);
+}
+
+TEST_CASE("Segments whose ends meet only in space stay ordinary segments", "[PreciseSeam][SegmentExtraction]")
+{
+    const bool reverse = GENERATE(false, true);
+    const bool slit = GENERATE(false, true);
+    CAPTURE(reverse, slit);
+    Polygon perimeter;
+    ExPolygon modifier;
+    if (slit) {
+        // A slit 500 nm wide enters the contour from the left; the hole leaves its inner 9 mm uncovered,
+        // so the ends face each other across the slit while about 18 mm of perimeter lies between them.
+        const coord_t half = 250;
+        perimeter = Polygon(Points{mm(0, 0), mm(20, 0), mm(20, 10), mm(0, 10), Point(coord_t(0), mm(0, 5).y() + half),
+                                   Point(mm(10, 0).x(), mm(0, 5).y() + half), Point(mm(10, 0).x(), mm(0, 5).y() - half),
+                                   Point(coord_t(0), mm(0, 5).y() - half)});
+        modifier = ExPolygon(rectangle(-2, -2, 22, 12));
+        modifier.holes.push_back(rectangle(1, 4, 11, 6));
+        modifier.holes.back().reverse();
+    } else {
+        // A sharp spike 800 nm wide at its base: cutting off its 1 mm tip brings the ends within about
+        // 40 nm while the uncovered tip is about 2 mm long.
+        perimeter = Polygon(Points{mm(20, 0), mm(0, 0), Point(coord_t(0), coord_t(800))});
+        modifier = ExPolygon(rectangle(-1, -1, 19, 1));
+    }
+    if (reverse)
+        perimeter.reverse();
+    const auto result = PreciseSeam::extract_perimeter_segments(
+        PreciseSeam::PreparedPerimeter(perimeter), PreciseSeam::prepare_modifier_regions({modifier}), ModelVolumeType::PRECISE_SEAM_CENTER);
+    check_provenance(perimeter, result);
+    REQUIRE(result.segments.size() == 1);
+    const auto &segment = result.segments.front();
+    CHECK((segment.polyline.points.front() - segment.polyline.points.back()).cast<double>().norm() < scale_(0.001));
+    CHECK_FALSE(result.full_containment);
+}
+
 TEST_CASE("Repeated visits to a coordinate stay on their original perimeter edges", "[PreciseSeam][SegmentExtraction]")
 {
     // Two visits to the origin belong to different lobes, not to one shared vertex.
@@ -876,8 +971,10 @@ TEST_CASE("Distant modifier areas do not change nearby coverage or detach its ho
 TEST_CASE("Rounded intersections on an inclined edge retain their original edge", "[PreciseSeam][SegmentExtraction]")
 {
     const bool reverse = GENERATE(false, true);
-    // Grid intersections (3, 0.9) and (7, 2.1) round to (3, 1) and (7, 2).
-    Polygon perimeter(Points{Point(0, 0), Point(10, 3), Point(10, 20), Point(0, 20)});
+    // Grid intersections (3, 0.9) and (7, 2.1) round to (3, 1) and (7, 2). The far vertices keep the
+    // contour realistically long: a contour shorter than 1 um would be below the snapping distance
+    // as a whole, and its remaining uncovered part would count as full containment.
+    Polygon perimeter(Points{Point(0, 0), Point(10, 3), Point(coord_t(10), mm(0, 20).y()), Point(coord_t(0), mm(0, 20).y())});
     if (reverse) perimeter.reverse();
     const ExPolygon area(Polygon(Points{Point(3, -2), Point(7, -2), Point(7, 5), Point(3, 5)}));
     const auto result = PreciseSeam::extract_perimeter_segments(
