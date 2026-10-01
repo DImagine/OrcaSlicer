@@ -286,3 +286,42 @@ TEST_CASE("Print apply synchronizes support and seam helpers through type change
     fixture.print.apply(fixture.model, fixture.config);
     check_applied(fixture.model);
 }
+
+TEST_CASE("Precise Seam volume changes invalidate only G-code export", "[SeamPlacer][PreciseSeam][Print]")
+{
+    const int change = GENERATE(0, 1, 2, 3); // Add, move, retype, remove.
+    CAPTURE(change);
+    PipelineFixture fixture;
+    ModelObject *model_object = fixture.model.objects.front();
+    if (change != 0) {
+        ModelVolume *seam = model_object->add_volume(make_cube(1, 1, 1));
+        seam->set_type(ModelVolumeType::PRECISE_SEAM_CENTER);
+        fixture.print.apply(fixture.model, fixture.config);
+    }
+    // A full export marks every step done, so an invalidated step is visible afterwards.
+    Test::gcode(fixture.print);
+    REQUIRE(fixture.print.objects().size() == 1);
+    const PrintObject *object = fixture.print.objects().front();
+    REQUIRE(fixture.print.is_step_done(psGCodeExport));
+    REQUIRE(object->is_step_done(posSlice));
+    REQUIRE(object->is_step_done(posPerimeters));
+
+    if (change == 0) {
+        ModelVolume *seam = model_object->add_volume(make_cube(1, 1, 1));
+        seam->set_type(ModelVolumeType::PRECISE_SEAM_CENTER);
+    } else {
+        ModelVolume *seam = model_object->volumes.back();
+        REQUIRE(seam->is_precise_seam());
+        if (change == 1) seam->set_offset(Vec3d(2, 3, 0));
+        if (change == 2) seam->set_type(ModelVolumeType::PRECISE_SEAM_ENFORCED);
+        if (change == 3) model_object->delete_volume(model_object->volumes.size() - 1);
+    }
+    fixture.print.apply(fixture.model, fixture.config);
+
+    // The helper takes no part in slicing: the object and its layers are kept, only export reruns.
+    REQUIRE(fixture.print.objects().size() == 1);
+    CHECK(fixture.print.objects().front() == object);
+    CHECK_FALSE(fixture.print.is_step_done(psGCodeExport));
+    CHECK(object->is_step_done(posSlice));
+    CHECK(object->is_step_done(posPerimeters));
+}

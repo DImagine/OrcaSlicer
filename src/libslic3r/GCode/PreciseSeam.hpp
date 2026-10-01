@@ -8,12 +8,10 @@
 #include <unordered_map>
 #include <utility>
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Model.hpp"
-#include "libslic3r/Layer.hpp"
-#include "libslic3r/Print.hpp"
-#include "libslic3r/ClipperUtils.hpp"
 #include "SeamPlacer.hpp"
 
 // Both modifier kinds consume ready perimeter segments. Strong chooses the longest

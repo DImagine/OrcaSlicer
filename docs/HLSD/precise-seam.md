@@ -580,7 +580,10 @@ object as before.
   mode on all of them.
 - Each mode has its own icon in the object list and its own color in the 3D
   view, at 60% opacity: warm orange, gold and dark orange for Center, Left and
-  Right; green, red and gray for Enforced, Blocked and Neutral.
+  Right; green, red and gray for Enforced, Blocked and Neutral. The three strong
+  colors are deliberately close shades of one orange: they all mark strong
+  modifiers, and a distinct hue per mode would turn the scene into a rainbow. The
+  object list icons tell the modes apart.
 - Drag and drop in the object list maps visible rows to volume indices while
   skipping hidden cut connectors, and refreshes the object's row-to-volume map.
 - Precise Seam volumes have no filament and cannot be pasted into SLA objects.

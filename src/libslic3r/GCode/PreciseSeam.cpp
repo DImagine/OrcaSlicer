@@ -2,6 +2,9 @@
 #include "PreciseSeamInternal.hpp"
 #include "SeamPlacer.hpp"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/Print.hpp"
 #include <algorithm>
 #include <boost/log/trivial.hpp>
 #include <tbb/parallel_for.h>

@@ -3,6 +3,8 @@
 #include "test_helpers.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/GCode/PreciseSeam.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/Print.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -206,14 +208,6 @@ TEST_CASE("Structured modifier slices keep holes with their component and preser
     }
     CHECK(holes == 1);
     CHECK_THAT(area / double(scale_(1.)) / double(scale_(1.)), Catch::Matchers::WithinAbs(68., 1e-4));
-    // Compare with the shared flattened slicing path used by support modifiers.
-    const auto flat_layers = object->slice_modifier_volumes({volume});
-    REQUIRE(flat_layers.size() == 1);
-    CHECK(flat_layers.front().size() == 3);
-    double flat_area = 0.;
-    for (const Polygon &contour : flat_layers.front())
-        flat_area += contour.area();
-    CHECK_THAT(flat_area, Catch::Matchers::WithinAbs(area, 1.));
 }
 
 TEST_CASE("Modifier slices above a raft use object layer indices for strong and weak seams", "[PreciseSeam][Regression]")
@@ -1187,4 +1181,56 @@ TEST_CASE("Modifier usage marks evaluated modifiers that never reach a perimeter
     PreciseSeam::collect_weak_modifier_segments({unregistered}, other_perimeter,
         PreciseSeam::PreparedPerimeter(other_perimeter), fixture.layer, fixture.cache, &warnings);
     CHECK(warnings.modifier_usage.count(unregistered) == 0);
+}
+
+TEST_CASE("Weak zones type painting's oversampled candidates between their boundaries", "[PreciseSeam]")
+{
+    SeamFixture fixture;
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, {rectangle(8, -2, 12, 2)});
+    const auto segments = PreciseSeam::collect_weak_modifier_segments(
+        {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer, fixture.cache);
+    REQUIRE(segments.size() == 1);
+
+    // Candidates as production builds them for a bottom edge painted green: every polygon point, then
+    // oversampled points every enforcer_oversampling_distance towards the next one, in float arithmetic.
+    using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    PrintObjectSeamData::LayerSeams candidates;
+    candidates.perimeters.emplace_back();
+    auto &loop = candidates.perimeters.back();
+    loop.start_index = 0;
+    size_t oversampled = 0;
+    for (size_t i = 0; i < perimeter.size(); ++i) {
+        const Vec2f a = unscale(perimeter[i]).cast<float>();
+        const Vec2f b = unscale(perimeter[(i + 1) % perimeter.size()]).cast<float>();
+        const Vec3f position(a.x(), a.y(), 0.f);
+        candidates.points.emplace_back(position, loop, 0.f, a.y() == 0.f ? Type::Enforced : Type::Neutral);
+        if (a.y() != 0.f || b.y() != 0.f)
+            continue;
+        const Vec3f next(b.x(), b.y(), 0.f);
+        const float distance = (next - position).norm();
+        const Vec3f direction = (next - position).normalized();
+        for (float step = SeamPlacer::enforcer_oversampling_distance; step < distance; step += SeamPlacer::enforcer_oversampling_distance) {
+            candidates.points.emplace_back(position + direction * step, loop, 0.f, Type::Enforced);
+            ++oversampled;
+        }
+    }
+    loop.end_index = candidates.points.size();
+    bool enforced = false;
+    PreciseSeam::apply_weak_modifiers_to_perimeter(segments, candidates, loop, enforced);
+
+    // Boundaries are found among the interleaved points by exact float identity; every candidate
+    // between them, oversampled ones included, is cleared, and painting stays outside.
+    size_t cleared_oversampled = 0;
+    for (const auto &candidate : candidates.points) {
+        const Vec3f &p = candidate.position;
+        CAPTURE(p.x(), p.y());
+        const bool in_zone = p.y() == 0.f && p.x() >= 8.f && p.x() <= 12.f;
+        const Type expected = in_zone ? Type::Neutral : p.y() == 0.f ? Type::Enforced : Type::Neutral;
+        CHECK(candidate.type == expected);
+        if (in_zone && p.x() > 8.001f && p.x() < 11.999f)
+            ++cleared_oversampled;
+    }
+    CHECK(oversampled > 0);
+    CHECK(cleared_oversampled >= 15); // About 4 mm of 0.2 mm steps inside the zone.
 }

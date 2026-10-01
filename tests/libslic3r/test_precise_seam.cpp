@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 #include "libslic3r/GCode/PreciseSeam.hpp"
 #include "libslic3r/GCode/PreciseSeamInternal.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 
 #include <algorithm>
 #include <cmath>
