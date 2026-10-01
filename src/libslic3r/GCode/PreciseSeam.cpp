@@ -713,6 +713,27 @@ static void refine_at_vertex(
     }
 }
 
+// Records that a modifier was evaluated on a perimeter, and whether it reached it, for the "had no
+// effect" reason. A discarded fragment counts as reached: the modifier crossed the perimeter, and that
+// failure has its own warning. A point contact gives no segment and does not count. Modifiers that were
+// never evaluated (a higher strong modifier decided every perimeter) stay unchecked and are not reported.
+static void record_modifier_usage(PreciseSeamWarnings *warnings, const ModelVolume *modifier,
+                                  const SegmentExtraction &extracted)
+{
+    if (warnings == nullptr || !extracted.valid)
+        return;
+    const auto it = warnings->modifier_usage.find(modifier);
+    if (it == warnings->modifier_usage.end())
+        return;
+    // Load before store: most calls find the flag already set, so shared cache lines stay clean.
+    PreciseSeamWarnings::ModifierUsage &usage = it->second;
+    if (!usage.checked.load(std::memory_order_relaxed))
+        usage.checked.store(true, std::memory_order_relaxed);
+    const bool reached = !extracted.segments.empty() || extracted.full_containment || extracted.discarded_fragments > 0;
+    if (reached && !usage.reached.load(std::memory_order_relaxed))
+        usage.reached.store(true, std::memory_order_relaxed);
+}
+
 // Strong priority is per modifier, never a global maximum across different modifiers.
 std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
@@ -732,6 +753,7 @@ std::optional<Point> insert_strong_seam_point(
             continue;
         const SegmentExtraction extracted = extract_perimeter_segments(
             prepared, it->second[layer_id], modifier->type(), {layer, modifier, warnings});
+        record_modifier_usage(warnings, modifier, extracted);
         // Full containment retains its existing skip policy, separately from segment selection.
         if (extracted.full_containment) {
             if (warnings)
@@ -975,6 +997,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
             continue;
         const ExtractionContext context{layer, modifier_volume, warnings};
         const SegmentExtraction extracted = extract_perimeter_segments(prepared, it->second[layer_id], modifier_volume->type(), context);
+        record_modifier_usage(warnings, modifier_volume, extracted);
         // Keep the existing full-containment policy until it is changed explicitly.
         if (extracted.full_containment) {
             if (warnings)

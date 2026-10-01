@@ -1066,3 +1066,49 @@ TEST_CASE("Restoring Precise Seam positions overrides alignment only on perimete
     CHECK(plain.final_seam_position == Vec3f(0.5f, 1.f, 0.f));
     CHECK(plain.seam_index == plain.start_index);
 }
+
+TEST_CASE("Modifier usage marks evaluated modifiers that never reach a perimeter", "[PreciseSeam]")
+{
+    SeamFixture fixture;
+    PreciseSeam::PreciseSeamWarnings warnings;
+    const auto checked = [&warnings](const ModelVolume *volume) { return warnings.modifier_usage.at(volume).checked.load(); };
+    const auto reached = [&warnings](const ModelVolume *volume) { return warnings.modifier_usage.at(volume).reached.load(); };
+
+    // Weak: all modifiers are evaluated. One stops 1 mm short of the wall, one crosses it, one contains it.
+    const ModelVolume *short_weak = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, {rectangle(21, 5, 25, 10)});
+    const ModelVolume *crossing_weak = fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, {rectangle(18, 5, 25, 10)});
+    const ModelVolume *containing_weak = fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, {rectangle(-1, -1, 21, 21)});
+    for (const ModelVolume *volume : {short_weak, crossing_weak, containing_weak})
+        warnings.modifier_usage.try_emplace(volume);
+    Polygon weak_perimeter = rectangle(0, 0, 20, 20);
+    PreciseSeam::collect_weak_modifier_segments({short_weak, crossing_weak, containing_weak}, weak_perimeter,
+        PreciseSeam::PreparedPerimeter(weak_perimeter), fixture.layer, fixture.cache, &warnings);
+    CHECK(checked(short_weak));
+    CHECK_FALSE(reached(short_weak));
+    CHECK(reached(crossing_weak));
+    // Full containment reached the perimeter even though it is skipped.
+    CHECK(reached(containing_weak));
+
+    // Strong: evaluation stops at the first modifier with a segment. The one ending 0.5 mm before the
+    // wall is evaluated without reaching it; the one after the winner is never evaluated, so nothing is
+    // known about it and it must not be reported.
+    const ModelVolume *short_strong = fixture.add(ModelVolumeType::PRECISE_SEAM_LEFT, {rectangle(5, -2, 10, -0.5)});
+    const ModelVolume *winner = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {rectangle(5, -2, 10, 2)});
+    const ModelVolume *shadowed = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {rectangle(12, -2, 15, 2)});
+    for (const ModelVolume *volume : {short_strong, winner, shadowed})
+        warnings.modifier_usage.try_emplace(volume);
+    Polygon strong_perimeter = rectangle(0, 0, 20, 20);
+    REQUIRE(PreciseSeam::insert_strong_seam_point({short_strong, winner, shadowed}, strong_perimeter,
+        PreciseSeam::PreparedPerimeter(strong_perimeter), fixture.layer, fixture.cache, &warnings).has_value());
+    CHECK(checked(short_strong));
+    CHECK_FALSE(reached(short_strong));
+    CHECK(reached(winner));
+    CHECK_FALSE(checked(shadowed));
+
+    // Unregistered modifiers are not tracked.
+    const ModelVolume *unregistered = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, {rectangle(18, 5, 25, 10)});
+    Polygon other_perimeter = rectangle(0, 0, 20, 20);
+    PreciseSeam::collect_weak_modifier_segments({unregistered}, other_perimeter,
+        PreciseSeam::PreparedPerimeter(other_perimeter), fixture.layer, fixture.cache, &warnings);
+    CHECK(warnings.modifier_usage.count(unregistered) == 0);
+}

@@ -55,6 +55,15 @@ struct PreciseSeamWarnings {
     // Fragments saved by the rare-case fallback or accepted as contacts; log only, no user warning.
     // Clipper is deterministic, so a prismatic model can repeat the same case on every layer.
     std::atomic<size_t> recovered_fragments{0};
+
+    // Per-modifier usage for the "had no effect" reason. SeamPlacer::init() registers every modifier
+    // before the parallel phase, so workers never change the map itself and only set the flags.
+    // Unregistered modifiers (e.g. direct calls in tests) are simply not tracked.
+    struct ModifierUsage {
+        std::atomic<bool> checked{false}; // Extracted on at least one perimeter.
+        std::atomic<bool> reached{false}; // Gave a segment, full containment or a discarded fragment.
+    };
+    std::unordered_map<const ModelVolume*, ModifierUsage> modifier_usage;
 };
 
 // Optional caller identity for concise diagnostics when an intersection is discarded.

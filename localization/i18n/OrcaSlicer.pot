@@ -22856,6 +22856,16 @@ msgstr ""
 msgid "Avoid warping\nDid you know that when printing materials that are prone to warping such as ABS, appropriately increasing the heatbed temperature can reduce the probability of warping?"
 msgstr ""
 
-#: src/libslic3r/GCode/SeamPlacer.cpp:1591
+#: src/libslic3r/GCode/SeamPlacer.cpp
 msgid "unable to process intersection"
+msgstr ""
+
+#: src/libslic3r/GCode/SeamPlacer.cpp
+#, possible-boost-format
+msgid "modifier \"%1%\" of \"%2%\" had no effect on the seam (it might not reach the centerline of the printed perimeter)"
+msgstr ""
+
+#: src/libslic3r/GCode/SeamPlacer.cpp
+#, possible-boost-format
+msgid "modifier \"%1%\" of \"%2%\" (and %3% more) had no effect on the seam (it might not reach the centerline of the printed perimeter)"
 msgstr ""

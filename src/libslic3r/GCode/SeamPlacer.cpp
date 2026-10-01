@@ -6,6 +6,7 @@
 #include "tbb/blocked_range.h"
 #include "tbb/parallel_reduce.h"
 #include <boost/log/trivial.hpp>
+#include <boost/format.hpp>
 #include <random>
 #include <algorithm>
 #include <queue>
@@ -1493,9 +1494,10 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
 
 }
 
-void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_func) {
+void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_canceled_func) {
   using namespace SeamPlacerImpl;
   m_seam_per_object.clear();
+  m_precise_seam_warning.clear();
 
   // Warning flags for Precise Seam processing — shared across all objects
   PreciseSeam::PreciseSeamWarnings precise_seam_warnings;
@@ -1521,6 +1523,12 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
           global_model_info.precise_seam_slices[vol] = PreciseSeam::prepare_modifier_slices(po->slice_single_volume_regions(vol));
       for (const ModelVolume* vol : global_model_info.precise_seam_weak_volumes)
           global_model_info.precise_seam_slices[vol] = PreciseSeam::prepare_modifier_slices(po->slice_single_volume_regions(vol));
+      // Register usage tracking before the parallel phase; workers only set its flags. Several print
+      // objects of one model object share volumes, and try_emplace keeps what earlier ones recorded.
+      for (const ModelVolume* vol : global_model_info.precise_seam_strong_volumes)
+          precise_seam_warnings.modifier_usage.try_emplace(vol);
+      for (const ModelVolume* vol : global_model_info.precise_seam_weak_volumes)
+          precise_seam_warnings.modifier_usage.try_emplace(vol);
 
       throw_if_canceled_func();
       if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {
@@ -1588,8 +1596,8 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
 #endif
   }
 
-  // Show Precise Seam warnings (once for all objects).
-  // Only ONE active_step_add_warning() call — multiple calls generate multiple UI events,
+  // Prepare the Precise Seam warning (once for all objects); GCode export issues it.
+  // It must stay ONE active_step_add_warning() call — multiple calls generate multiple UI events,
   // each re-pushing ALL current warnings via Plater handler, causing NotificationManager::append()
   // to duplicate text within each popup.
   {
@@ -1616,6 +1624,32 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
           parts.push_back(_u8L("multiple intersections with a perimeter detected"));
       if (fc)
           parts.push_back(_u8L("perimeter is fully contained inside modifier and was ignored"));
+      // Modifiers evaluated on some perimeter that never gave an intersection there. Only the effect is
+      // certain: where a higher strong modifier decided a perimeter, this one was not evaluated, so the
+      // cause is given as a likely hint. Print and volume order make the named modifier deterministic.
+      std::vector<const ModelVolume*> no_effect;
+      for (const PrintObject *po : print.objects())
+          for (const ModelVolume *volume : po->model_object()->volumes) {
+              const auto it = precise_seam_warnings.modifier_usage.find(volume);
+              if (it != precise_seam_warnings.modifier_usage.end() &&
+                  it->second.checked.load(std::memory_order_relaxed) &&
+                  !it->second.reached.load(std::memory_order_relaxed) &&
+                  std::find(no_effect.begin(), no_effect.end(), volume) == no_effect.end())
+                  no_effect.push_back(volume);
+          }
+      // The user warning names only the first one; the log lists them all.
+      for (const ModelVolume *volume : no_effect)
+          BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamNoEffect] object=\"" << volume->get_object()->name
+              << "\" modifier=\"" << volume->name << "\"";
+      if (!no_effect.empty()) {
+          const ModelVolume *first = no_effect.front();
+          if (no_effect.size() == 1)
+              parts.push_back((boost::format(_u8L("modifier \"%1%\" of \"%2%\" had no effect on the seam (it might not reach the centerline of the printed perimeter)"))
+                  % first->name % first->get_object()->name).str());
+          else
+              parts.push_back((boost::format(_u8L("modifier \"%1%\" of \"%2%\" (and %3% more) had no effect on the seam (it might not reach the centerline of the printed perimeter)"))
+                  % first->name % first->get_object()->name % (no_effect.size() - 1)).str());
+      }
       if (!parts.empty()) {
           // One line: the export warnings dialog shows only the first line of each warning.
           std::string warning_text = _u8L("Precise Seam") + ": ";
@@ -1625,10 +1659,7 @@ void SeamPlacer::init(Print &print, std::function<void(void)> throw_if_canceled_
           }
           warning_text += ". ";
           warning_text += _u8L("Seam placement may differ from expected.");
-          print.active_step_add_warning(
-              PrintStateBase::WarningLevel::NON_CRITICAL,
-              warning_text,
-              PrintStateBase::SlicingPreciseSeamWarning);
+          m_precise_seam_warning = std::move(warning_text);
       }
   }
 }

@@ -407,8 +407,11 @@ seam from changing drastically because of rounding.
 
 One `PreciseSeamWarnings` instance is shared by all objects and layers of a
 `SeamPlacer::init()` call. After all objects are processed, `SeamPlacer::init()`
-issues at most one non-critical warning with the ID `SlicingPreciseSeamWarning`.
-It is a single line, "Precise Seam: <causes>. Seam placement may differ from
+prepares at most one warning text, available through `precise_seam_warning()`.
+`init()` does not change the `Print`, so it can also be called outside G-code
+export, as tests do. G-code export issues the text right after `init()`, inside
+its active step, as one non-critical warning with the ID
+`SlicingPreciseSeamWarning`. It is a single line, "Precise Seam: <causes>. Seam placement may differ from
 expected.", because the export warnings dialog shows only the first line of each
 warning. Repeated warning events replace the notification instead of appending
 to it. The causes are:
@@ -418,6 +421,19 @@ to it. The causes are:
 - **multiple intersections with a perimeter detected:** a strong modifier had
   more than one segment on a perimeter. The longest was used.
 - **perimeter is fully contained inside modifier and was ignored.**
+- **modifier "<name>" of "<object>" had no effect on the seam (it might not reach
+  the centerline of the printed perimeter):** a modifier was evaluated on at
+  least one perimeter and never gave a segment, full containment or a discarded
+  fragment. Only the first such modifier in print and volume order is named,
+  followed by "(and N more)" when there are others.
+
+  Only the effect is certain, so the cause is given as a hint. A modifier is
+  evaluated only when its turn comes: on a perimeter where a higher strong
+  modifier placed the seam, lower strong and all weak modifiers are not
+  evaluated. A modifier that was never evaluated is not reported, since nothing
+  is known about it. A point contact gives no segment and does not count as
+  reaching the perimeter. `SeamPlacer::init()` registers every modifier before
+  the parallel phase, and workers only set two atomic flags per modifier.
 
 Multiple weak segments, modifier holes and through-body intersections produce
 no warning.
@@ -430,6 +446,9 @@ dumps:
   point counts.
 - `[PreciseSeamFragmentRecovered]` for a recovery, with `outcome=bound` or
   `outcome=contact`, the same location fields and the original failure reason.
+- `[PreciseSeamNoEffect]` for every modifier of the "had no effect" cause, with
+  the object and modifier names. Unlike the user warning, the log lists all of
+  them.
 
 Failures and recoveries have separate atomic counters. The first 10 of each per
 `init()` call are logged in detail; later ones are only counted, without
@@ -448,7 +467,8 @@ intersections and with full containment. The remaining limitations are:
 
 - **The modifier must reach the perimeter centerline.** Boundaries that only
   graze it, within print-setting-dependent distances, are the user's
-  responsibility; sub-micron results behave like points (see
+  responsibility. A modifier that never reaches it is reported by the "had no
+  effect" warning; sub-micron results behave like points (see
   [Numeric tolerances](#numeric-tolerances)). Several near-touches on inclined
   edges can leave several segments separated by gaps of a few units; their zones
   then cover nearly the whole perimeter instead of being skipped.
@@ -573,7 +593,9 @@ object as before.
 - [Seam placer tests](../../tests/fff_print/test_seam_placer.cpp) cover
   enforced-patch selection independent of the contour start, fully painted
   contours, duplicate removal, and `Print::apply()` synchronization through type
-  changes and restored model snapshots.
+  changes and restored model snapshots. The duplicate-removal test also checks
+  the "had no effect" warning text prepared by `init()` for a helper that never
+  reaches the loop.
 - [3MF tests](../../tests/libslic3r/test_precise_seam_3mf.cpp) cover the round
   trip of every mode and of inactive settings, attribute escaping, and the
   metadata combinations that restore a seam mode.

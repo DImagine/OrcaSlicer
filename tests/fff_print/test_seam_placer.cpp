@@ -212,7 +212,14 @@ TEST_CASE("Precise Seam removes path junction duplicates but preserves separate 
     const Points outline = fixture.points_in_layer(object, vertices);
     append_loop(region, outline, true);
     SeamPlacer placer;
+    // A direct call outside G-code export: init() must not need an active print step.
     placer.init(fixture.print, [] {});
+    // The helper never reaches the loop, so it is reported, named with its object; no helper, no warning.
+    if (enable_ps) {
+        CHECK(placer.precise_seam_warning().find("had no effect on the seam") != std::string::npos);
+        CHECK(placer.precise_seam_warning().find("\"object.stl\"") != std::string::npos);
+    } else
+        CHECK(placer.precise_seam_warning().empty());
     const auto &data = placer.m_seam_per_object.at(&object).layers.front();
     REQUIRE(data.perimeters.size() == 1);
     // Each separate path contributes both endpoints in ordinary mode; PS removes only adjacent copies.
