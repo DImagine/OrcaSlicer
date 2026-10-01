@@ -350,12 +350,16 @@ modifier, holes and through-body intersections need no special handling.
 ## Numeric tolerances
 
 Coordinates are integers in scaled units: 1 nm by default, and 10 nm when a bed
-larger than 2147 mm switches `SCALING_FACTOR`. The Precise Seam tolerances are
-fixed in units when the program starts. Distances quoted in this document in
-nanometers and micrometers assume the default unit; on large printers they are
-ten times larger. The design separates two scales: the rounding error of
-clipping, and the distance below which points cannot be told apart after
-insertion.
+larger than 2147 mm switches `SCALING_FACTOR`. Both Precise Seam tolerances are
+deliberately defined in units rather than physical distances. Clipper rounds to
+whole units at any scale, so the on-edge tolerance must follow the unit. The
+snapping radius following the unit keeps a similar margin over single-precision
+candidate coordinates, which are coarser at large-bed coordinates (about 0.25 µm
+per step at 3 m). Distances quoted in this document in nanometers and
+micrometers assume the default unit; on large printers they are ten times
+larger. The enforced subdivision step is a physical distance and stays 0.2 mm.
+The design separates two scales: the rounding error of clipping, and the
+distance below which points cannot be told apart after insertion.
 
 | Value | Role |
 | --- | --- |

@@ -51,12 +51,18 @@ using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 // Machine precision for checking exact coordinate matching (squared distance)
 // Ideally, intersection points should match perimeter vertices bitwise,
 // but we account for possible machine rounding errors in Clipper calculations
-// Actual deviations: maximum ~0.27, using 2.5 with margin (nanometers)
+// Actual deviations: maximum ~0.27, using 2.5 with margin.
+// In scaled units on purpose: Clipper rounds to whole units whatever SCALING_FACTOR is
+// (1 nm by default, 10 nm on large beds), so this tolerance must not follow the physical scale.
 static constexpr double MACHINE_PRECISION_SQUARED = 2.5;
 
-// Tolerance for checking proximity when inserting seam points into perimeter
-static const coord_t TOLERANCE_LINEAR = scale_(0.001);  // 1.0 micrometers
-static const coord_t TOLERANCE_SQUARED = TOLERANCE_LINEAR * TOLERANCE_LINEAR;
+// Snapping radius for inserting seam points into the perimeter, shared by every Precise Seam rule
+// that must match insertion (rounding fallback, contacts, sub-micron full containment).
+// In scaled units, deliberately not physical: 1 um by default, 10 um when large beds switch
+// SCALING_FACTOR to 10 nm units, where single-precision candidate coordinates are coarser too
+// (about 0.25 um per step at 3 m). A physical 1 um would leave only a few float steps there.
+static constexpr coord_t TOLERANCE_LINEAR = 1000;
+static constexpr coord_t TOLERANCE_SQUARED = TOLERANCE_LINEAR * TOLERANCE_LINEAR;
 
 namespace detail {
 
