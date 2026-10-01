@@ -217,6 +217,17 @@ precedence over painting, and Neutral clears painting inside its zone.
   the object, modifier, layer and failure location. Other segments remain usable.
 - Through-body intersections and modifier holes need no separate warnings.
   Multiple weak segments are accepted without a warning.
+- Self-touching perimeters are a known limitation, without a warning. Extraction
+  keeps distinct visits of one coordinate apart through source edge bindings, but
+  the consumers locate inserted points by coordinates. A weak zone types and
+  subdivides from the first vertex with its boundary coordinate, while boundary
+  helpers are added at every such vertex. A strong point marks every candidate
+  at its coordinate as enforced, and the last one is restored after alignment.
+  If a boundary or strong point falls exactly on a repeated coordinate, the zone
+  may therefore span from another visit, or the seam may start at another visit
+  of the same point. Carrying visit identity through insertion, refinement,
+  candidates and restoration would touch the whole pipeline, so it is not done
+  for this rare geometry.
 
 Atomic warning flags and a failed-fragment counter are shared by all layers and
 objects in one `SeamPlacer::init()` call. The first 10 failed fragments receive
