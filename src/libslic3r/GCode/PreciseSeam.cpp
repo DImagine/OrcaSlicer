@@ -52,8 +52,8 @@ PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter) : polygon(perimet
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
-// Squared on-edge tolerance in coordinate units: absorbs Clipper rounding (~0.5 unit observed); a ~3x
-// margin (~1.6 units) gives 2.5 when squared. Independent of SCALING_FACTOR.
+// Squared on-edge tolerance in coordinate units: Clipper truncates cuts to whole units, under 1 unit
+// per axis, so under sqrt(2) from the edge (squared < 2); 2.5 keeps a margin. Independent of SCALING_FACTOR.
 static constexpr double MACHINE_PRECISION_SQUARED = 2.5;
 
 // Snapping radius for point insertion, shared by every rule that must match insertion. Deliberately in

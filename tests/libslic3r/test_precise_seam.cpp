@@ -947,9 +947,14 @@ TEST_CASE("Segment lengths measure diagonal arcs rather than squared distances",
         PreciseSeam::PreparedPerimeter(perimeter), PreciseSeam::prepare_modifier_regions({ExPolygon(rectangle(2, -1, 6, 11))}), ModelVolumeType::PRECISE_SEAM_CENTER);
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 2);
-    CHECK(result.segments[0].polyline.points.front() == mm(2, 2));
-    CHECK(result.segments[0].polyline.points.back() == mm(6, 6));
-    CHECK_THAT(unscale<double>(result.segments[0].length), Catch::Matchers::WithinAbs(std::sqrt(32.), 1e-6));
+    // The cuts lie on the grid, but Clipper computes them on the inclined edge in floating point and
+    // may land one unit off; allow one grid step per axis.
+    const auto &diagonal = result.segments[0];
+    CAPTURE(diagonal.polyline.points.front(), diagonal.polyline.points.back(), diagonal.length);
+    CHECK((diagonal.polyline.points.front() - mm(2, 2)).cast<double>().squaredNorm() < 2.);
+    CHECK((diagonal.polyline.points.back() - mm(6, 6)).cast<double>().squaredNorm() < 2.);
+    CHECK(diagonal.edge_indices == std::vector<size_t>{0});
+    CHECK_THAT(unscale<double>(diagonal.length), Catch::Matchers::WithinAbs(std::sqrt(32.), 3e-6));
     CHECK_THAT(unscale<double>(result.segments[1].length), Catch::Matchers::WithinAbs(4., 1e-6));
 }
 
@@ -1013,9 +1018,10 @@ TEST_CASE("Distant modifier areas do not change nearby coverage or detach its ho
 TEST_CASE("Rounded intersections on an inclined edge retain their original edge", "[PreciseSeam][SegmentExtraction]")
 {
     const bool reverse = GENERATE(false, true);
-    // Grid intersections (3, 0.9) and (7, 2.1) round to (3, 1) and (7, 2). The far vertices keep the
-    // contour realistically long: a contour shorter than 1 um would be below the snapping distance
-    // as a whole, and its remaining uncovered part would count as full containment.
+    // The exact cuts (3, 0.9) and (7, 2.1) are off the integer grid, so Clipper moves them to a nearby
+    // grid point; how it rounds is the library's business. The far vertices keep the contour
+    // realistically long: a contour shorter than 1 um would be below the snapping distance as a whole,
+    // and its remaining uncovered part would count as full containment.
     Polygon perimeter(Points{Point(0, 0), Point(10, 3), Point(coord_t(10), mm(0, 20).y()), Point(coord_t(0), mm(0, 20).y())});
     if (reverse) perimeter.reverse();
     const ExPolygon area(Polygon(Points{Point(3, -2), Point(7, -2), Point(7, 5), Point(3, 5)}));
@@ -1024,9 +1030,14 @@ TEST_CASE("Rounded intersections on an inclined edge retain their original edge"
     check_provenance(perimeter, result);
     REQUIRE(result.segments.size() == 1);
     const auto &segment = result.segments.front();
-    CHECK(segment.polyline.points.front() == (reverse ? Point(7, 2) : Point(3, 1)));
-    CHECK(segment.polyline.points.back() == (reverse ? Point(3, 1) : Point(7, 2)));
+    // The rounded cuts must stay bound to the original inclined edge, within one grid step of the exact
+    // cuts on each axis, whatever rounding the clipping library uses.
+    const Vec2d first = reverse ? Vec2d(7., 2.1) : Vec2d(3., 0.9);
+    const Vec2d last = reverse ? Vec2d(3., 0.9) : Vec2d(7., 2.1);
+    CAPTURE(segment.polyline.points.front(), segment.polyline.points.back(), segment.length);
+    CHECK((segment.polyline.points.front().cast<double>() - first).squaredNorm() < 2.);
+    CHECK((segment.polyline.points.back().cast<double>() - last).squaredNorm() < 2.);
     CHECK(segment.edge_indices == std::vector<size_t>{reverse ? size_t(2) : size_t(0)});
-    CHECK_THAT(segment.length, Catch::Matchers::WithinAbs(std::sqrt(17.), 1e-9));
+    CHECK_THAT(segment.length, Catch::Matchers::WithinAbs((last - first).norm(), 2. * std::sqrt(2.)));
     CHECK_FALSE(result.full_containment);
 }

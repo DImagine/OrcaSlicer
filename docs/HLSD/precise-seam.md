@@ -359,7 +359,7 @@ larger. The enforced subdivision step is a physical distance and stays 0.2 mm.
 
 | Value | Role |
 | --- | --- |
-| `MACHINE_PRECISION_SQUARED` (2.5 units², about 1.6 nm) | A point lies on an edge if it is this close. It absorbs Clipper's integer rounding of cuts and never bridges a real gap: a one-unit uncovered gap stays a gap. |
+| `MACHINE_PRECISION_SQUARED` (2.5 units², about 1.6 nm) | A point lies on an edge if it is this close. It absorbs Clipper's truncation of cuts to whole units (under √2 units from the edge) and never bridges a real gap: a one-unit uncovered gap stays a gap. |
 | `TOLERANCE_LINEAR` (1000 units, 1 µm) | Insertion snaps points this close to an existing vertex, and helper points are placed this far from boundaries. The same radius bounds the rounding fallback, contacts and the sub-micron full-containment rule, so those decisions match what insertion would produce anyway. |
 | `enforcer_oversampling_distance` (0.2 mm) | Maximum step of enforced subdivision. |
 
