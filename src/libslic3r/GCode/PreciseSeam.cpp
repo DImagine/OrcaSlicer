@@ -1,14 +1,27 @@
 // Precise Seam implementation. Design: docs/HLSD/precise-seam.md
 #include "PreciseSeam.hpp"
 #include "PreciseSeamInternal.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Model.hpp"
 #include "SeamPlacer.hpp"
+#include "libslic3r/libslic3r.h"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 #include <algorithm>
+#include <atomic>
 #include <boost/log/trivial.hpp>
+#include <optional>
+#include <cstddef>
+#include <limits>
+#include <iterator>
+#include <cassert>
+#include <cmath>
 #include <tbb/parallel_for.h>
+#include <vector>
+#include <utility>
 
 namespace Slic3r {
 namespace PreciseSeam {

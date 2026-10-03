@@ -3,12 +3,14 @@
 
 #include <atomic>
 #include <cassert>
+#include <cstddef>
 #include <optional>
 #include <vector>
 #include <unordered_map>
 #include <utility>
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Model.hpp"
