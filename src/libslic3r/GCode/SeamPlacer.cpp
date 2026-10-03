@@ -776,21 +776,10 @@ void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
   auto obj_transform = po->trafo_centered();
 
   for (const ModelVolume *mv : po->model_object()->volumes) {
-    // Seam painting is collected from model parts and negative volumes only (a whitelist, so future
-    // volume types stay out as well).
-    // - Model parts carry the painting the user sees and edits: the seam gizmo reads and writes model
-    //   parts only, and model_custom_seam_data_changed() invalidates G-code for their painting only.
-    // - A volume changed from part to another type keeps its painting (ModelVolume::set_type() changes
-    //   only the type, and 3MF stores painting for any type). On modifiers, support volumes and
-    //   Precise Seam helpers that leftover painting must not act: the user can neither see nor erase
-    //   it there, yet it enforced or blocked candidates near the helper's surface.
-    // - Negative volumes are kept deliberately. Painting a part and then turning it into a negative
-    //   volume is the only way to paint the wall of a hole cut by it (the part's mesh has no such
-    //   surface), and existing projects may rely on it.
-    // TECH DEBT: painting on negative volumes is still invisible and not editable in the gizmo, and
-    // changing it does not invalidate G-code (model_custom_seam_data_changed() tracks parts only).
-    // Either support painting hole walls properly or drop it here, together with the gizmo and the
-    // invalidation; this needs a dedicated decision, not a side effect of seam placement.
+    // Collect painting only from model parts (what the gizmo edits) and negative volumes (the only way
+    // to paint a hole's wall); painting left on modifiers and helpers after a type change is ignored.
+    // TODO: painting on negative volumes still affects the seam, but the gizmo neither shows nor edits it;
+    // making it editable also needs model_custom_seam_data_changed() to track it.
     if (!mv->is_model_part() && !mv->is_negative_volume())
       continue;
     if (mv->is_seam_painted()) {
@@ -1528,9 +1517,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
           m_seam_per_object[po].has_precise_seam_strong_volumes,
           po->model_object());
 
-      // Pre-slice all precise seam modifier volumes and cache region bounds once per object.
-      // Without these caches, slicing would be repeated for every
-      // modifier × every perimeter × every layer — thousands of redundant slicing operations.
+      // Slice each Precise Seam modifier once per object; both consumers read the cache.
       for (const ModelVolume* vol : global_model_info.precise_seam_strong_volumes)
           global_model_info.precise_seam_slices[vol] = PreciseSeam::prepare_modifier_slices(po->slice_single_volume_regions(vol));
       for (const ModelVolume* vol : global_model_info.precise_seam_weak_volumes)
@@ -1608,10 +1595,8 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
 #endif
   }
 
-  // Prepare the Precise Seam warning (once for all objects); GCode export issues it.
-  // It must stay ONE active_step_add_warning() call — multiple calls generate multiple UI events,
-  // each re-pushing ALL current warnings via Plater handler, causing NotificationManager::append()
-  // to duplicate text within each popup.
+  // Prepare one combined Precise Seam warning; G-code export issues it. Keep it single: separate
+  // warnings would each re-push all warnings and duplicate text in the notification.
   {
       const unsigned failed_types = precise_seam_warnings.failed_types.load(std::memory_order_relaxed);
       const unsigned mi = precise_seam_warnings.multiple_intersections.load(std::memory_order_relaxed);
@@ -1650,12 +1635,11 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       if (failed_types != 0)
           parts.push_back((boost::format(_u8L("failed to process some intersections (%1%)")) % type_list(failed_types)).str());
       if (mi != 0)
-          parts.push_back((boost::format(_u8L("multiple intersections with a perimeter, the longest one was used (%1%)")) % type_list(mi)).str());
+          parts.push_back((boost::format(_u8L("multiple intersections with a perimeter, only one was used (%1%)")) % type_list(mi)).str());
       if (fc != 0)
           parts.push_back((boost::format(_u8L("a perimeter is fully inside a modifier, the modifier was not applied to it (%1%)")) % type_list(fc)).str());
-      // Modifiers evaluated on some perimeter that never gave an intersection there. Only the effect is
-      // certain: where a higher strong modifier decided a perimeter, this one was not evaluated, so the
-      // cause is given as a likely hint. Print and volume order make the named modifier deterministic.
+      // Modifiers evaluated somewhere that never reached a perimeter; never-evaluated ones are not reported.
+      // Print and volume order make the named one deterministic; the log lists them all.
       std::vector<const ModelVolume*> no_effect;
       for (const PrintObject *po : print.objects())
           for (const ModelVolume *volume : po->model_object()->volumes) {
@@ -1676,8 +1660,8 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
               parts.push_back((boost::format(_u8L("modifier \"%1%\" of \"%2%\" had no effect on the seam (it might not reach the centerline of the printed perimeter)"))
                   % first->name % first->get_object()->name).str());
           else
-              parts.push_back((boost::format(_u8L("modifier \"%1%\" of \"%2%\" (and %3% more) had no effect on the seam (it might not reach the centerline of the printed perimeter)"))
-                  % first->name % first->get_object()->name % (no_effect.size() - 1)).str());
+              parts.push_back((boost::format(_u8L("modifier \"%1%\" of \"%2%\" (%3% in total) had no effect on the seam (it might not reach the centerline of the printed perimeter)"))
+                  % first->name % first->get_object()->name % no_effect.size()).str());
       }
       if (!parts.empty()) {
           // One line: the export warnings dialog shows only the first line of each warning.

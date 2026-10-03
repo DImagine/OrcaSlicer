@@ -14,10 +14,8 @@
 #include "libslic3r/Model.hpp"
 #include "SeamPlacer.hpp"
 
-// Both modifier kinds consume ready perimeter segments. Strong chooses the longest
-// within the first matching modifier; weak applies all segments in priority order.
-// Full containment is skipped by strong and Blocked; Enforced and Neutral then type the whole
-// perimeter. Failed fragments are ignored with diagnostics.
+// Precise Seam: helper volumes that decide where the seam goes on external perimeters.
+// Design: docs/HLSD/precise-seam.md
 
 namespace Slic3r {
 namespace PreciseSeam {
@@ -59,9 +57,8 @@ struct PreciseSeamWarnings {
     // Clipper is deterministic, so a prismatic model can repeat the same case on every layer.
     std::atomic<size_t> recovered_fragments{0};
 
-    // Per-modifier usage for the "had no effect" reason. SeamPlacer::init() registers every modifier
-    // before the parallel phase, so workers never change the map itself and only set the flags.
-    // Unregistered modifiers (e.g. direct calls in tests) are simply not tracked.
+    // Per-modifier flags for the "had no effect" warning. Modifiers are registered before the parallel
+    // phase, so workers only set flags; unregistered ones (e.g. in tests) are not tracked.
     struct ModifierUsage {
         std::atomic<bool> checked{false}; // Extracted on at least one perimeter.
         std::atomic<bool> reached{false}; // Gave a segment, full containment or a discarded fragment.
@@ -131,12 +128,8 @@ struct SegmentExtraction {
     size_t discarded_fragments = 0; // Failed bindings are ignored, with a warning and diagnostic marker.
 };
 
-// Clip a prepared, unchanged perimeter against each nearby modifier region.
-// Each exterior keeps its holes; disjoint region bounds are rejected before clipping.
-// Outer contours and holes use nonzero winding. The perimeter must have at least three
-// vertices and no consecutive duplicates; either traversal direction is accepted.
-// Non-contained strong segments receive ready mode points; lengths are measured for Center or comparison.
-// Weak and fully contained results retain geometry and bindings without preparing strong data.
+// Clips a prepared, unchanged perimeter (>= 3 vertices, no consecutive duplicates, either direction)
+// against a modifier's regions and returns its segments; strong targets are prepared only where needed.
 SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                              ModelVolumeType mode, const ExtractionContext &context = {});
 
@@ -152,30 +145,16 @@ struct WeakModifierSegment {
     bool whole_perimeter = false;
 };
 
-// Initialize Precise Seam data by populating provided vectors and flag
-// Collects precise seam modifiers and fills output parameters
-// Call once during SeamPlacer::init() before gather_seam_candidates()
-// Parameters:
-//   strong_volumes_out - output vector for strong modifiers (CENTER/LEFT/RIGHT)
-//   weak_volumes_out   - output vector for weak modifiers (ENFORCED/BLOCKED/NEUTRAL)
-//   has_strong_out     - output flag indicating presence of strong modifiers
-//   model_object       - model object containing volumes
+// Collects the object's Precise Seam volumes: strong ones in priority order, weak ones in application
+// order. Call once per object in SeamPlacer::init() before gathering candidates.
 void init_precise_seam_data(
     std::vector<const ModelVolume*>& strong_volumes_out,
     std::vector<const ModelVolume*>& weak_volumes_out,
     bool& has_strong_out,
     const ModelObject* model_object);
 
-// Insert strong seam point into perimeter polygon
-// Processes strong modifiers (CENTER/LEFT/RIGHT) and inserts seam point into polygon
-// Parameters:
-//   strong_volumes    - list of strong precise seam modifiers
-//   polygon           - perimeter polygon (will be modified if point inserted)
-//   prepared          - preparation of this polygon; valid only until it is modified
-//   layer             - current layer
-//   slices_cache      - pre-sliced modifier polygons (built once in SeamPlacer::init)
-// Returns:
-//   Coordinates of inserted point (internal units) or std::nullopt if nothing inserted
+// Inserts the seam point of the first strong modifier with a usable segment on this perimeter and returns
+// it, or nullopt. `prepared` must describe `polygon` before any change.
 std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
@@ -184,19 +163,8 @@ std::optional<Point> insert_strong_seam_point(
     const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings = nullptr);
 
-// Collect all weak modifier segments for a perimeter polygon
-// Processes weak modifiers (ENFORCED/BLOCKED/NEUTRAL) and collects segment boundaries
-// Passes the ready boundary array to preparation only after all modifiers are collected.
-// Also inserts boundary points into the perimeter polygon (sorted by descending source edge and parameter)
-// Refines enforced edges by subdividing them into segments ≤ enforcer_oversampling_distance
-// Parameters:
-//   weak_volumes      - list of weak precise seam modifiers
-//   polygon           - perimeter polygon (will be modified with inserted points and refined edges)
-//   prepared          - preparation of this polygon, shared with unsuccessful strong processing
-//   layer             - current layer
-//   slices_cache      - pre-sliced modifier polygons (built once in SeamPlacer::init)
-// Returns:
-//   Ordered vector of segments with updated coordinates (same order as weak_volumes list)
+// Collects weak zones, inserts their boundaries into `polygon` and subdivides enforced edges. Pass
+// modifiers lowest priority first; `prepared` must describe the unchanged `polygon`.
 std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
@@ -205,13 +173,8 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings = nullptr);
 
-// Apply weak modifier types to perimeter points based on segment boundaries
-// Finds boundary points in refined polygon and sets types for points within segments
-// Parameters:
-//   weak_segments       - segments with boundary coordinates and types
-//   result              - layer seams data to modify
-//   perimeter           - perimeter info (start/end indices)
-//   some_point_enforced - flag to update if Enforced points are set
+// Retypes the candidates inside each zone in the given order (pass zones lowest priority first);
+// sets some_point_enforced when an Enforced zone applies.
 void apply_weak_modifiers_to_perimeter(
     const std::vector<WeakModifierSegment> &weak_segments,
     PrintObjectSeamData::LayerSeams &result,

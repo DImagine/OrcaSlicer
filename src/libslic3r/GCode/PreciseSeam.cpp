@@ -1,3 +1,4 @@
+// Precise Seam implementation. Design: docs/HLSD/precise-seam.md
 #include "PreciseSeam.hpp"
 #include "PreciseSeamInternal.hpp"
 #include "SeamPlacer.hpp"
@@ -51,20 +52,12 @@ PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter) : polygon(perimet
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
-// Point coincidence tolerance (squared distance, in coordinate units). Clipper rounds intersection
-// points to whole units, so they deviate from the source edge by about half a unit; ad-hoc tests
-// observed at most ~0.52 (squared ~0.27). 2.5 (~1.6 units) gives a ~3x margin; such a deviation is
-// irrelevant for printing, so no finer tuning is needed. Points within it are treated as coincident.
-// A technical integer-grid parameter, not tied to physical units: Clipper rounds to whole units
-// whatever SCALING_FACTOR is (1 nm by default, 10 nm on large beds).
+// Squared on-edge tolerance in coordinate units: absorbs Clipper rounding (~0.5 unit observed); a ~3x
+// margin (~1.6 units) gives 2.5 when squared. Independent of SCALING_FACTOR.
 static constexpr double MACHINE_PRECISION_SQUARED = 2.5;
 
-// Snapping radius for inserting seam points into the perimeter, shared by every Precise Seam rule
-// that must match insertion (rounding fallback, contacts, sub-micron full containment).
-// In scaled units, deliberately not physical: 1 um by default, 10 um when large beds switch
-// SCALING_FACTOR to 10 nm units. Seam candidates are single-precision and centred on the object, so
-// their step grows with the object's size, which only large beds allow (about 0.25 um per step 3 m
-// from the object's centre). A physical 1 um would leave only a few float steps there.
+// Snapping radius for point insertion, shared by every rule that must match insertion. Deliberately in
+// scaled units (1 um by default, 10 um on large beds), well above single-precision candidate steps.
 static constexpr coord_t TOLERANCE_LINEAR = 1000;
 static constexpr coord_t TOLERANCE_SQUARED = TOLERANCE_LINEAR * TOLERANCE_LINEAR;
 
@@ -235,27 +228,10 @@ bool bind_fragment(const Polyline &fragment, const Polygon &perimeter,
     return append_projected_fragment(fragment, perimeter, intervals, failure);
 }
 
-// Safety net for a rare case: the modifier boundary must cross the perimeter within about a
-// nanometre of a source vertex (Clipper is deterministic, so a prismatic model may repeat it on
-// every layer). Not part of the normal binding path; used only after binding has failed.
-// Clipper may place a cut at a vertex's height but a few nanometres to the side of it
-// (scanbeam clamping, X taken from the modifier edge). The end pair then either collapses to the
-// vertex parameter (rejected as zero-length) or misses both neighbouring edges, and the whole
-// fragment is lost. Reproduced on OrcaSlicer's own Clipper by a randomized search with borders
-// passing within 5 nm of a vertex: about 1 fragment in 20 000 of those needed this cleanup.
-//
-// The end cut is replaced by a vertex of the fragment's own chain, never by a nearest vertex found
-// elsewhere on the perimeter. Candidates are only the cut's neighbour in the fragment, when that is
-// a source vertex (the cut is a rounded copy of it and is dropped), or a vertex sharing a source
-// edge with that neighbour (the cut stands for the start of that edge). The neighbour wins whenever
-// it is within the radius. Otherwise two different candidates (an edge shorter than the radius, or a
-// self-touching contour) leave the fragment unchanged, and so
-// does an end that is itself a source vertex (the open line's start/end or an exact cut): it is not
-// a rounded cut, and moving it could drop a real edge shorter than the radius.
-// The radius is TOLERANCE_LINEAR, the distance at which boundary insertion snaps to an existing
-// vertex anyway, so the result matches a successful binding. The caller re-binds with the usual
-// strict direction and continuity rules, so a wrong candidate can only fail, never bind elsewhere.
-// Returns false when nothing was changed, so the caller does not retry.
+// Rare-case repair, run only after binding has failed: Clipper may round an end cut a few units off
+// a vertex, so it lies on neither edge. Move such an end onto that vertex, taken from the fragment's own
+// chain, and let the caller retry with the same strict rules, so a wrong move can only fail again.
+// Returns false when nothing was changed.
 static bool snap_cuts_to_adjacent_vertices(Polyline &fragment, const Polygon &perimeter)
 {
     const size_t count = perimeter.size();
@@ -269,9 +245,8 @@ static bool snap_cuts_to_adjacent_vertices(Polyline &fragment, const Polygon &pe
         bool neighbour_is_vertex = false;
         bool ambiguous = false;
         std::optional<Point> target;
-        // Every visit of the neighbour's coordinate contributes its two chain-adjacent vertices.
-        // The whole perimeter is scanned before any decision: the "cut is a real vertex" check must
-        // see every vertex, and the neighbour rule below must not be pre-empted by an ambiguity.
+        // Scan the whole perimeter before deciding: a cut that is a real vertex must be detected anywhere,
+        // and an ambiguity must not pre-empt the neighbour rule below.
         for (size_t j = 0; j < count; ++j) {
             if (perimeter[j] == cut)
                 return std::nullopt; // A real vertex, not a rounded cut.
@@ -337,10 +312,8 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
     FragmentBindingFailure failure;
     if (bind_fragment(fragment, perimeter, intervals, failure))
         return true;
-    // Fallback for a rare rounding case: retry the same binding rules once on the cleaned fragment.
-    // The normal path never gets here. A recovery is not a failure (no failure count, no user warning),
-    // but it leaves its own marker so that any later problem can be traced to it.
-    // A full failure falls through to the usual failure marker with the original reason.
+    // Rare-case fallback: repair the end cuts and retry once. A recovery is logged but is not a failure
+    // (no failure count, no user warning).
     const char *outcome = nullptr;
     Polyline cleaned = fragment;
     if (snap_cuts_to_adjacent_vertices(cleaned, perimeter)) {
@@ -351,9 +324,8 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
         else if (bind_fragment(cleaned, perimeter, intervals, retry_failure))
             outcome = "bound";
     }
-    // Any failed fragment shorter than the snapping distance is a contact as well, for example two
-    // cuts in the middle of an edge that project to one parameter: insertion would collapse it onto
-    // one point anyway. Accept it as clipping returned it instead of reporting a failure.
+    // A failed fragment shorter than the snapping radius is a contact: insertion would collapse it to one
+    // point anyway, so accept it instead of reporting a failure.
     if (outcome == nullptr && fragment.length() < double(TOLERANCE_LINEAR))
         outcome = "contact";
     if (outcome != nullptr) {
@@ -438,9 +410,8 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     if (nearby_regions.empty())
         return result;
 
-    // Accept the clipper's boundary behavior without offsets or special contact handling;
-    // modifiers should cross the perimeter unambiguously.
-    // The open overload avoids coordinate-only recombination at self-touching vertices.
+    // Clip as an open line, without offsets or contact rules: modifiers should cross the perimeter
+    // clearly, and the open path keeps self-touching vertices apart.
     std::vector<ClippedEdgeInterval> intervals;
     Polylines fragments;
     // Clip only accepted regions, with their holes still attached to the exterior.
@@ -507,22 +478,9 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     result.full_containment = merged.size() == count;
     for (size_t i = 0; result.full_containment && i < count; ++i)
         result.full_containment = merged[i].edge == i && merged[i].begin == 0. && merged[i].end == 1.;
-    // A boundary that only touches the perimeter is full containment by policy. On an axis-aligned
-    // edge or at a vertex clipping splits the line exactly at the touch and the check above holds. On
-    // an inclined edge the touching point is usually not representable on the integer grid, so the
-    // boundary pokes a few nm across and leaves a real gap; the single segment then covers everything
-    // but that gap. Weak insertion would snap both its boundaries onto one vertex (1 um radius) and turn
-    // the intended zone into one candidate, and strong would put the seam at the touch. Treat such a
-    // gap as full containment instead, exactly when insertion would collapse it (up to edges shorter
-    // than 2 um, where an end may snap to the start of its own edge rather than the shared vertex):
-    // - the uncovered length is below the snapping distance (a gap inside one edge collapses onto the
-    //   boundary inserted first), or
-    // - the gap spans exactly one vertex and both ends lie within the snapping distance of it (each
-    //   end snaps onto that vertex from its own edge, even if the gap itself is up to 2 um long).
-    // Stage 1 is a cheap filter on the normal path: both cases bring the ends closer than 2 um. Narrow
-    // bands, outside contacts, sharp spikes and nearly touching contour parts can pass it, but their
-    // uncovered part is long and not around one vertex, so they stay ordinary segments (a band below
-    // 1 um then becomes a single weak candidate, which is its expected result).
+    // A touch on an inclined edge leaves a sub-micron gap. Treat the single segment as full containment
+    // when the gap is shorter than the snapping radius, or spans one vertex with both ends within it
+    // (exact for edges of 2 um and longer). The 2 um end distance is a cheap pre-filter.
     if (!result.full_containment && result.segments.size() == 1) {
         const PerimeterSegment &only = result.segments.front();
         const Point &first = only.polyline.points.front();
@@ -592,12 +550,8 @@ void init_precise_seam_data(
     std::reverse(weak_volumes_out.begin(), weak_volumes_out.end());
 }
 
-// Insert point into perimeter with proximity check to existing vertices
-// If point is close to vertex (< TOLERANCE_SQUARED) - use existing vertex
-// Returns pair: {final coordinates, point index in polygon}
-// edge_start_idx is start vertex of edge containing point
-// Precondition: at least three vertices. Both callers run only on a valid PreparedPerimeter,
-// and insertions only add vertices, so insertion cannot fail.
+// Inserts a point on edge `edge_start_idx`, or reuses a vertex closer than TOLERANCE_LINEAR.
+// Returns {final coordinates, index}. Requires at least three vertices (callers ensure it).
 static std::pair<Point, size_t> insert_point_into_perimeter(
     const Point &point,
     size_t edge_start_idx,
@@ -625,11 +579,8 @@ static std::pair<Point, size_t> insert_point_into_perimeter(
         return std::make_pair(perim_p_end, vtx_end);
     }
 
-    // Insert point into perimeter
-    // IMPORTANT: Special handling for the last edge to preserve indexing for subsequent insertions.
-    // If this is the last edge (edge_start_idx == perim_max - 1), we append to the end instead of
-    // inserting at position 0 (which would shift all indices). This allows sorting points by
-    // descending source position and inserting them without invalidating previously computed indices.
+    // On the closing edge, append instead of inserting at index 0: callers insert in descending source
+    // order and rely on earlier indices staying valid.
     size_t insert_pos;
     if (edge_start_idx == perim_max - 1) {
         // Last edge: add to end of vector
@@ -647,12 +598,8 @@ static std::pair<Point, size_t> insert_point_into_perimeter(
     return std::make_pair(perimeter_polygon.points[insert_pos], insert_pos);
 }
 
-// Insert new point at distance TOLERANCE_LINEAR from specified perimeter vertex
-// Insertion direction specified by direction parameter: +1 = after vertex, -1 = before vertex
-// If target edge length < 2*TOLERANCE_LINEAR, insertion not performed (new point would be too close to edge end)
-// point_idx is index of perimeter vertex from which insertion is performed
-// Preconditions: at least three vertices (callers run on a valid PreparedPerimeter and only add
-// vertices) and direction +1 or -1.
+// Adds a helper point TOLERANCE_LINEAR after (+1) or before (-1) vertex `point_idx`; skips edges shorter
+// than 2 * TOLERANCE_LINEAR. Requires at least three vertices.
 static void refine_at_vertex(
     size_t point_idx,
     int direction,
@@ -684,9 +631,7 @@ static void refine_at_vertex(
     Vec2d edge_vector = (edge_end - edge_start).cast<double>();
     double edge_length = edge_vector.norm();
 
-    // Check if edge is long enough for insertion
-    // New point must be at distance TOLERANCE_LINEAR from start
-    // and at distance >= TOLERANCE_LINEAR from end
+    // The helper needs TOLERANCE_LINEAR of edge on both sides.
     if (edge_length < 2.0 * TOLERANCE_LINEAR) {
         return;  // Edge too short - new point would be too close to end
     }
@@ -699,11 +644,8 @@ static void refine_at_vertex(
         ? Point(edge_start + offset)
         : Point(edge_end   - offset);
 
-    // Insert point into perimeter
-    // IMPORTANT: Special handling of last edge to preserve indexing for subsequent insertions.
-    // If this is last edge (edge_start_idx == perim_max - 1), add point to end of vector
-    // instead of inserting at position 0 (which would shift all indices). This allows sorting points
-    // by descending source position and inserting them without invalidating previously computed indices.
+    // On the closing edge, append instead of inserting at index 0: callers insert in descending source
+    // order and rely on earlier indices staying valid.
     if (edge_start_idx == perim_max - 1) {
         // Last edge: add to end of vector
         perimeter_polygon.points.push_back(new_point);
@@ -716,11 +658,8 @@ static void refine_at_vertex(
     }
 }
 
-// Records the warning state of one extraction: the type of a modifier with a discarded fragment, and
-// whether the modifier was evaluated on a perimeter and reached it, for the "had no effect" reason.
-// A discarded fragment counts as reached: the modifier crossed the perimeter, and that failure has its
-// own warning. A point contact gives no segment and does not count. Modifiers that were never evaluated
-// (a higher strong modifier decided every perimeter) stay unchecked and are not reported.
+// Records one extraction for the warnings: the type of a modifier with a discarded fragment, and the
+// evaluated/reached flags for "had no effect" (a discarded fragment counts as reached, a contact not).
 static void record_extraction(PreciseSeamWarnings *warnings, const ModelVolume *modifier,
                               const SegmentExtraction &extracted)
 {
@@ -766,21 +705,14 @@ std::optional<Point> insert_strong_seam_point(
                 PreciseSeamWarnings::mark(warnings->full_containment, modifier->type());
             continue;
         }
-        // Policy: no usable segment passes the turn to the next modifier by priority. This includes a
-        // modifier that crosses the perimeter but whose fragments were all discarded by binding: the
-        // seam on that layer then comes from a lower-priority modifier (or weak/ordinary placement)
-        // rather than from none, and the user is told through the "unable to process intersection"
-        // warning. Deliberately not distinguished from "does not cross this perimeter".
+        // No usable segment, even if all fragments were discarded: pass the turn to the next modifier.
         if (extracted.segments.empty())
             continue;
         if (warnings && extracted.segments.size() > 1)
             PreciseSeamWarnings::mark(warnings->multiple_intersections, modifier->type());
 
-        // Policy: lengths are compared exactly. Geometrically equal segments (e.g. a symmetric modifier
-        // crossing both faces of a thin wall) differ only by cut rounding noise, which varies from layer
-        // to layer, so the chosen face may alternate between layers. This is accepted deliberately: such a
-        // modifier is ambiguous by itself, the user gets the "multiple intersections" warning and is
-        // expected to make the modifier cross the perimeter once.
+        // Lengths are compared exactly: for a symmetric modifier the chosen face may alternate between
+        // layers, which is accepted (the user gets the multiple-intersections warning).
         StrongSeamTarget target{Point(0, 0), 0};
         double longest = -1.;
         for (const PerimeterSegment &segment : extracted.segments) {
@@ -874,10 +806,8 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
         point_coords = insert_point_into_perimeter(point_coords, pt.position.edge_index, polygon).first;
     }
 
-    // Group coincident boundaries by their snapped vertex, including wraparound to vertex 0.
-    // Scan original vertices (those present before helper insertion) backwards, so insertions
-    // cannot shift pending vertex indices.
-    // O(vertices * segments), matching the boundary lookup below; typically only a few segments.
+    // Add helpers at boundary vertices, scanning original vertices backwards so insertions do not shift
+    // pending indices.
     for (size_t poly_idx = polygon.size(); poly_idx-- > 0; ) {
         bool refine_before = false;
         bool refine_after = false;
@@ -899,18 +829,15 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
     // Determine type pattern for each polygon edge (sequential application of hierarchy)
     std::vector<EnforcedBlockedSeamPoint> edge_types(polygon.size(), EnforcedBlockedSeamPoint::Neutral);
 
-    // Find a boundary in the modified polygon by coordinates. Every boundary was inserted or snapped
-    // to an existing vertex above, and later steps only add vertices, so it is always present.
-    // Linear scan is intentional — O(N×M) is acceptable for typical M ≤ 5 weak segments.
+    // Every boundary was inserted or snapped above and later steps only add vertices, so it is found.
+    // A linear scan is fine: there are only a few zones per perimeter.
     auto find_point_index = [&](const Point &pt) -> size_t {
         const auto it = std::find(polygon.points.begin(), polygon.points.end(), pt);
         assert(it != polygon.points.end());
         return size_t(it - polygon.points.begin());
     };
 
-    // Apply types sequentially: segments are sorted low-priority-first
-    // (bottom of object tree first), so higher-priority modifiers overwrite
-    // lower-priority ones via last-write-wins.
+    // Last write wins: zones are sorted lowest priority first.
     for (const auto &segment : result) {
         // A whole-perimeter zone types every edge, so Enforced subdivides the whole perimeter, as
         // painting it green all round would.
@@ -920,20 +847,14 @@ static std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
         }
         const size_t left_idx = find_point_index(segment.left_point);
         const size_t right_idx = find_point_index(segment.right_point);
-        // Practically unreachable (see find_point_index), but a miss would make the loop below write
-        // past edge_types in Release builds. The check costs almost nothing, so it was added anyway:
-        // skip the zone, as apply_weak_modifiers_to_perimeter does.
+        // Practically unreachable, but a miss would write past edge_types in Release builds: skip the zone.
         if (left_idx == polygon.size() || right_idx == polygon.size()) {
             BOOST_LOG_TRIVIAL(error) << "PreciseSeam: weak boundary not found in perimeter, skipping zone";
             continue;
         }
 
-        // Edge i joins vertices i and i+1, so the zone covers edges [left_idx, right_idx).
-        // The edge starting at the right boundary lies outside the zone and must not be subdivided;
-        // the helper placed TOLERANCE_LINEAR after the boundary keeps that edge too short to split, but
-        // this must not rely on it.
-        // Edge types drive oversampling only: candidate types are assigned per point, including
-        // both boundaries, in apply_weak_modifiers_to_perimeter. A zero-length zone marks no edge.
+        // A zone covers edges [left_idx, right_idx): the edge from the right boundary is outside and must
+        // not be subdivided. Edge types only drive subdivision; candidates are typed per point later.
         for (size_t idx = left_idx; idx != right_idx; idx = (idx + 1) % polygon.size())
             edge_types[idx] = segment.type;
     }
@@ -1017,13 +938,8 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         const SegmentExtraction extracted = extract_perimeter_segments(prepared, it->second[layer_id], modifier_volume->type(), context);
         record_extraction(warnings, modifier_volume, extracted);
         const auto type = convert_weak_modifier_type(modifier_volume->type());
-        // Policy for a perimeter fully inside a weak modifier, by analogy with seam painting:
-        // - Enforced is like a perimeter painted green all round: a meaningful choice that the seam
-        //   position does not matter here. Every edge is subdivided and the placer picks the best spot.
-        // - Neutral is like an unmarked perimeter: it clears painting and lower zones.
-        // Both take part in the usual priority order and give no warning. Blocked is skipped with the
-        // full-containment warning: forbidding the seam on the whole perimeter cannot be honoured, so it
-        // does not override anything below it (lower zones and painting stay in effect).
+        // Full containment works like seam painting: Enforced and Neutral type the whole perimeter;
+        // Blocked is skipped with a warning, since the seam cannot avoid the whole perimeter.
         if (extracted.full_containment) {
             if (type == EnforcedBlockedSeamPoint::Blocked) {
                 if (warnings)
@@ -1044,9 +960,6 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     return prepare_weak_modifier_segments(std::move(result), polygon);
 }
 
-// Apply weak modifier types to perimeter points based on segment boundaries.
-// Find boundary points in refined polygon by coordinates and set types
-// for all points inside each segment.
 void apply_weak_modifiers_to_perimeter(
     const std::vector<WeakModifierSegment> &weak_segments,
     PrintObjectSeamData::LayerSeams &result,
