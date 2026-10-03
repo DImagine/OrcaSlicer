@@ -1,6 +1,5 @@
 #include "WebMediaController.hpp"
 #include "IPrinterAgent.hpp"
-#include "Widgets/WebView.hpp"
 
 #include <wx/gdicmn.h>
 #include <wx/uri.h>
@@ -83,8 +82,7 @@ void WebMediaController::Play()
 void WebMediaController::Stop()
 {
     if (m_webview) {
-        // Fire and forget, like StatusBasePanel::remove_controls(): the page is replaced right after anyway.
-        WebView::RunScript(m_webview, "if(typeof stopCameraRefresh==='function') stopCameraRefresh();");
+        m_webview->RunScript("if(typeof stopCameraRefresh==='function') stopCameraRefresh();");
         m_webview->Stop();
         m_webview->SetPage("", "about:blank");
         m_webview->ClearHistory();
