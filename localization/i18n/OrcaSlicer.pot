@@ -22863,7 +22863,7 @@ msgstr ""
 
 #: src/libslic3r/GCode/SeamPlacer.cpp
 #, possible-boost-format
-msgid "multiple intersections with a perimeter, the longest one was used (%1%)"
+msgid "multiple intersections with a perimeter, only one was used (%1%)"
 msgstr ""
 
 #: src/libslic3r/GCode/SeamPlacer.cpp
@@ -22878,5 +22878,5 @@ msgstr ""
 
 #: src/libslic3r/GCode/SeamPlacer.cpp
 #, possible-boost-format
-msgid "modifier \"%1%\" of \"%2%\" (and %3% more) had no effect on the seam (it might not reach the centerline of the printed perimeter)"
+msgid "modifier \"%1%\" of \"%2%\" (%3% in total) had no effect on the seam (it might not reach the centerline of the printed perimeter)"
 msgstr ""

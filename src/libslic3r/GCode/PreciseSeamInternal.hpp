@@ -28,10 +28,8 @@ bool append_projected_fragment(const Polyline &fragment, const Polygon &perimete
 bool bind_fragment(const Polyline &fragment, const Polygon &perimeter,
                    std::vector<ClippedEdgeInterval> &intervals, FragmentBindingFailure &failure);
 
-// Both binding paths share the same discard and diagnostic policy. After a failure, an end cut
-// rounded next to a vertex of the fragment's own chain is snapped to that vertex and binding is
-// retried once; a failed fragment shorter than 1 um is accepted as a contact. Both are a safety net
-// for rare rounding cases, not part of the normal path, and are logged as recoveries.
+// Binds one fragment. After a failure it tries the rare-case repair and the contact rule, both logged
+// as recoveries. Returns false when the fragment is discarded.
 bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
                      std::vector<ClippedEdgeInterval> &intervals,
                      const ExtractionContext &context, size_t fragment_index);

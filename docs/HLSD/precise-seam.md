@@ -13,19 +13,12 @@ seam along any trajectory.
 The modifier is non-printing geometry. It takes no part in object slicing,
 region assignment, filament selection or brim adhesion, and it affects only seam
 placement during G-code export. Objects without Precise Seam volumes follow the
-regular seam placement unchanged. In objects that have them, every external
-perimeter is normalized first (see [Perimeter preparation](#perimeter-preparation));
-perimeters that no modifier reaches then use the regular seam placement.
+regular seam placement unchanged.
 
 Precise Seam does not replace the seam placer. It feeds it: a modifier inserts
 the points it needs into the perimeter and changes the enforced/blocked type of
 seam candidates, the same typing mechanism as seam painting, and the configured
 seam position then chooses among them.
-
-This document covers the volume types and their priority, the data flow
-through `SeamPlacer`, the extraction of perimeter segments from modifier
-slices, both kinds of modifiers, numeric tolerances, diagnostics, known
-limitations, project storage, invalidation and the user interface.
 
 ## Modifier types
 
@@ -93,12 +86,8 @@ there.
   Blocked modifier that fully contains a perimeter is the exception: it is
   skipped there (see [Full containment](#full-containment)).
 
-A modifier without a usable segment on a perimeter passes the turn to the next
-one. This includes a modifier that crosses the perimeter but whose fragments
-were all discarded (see [Binding fragments](#binding-fragments-to-source-edges)).
-The seam on that layer then comes from a lower-priority modifier, or from weak
-or regular placement, and the user is told through the "failed to process some
-intersections" warning.
+A strong modifier without a usable segment, even one whose fragments were all
+discarded, passes the turn to the next one.
 
 ## Data flow
 
@@ -215,8 +204,7 @@ normal path never pays for them:
   snapping radius to a vertex of the fragment's own chain is snapped to that
   vertex: either its neighbor in the fragment (the cut is a rounded copy of it
   and is dropped) or a vertex that shares a source edge with that neighbor. The
-  neighbor wins whenever it is within the radius. There is no search for the
-  nearest vertex elsewhere on the perimeter. Ends that are themselves source
+  neighbor wins whenever it is within the radius. Ends that are themselves source
   vertices and ambiguous choices are left unchanged. Binding is then retried
   once with the same strict rules, so a wrong candidate can only fail again.
 - **Contact.** A fragment that still fails but is shorter than the snapping
@@ -237,8 +225,7 @@ meet form one `PerimeterSegment`, and the last segment is joined with the first
 when they meet at vertex zero, undoing the artificial cut of the clipping line.
 
 Each segment keeps its polyline, the source edge of every polyline edge, and its
-begin and end positions on the source contour. These data are retained for all
-modifier types, including for debugging.
+begin and end positions on the source contour.
 
 ### Full containment
 
@@ -247,9 +234,7 @@ follows seam painting, where painting a whole perimeter green is a meaningful
 choice and forbidding the seam all round is not:
 
 - **Seam Enforced** types the whole perimeter, like a perimeter painted green all
-  round. It says that the seam position does not matter on this part of the
-  model: every edge is subdivided and the placer picks the best spot on the
-  refined contour.
+  round, with subdivision applied as described under [Weak modifiers](#weak-modifiers).
 - **Seam Neutral** types the whole perimeter Neutral, like an unmarked perimeter,
   clearing painting and lower zones.
 - **Seam Blocked** is skipped for the perimeter, with the full-containment
@@ -259,8 +244,7 @@ choice and forbidding the seam all round is not:
   intersection to place the point on.
 
 Enforced and Neutral take part in the usual priority order (see
-[Weak modifiers](#weak-modifiers)) and give no warning. Geometry and bindings
-stay in the extraction result, but no strong data are prepared.
+[Weak modifiers](#weak-modifiers)).
 
 The perimeter is fully contained when the united intervals cover every source
 edge from parameter 0 to 1. A modifier boundary that merely touches the
@@ -283,10 +267,7 @@ where insertion collapses it, exactly up to edges shorter than 2 µm:
   each end then snaps onto it from its own edge.
 
 A cheap filter runs first: both cases bring the segment's ends within 2 µm of
-each other. A narrow band, an outside contact, a sharp spike and nearly touching
-parts of a contour may pass the filter, but their uncovered part is long and
-not around one vertex, so they remain ordinary segments. A band narrower than
-1 µm then becomes a single candidate, which is its expected result.
+each other.
 
 ## Strong modifiers
 
@@ -298,8 +279,6 @@ before anything is inserted, together with the source edge it lies on:
 - **Center:** the point at half the segment's arc length.
 
 Arc length is the sum of Euclidean edge lengths, not the chord or a vertex count.
-Lengths are measured only when needed: for Center and when several segments of
-one modifier compete.
 
 `insert_strong_seam_point()` selects the longest segment of the first modifier
 that has one. Exactly equal lengths are resolved by the prepared target points:
@@ -310,10 +289,8 @@ not treated as equal, so exact ties occur mainly on axis-aligned geometry.
 Geometrically equal segments, such as a symmetric modifier crossing both faces
 of a thin wall, differ only by rounding noise that varies between layers, so
 the chosen face may alternate. This is accepted deliberately: such a modifier is
-ambiguous by itself, and the user is warned and expected to make it cross the
-perimeter once. More than one segment raises the "multiple intersections"
-warning, counted after joining across vertex zero, and the longest segment is
-still used.
+ambiguous by itself: more than one segment raises the "multiple intersections"
+warning. The user should make the modifier cross the perimeter once.
 
 The selected point is inserted on its source edge. A point within 1 µm of an
 existing vertex is snapped to that vertex. Helper points are added 1 µm on both
@@ -322,13 +299,10 @@ the distance.
 
 When the candidates are built, the candidate at the inserted point is the only
 enforced one and becomes the central enforcer; every other candidate is blocked.
-Every seam position mode then picks it: Aligned and Aligned Back prefer the
-central enforcer, while Back, Random and Nearest rank enforced candidates above
-blocked ones. Alignment and random placement can still move the final position
-along an edge, so after alignment `restore_precise_seam_positions()` writes the
-exact point and its index back into every perimeter that has a strong seam.
-Inner walls take their seam from the external one as usual, including
-staggering.
+Every seam position mode therefore selects it. Alignment and random placement
+can still move the final position, so after alignment
+`restore_precise_seam_positions()` writes the exact point and its index back
+into every perimeter that has a strong seam.
 
 ## Weak modifiers
 
@@ -339,62 +313,49 @@ order, lowest priority first. Full containment of an Enforced or Neutral
 modifier becomes a whole-perimeter zone at its place in that order: it has no
 boundaries and takes part in no insertion or helper step below. The boundaries
 carry their positions on the source contour; these remain as provenance after
-insertion and are not indices into the modified polygon. The consumer receives
-only these ready boundaries; it does not inspect modifier geometry.
+insertion and are not indices into the modified polygon.
 
 `prepare_weak_modifier_segments()` then changes the polygon:
 
 1. **Boundary insertion.** Insertion events are sorted by decreasing source edge
    and parameter, and the polygon is modified from its end towards its start. A
-   pending boundary's source index therefore stays valid, and no arc lengths are
-   measured for sorting. Vertex zero has the canonical position `(0, 0)` and is
+   pending boundary's source index therefore stays valid. Vertex zero has the
+   canonical position `(0, 0)` and is
    processed last, and a point on the closing edge is appended rather than
    inserted at index zero. A boundary within 1 µm of either endpoint of its
    current edge, an original vertex or a boundary inserted earlier, is snapped to
    that point, so coincident boundaries share a vertex. A zone narrower than
    1 µm collapses into a single vertex.
 2. **Helper points.** A helper point is added 1 µm outside every boundary,
-   unless the edge there is shorter than 2 µm, which already bounds it. Random
-   placement picks a position along the edge that follows a candidate; the
-   helpers keep that edge 1 µm long, so a zone can neither extend nor intrude
-   further than that. Coincident boundaries share their helpers.
+   unless the edge there is shorter than 2 µm, which already bounds it. The
+   helpers keep the edges at a boundary short, so a seam placed along such an
+   edge stays close to the boundary. Coincident boundaries share their helpers.
 3. **Enforced subdivision.** Zone types are resolved for the polygon's edges in
    priority order. The edges of a zone are those from its left boundary up to,
    but not including, its right boundary; a whole-perimeter zone types every
    edge. Enforced edges longer than `SeamPlacer::enforcer_oversampling_distance`
    (0.2 mm) are subdivided into steps of at most that length; shorter edges and
    existing vertices are kept.
-   The seam placer then takes the middle candidate, by count, of the longest
-   enforced patch, measured in candidates and across the closing edge,
-   independently of where the contour starts; the same rule applies to painted
-   seams. Subdivision brings that candidate near the geometric middle of a zone
-   whose source vertices are sparse or evenly spaced. Densely spaced source
-   vertices in one part of the zone pull it toward that part, so a weak Enforced
-   zone does not guarantee an arc-length midpoint the way a strong Center
-   modifier does.
+   The regular seam placer then chooses the seam as for painted seams.
 
 When candidates are built, painting assigns their types first.
 `apply_weak_modifiers_to_perimeter()` then overwrites the types of the
 candidates between the boundaries of each zone, both boundaries included,
 lowest priority first; a whole-perimeter zone types every candidate. Blocked
 and Enforced zones therefore take precedence over painting, and Neutral clears
-painting inside its zone. Several weak segments per modifier, holes and
-through-body intersections need no special handling.
+painting inside its zone.
 
 ## Numeric tolerances
 
 Coordinates are integers in scaled units: 1 nm by default, and 10 nm when a bed
 larger than 2147 mm switches `SCALING_FACTOR`. Both Precise Seam tolerances are
 deliberately defined in units rather than physical distances. Clipper rounds to
-whole units at any scale, so the on-edge tolerance must follow the unit. The
-snapping radius following the unit keeps a similar margin over single-precision
-candidate coordinates. They are centred on the object, so their step grows with
-the object's size, which only large beds allow (about 0.25 µm per step 3 m from
-the object's centre). Distances quoted in this document in nanometers and
+whole units at any scale, so the on-edge tolerance must follow the unit; the
+snapping radius scales with it to keep its margin over single-precision
+candidate coordinates, which are coarser on large beds. Distances quoted in
+this document in nanometers and
 micrometers assume the default unit; on large printers they are ten times
 larger. The enforced subdivision step is a physical distance and stays 0.2 mm.
-The design separates two scales: the rounding error of clipping, and the
-distance below which points cannot be told apart after insertion.
 
 | Value | Role |
 | --- | --- |
@@ -406,46 +367,31 @@ Raising the on-edge tolerance would not help with cuts beside a vertex: more
 points past a vertex would be clamped to its parameter and collapse. Lowering it
 would reject ordinary rounded cuts. The snapping radius is kept far above
 clipping precision for robustness: seam candidates hold single-precision
-coordinates, whose step is about 8 to 15 nm at typical object coordinates, and
+coordinates, whose step is about 8 to 15 nm at typical object coordinates
+(about 0.25 µm 3 m from the object's centre, on large beds only), and
 weak boundaries and the strong point are located among the candidates by those
 coordinates, so distinct points must stay clearly distinct. 1 µm is also far
 below printing precision.
-
-Continuity never depends on two independently computed projections of the same
-point: a continuing pair reuses the previous parameter, and touching fragments
-are also joined at an equal integer point. Other exact comparisons of computed
-parameters, such as rejecting a pair whose two points project to the same
-parameter, only decide whether a pair is degenerate. The strong tie rule is the
-one exact comparison whose outcome changes a policy decision: only identical
-lengths count as a tie.
-
-Boundary contacts are accepted as clipping returns them, without offsets or
-special tangency rules. Users should cross the perimeter unambiguously; the
-rules above only keep sub-micron results consistent and prevent a zone or a
-seam from changing drastically because of rounding.
 
 ## Diagnostics and warnings
 
 One `PreciseSeamWarnings` instance is shared by all objects and layers of a
 `SeamPlacer::init()` call. After all objects are processed, `SeamPlacer::init()`
 prepares at most one warning text, available through `precise_seam_warning()`.
-`init()` does not change the `Print`, so it can also be called outside G-code
-export, as tests do. G-code export issues the text right after `init()`, inside
-its active step, as one non-critical warning with the ID
+G-code export issues it as one non-critical warning with the ID
 `SlicingPreciseSeamWarning`. It is a single line, "Precise Seam: <causes>. Seam
 placement may differ from expected.", because the export warnings dialog shows
 only the first line of each warning. Repeated warning events replace the
 notification instead of appending to it. Except for the "had no effect" cause,
 the causes name the modifier types involved, as the menu names them, in menu
-order and each type once, for example "(Seam Left, Seam Enforced)". Atomic
-per-cause type masks collect them.
+order and each type once, for example "(Seam Left, Seam Enforced)".
 The causes are:
 
 - **failed to process some intersections (types):** at least one fragment was
   discarded by binding. Other segments remain usable.
-- **multiple intersections with a perimeter, the longest one was used (types):**
+- **multiple intersections with a perimeter, only one was used (types):**
   a Seam Center, Left or Right modifier had more than one segment on a
-  perimeter.
+  perimeter (see [Strong modifiers](#strong-modifiers)).
 - **a perimeter is fully inside a modifier, the modifier was not applied to it
   (types):** a Seam Center, Left, Right or Blocked modifier was skipped for a
   perimeter (see [Full containment](#full-containment)).
@@ -453,21 +399,16 @@ The causes are:
   the centerline of the printed perimeter):** a modifier was evaluated on at
   least one perimeter and never gave a segment, full containment or a discarded
   fragment. Only the first such modifier in print and volume order is named,
-  followed by "(and N more)" when there are others.
+  followed by "(N in total)" when there are several.
 
   Only the effect is certain, so the cause is given as a hint. A modifier is
   evaluated only when its turn comes: on a perimeter where a higher strong
   modifier placed the seam, lower strong and all weak modifiers are not
   evaluated. A modifier that was never evaluated is not reported, since nothing
   is known about it. A point contact gives no segment and does not count as
-  reaching the perimeter. `SeamPlacer::init()` registers every modifier before
-  the parallel phase, and workers only set two atomic flags per modifier.
+  reaching the perimeter.
 
-Multiple weak segments, modifier holes, through-body intersections and full
-containment by Seam Enforced or Neutral produce no warning.
-
-The log carries compact markers for investigating a saved project, not geometry
-dumps:
+The log records the following diagnostic markers:
 
 - `[PreciseSeamIntersectionFailed]` for a discarded fragment, with object,
   modifier, layer, height, fragment and failing pair, the failure reason and
@@ -478,29 +419,18 @@ dumps:
   the object and modifier names. Unlike the user warning, the log lists all of
   them.
 
-Failures and recoveries have separate atomic counters. The first 10 of each per
-`init()` call are logged in detail; later ones are only counted, without
-formatting a message. If a limit is exceeded, one summary marker reports the
-total and the number omitted. The limit matters for recoveries too: clipping is
-deterministic, so a prismatic model can repeat one recovery on every layer.
-Parallel processing determines which records come first, and cancellation may
-omit the summaries. Callers without shared warning state, such as direct calls
-in tests, log every event. The limits never affect discarding, recovery or the
-user warning.
+Failures and recoveries are counted separately. The first 10 of each per
+`init()` call are logged in detail, in parallel processing order; if a limit is
+exceeded, one summary marker reports the total and the number omitted.
 
 ## Known limitations
 
-The policies above already define what happens with several strong
-intersections and with full containment. The remaining limitations are:
-
-- **The modifier must reach the perimeter centerline.** Boundaries that only
-  graze it, within print-setting-dependent distances, are the user's
-  responsibility. A modifier that never reaches it is reported by the "had no
-  effect" warning; sub-micron results behave like points (see
-  [Numeric tolerances](#numeric-tolerances)). Several near-touches on inclined
-  edges can leave several segments separated by gaps of a few units; their zones
-  then cover nearly the whole perimeter instead of being treated as full
-  containment.
+- **The modifier must reach the perimeter centerline.** Contacts are taken as
+  clipping returns them, without offsets or tangency rules, so boundaries that
+  only graze the centerline are the user's responsibility. Several near-touches
+  on inclined edges can leave several segments separated by gaps of a few units;
+  their zones then cover nearly the whole perimeter instead of being treated as
+  full containment.
 - **Self-touching perimeters.** Extraction keeps distinct visits of one
   coordinate apart through its source-edge bindings, but the consumers locate
   inserted points by coordinates. A weak zone is typed and subdivided from the
@@ -515,10 +445,6 @@ intersections and with full containment. The remaining limitations are:
 
 ## Integration with the application
 
-The remaining sections describe how Precise Seam volumes relate to other seam
-settings, how they are stored, how their changes reach the print, and how the
-user works with them.
-
 ### Other seam settings
 
 - Precise Seam takes part only in outer and hole perimeter seam placement. In
@@ -527,13 +453,15 @@ user works with them.
 - Scarf seams, the seam gap and wiping start from the chosen point exactly as
   they would from an ordinary seam.
 - Seam painting acts only from model parts, the volumes the seam gizmo shows and
-  edits, and from negative volumes. Painting kept on a volume after its type
-  changed from part to a Precise Seam, ordinary or support modifier is ignored
-  but not deleted: it acts again if the volume becomes a part again, unless its
-  mesh was changed meanwhile. Negative volumes keep it on purpose: painting a
+  edits, and from negative volumes. Painting retained on a volume after a change
+  from part to a Precise Seam, ordinary or support modifier is ignored. A type
+  change back to a model part reactivates any retained painting.
+  Negative volumes keep it on purpose: painting a
   part and turning it into a negative volume is the only way to paint the wall
-  of the hole it cuts. That painting is still invisible in the gizmo and does not
-  trigger re-export when changed; this is known technical debt.
+  of the hole it cuts. That painting still affects the seam but is invisible in
+  the gizmo and cannot be edited there; this is known technical debt.
+  If painting them is ever made editable, G-code invalidation must track it too:
+  `model_custom_seam_data_changed()` checks model parts only.
 
 ### Model storage and 3MF compatibility
 
@@ -558,8 +486,7 @@ it. The writers prefix these keys with `precise_seam_config:`, so an earlier
 reader drops them as unknown options and loads a modifier without settings,
 which has no effect on the print. The current reader restores the keys only when
 the volume ends up as a Precise Seam type, so the settings return when the user
-changes the type back. Configuration values are XML-escaped in both writers, for
-every volume type.
+changes the type back.
 
 ### Print invalidation
 
@@ -575,14 +502,11 @@ support step is invalidated as well.
 A conversion to or from a part or an ordinary modifier changes the solid and
 modifier volume lists and reslices the object as before. The volume keeps its
 ID across the type change, so the region cache treats a former support or
-Precise Seam volume that became a part or modifier as new instead of looking it
-up among the cached solids and modifiers, where it never was.
+Precise Seam volume that became a part or modifier as new, since it was never
+cached.
 
-The printable volumes can also change indirectly. Deleting a volume so that
-only one remains makes `ModelObject::delete_volume()` fold that volume's
-transformation into the instances and give it a new ID, so removing the last
-helper of a single-part object reslices it, as removing any last modifier
-would.
+Removing the last helper of a single-part object reslices it, as removing any
+last modifier would.
 
 ### User interface
 
@@ -598,11 +522,8 @@ would.
 - Each mode has its own icon in the object list and its own color in the 3D
   view, at 60% opacity: warm orange, gold and dark orange for Center, Left and
   Right; green, red and gray for Enforced, Blocked and Neutral. The three strong
-  colors are deliberately close shades of one orange: they all mark strong
-  modifiers, and a distinct hue per mode would turn the scene into a rainbow. The
-  object list icons tell the modes apart.
-- Drag and drop in the object list maps visible rows to volume indices while
-  skipping hidden cut connectors, and refreshes the object's row-to-volume map.
+  colors are close shades of one orange because all three mark strong
+  modifiers; the object list icons tell the modes apart.
 - Precise Seam volumes have no filament and cannot be pasted into SLA objects.
   Python plugins see them as `ModelVolumeType` values and through the
   `is_precise_seam*()` methods.
