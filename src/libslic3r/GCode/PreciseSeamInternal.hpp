@@ -1,6 +1,11 @@
 #pragma once
 
 #include "PreciseSeam.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/Polyline.hpp"
+#include <cstddef>
+#include <vector>
 
 namespace Slic3r::PreciseSeam::detail {
 

@@ -2,6 +2,7 @@
 #include "PreciseSeam.hpp"
 #include "PreciseSeamInternal.hpp"
 #include "libslic3r/Polygon.hpp"
+#include "libslic3r/Polyline.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Model.hpp"
 #include "SeamPlacer.hpp"
@@ -15,8 +16,7 @@
 #include <boost/log/trivial.hpp>
 #include <optional>
 #include <cstddef>
-#include <limits>
-#include <iterator>
+#include <string>
 #include <cassert>
 #include <cmath>
 #include <tbb/parallel_for.h>
