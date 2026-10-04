@@ -241,7 +241,7 @@ bool bind_fragment(const Polyline &fragment, const Polygon &perimeter,
     return append_projected_fragment(fragment, perimeter, intervals, failure);
 }
 
-// Rare-case repair, run only after binding has failed: Clipper may round an end cut a few units off
+// Rare-case repair, run only after binding has failed: Clipper may place an end cut a unit or two beside
 // a vertex, so it lies on neither edge. Move such an end onto that vertex, taken from the fragment's own
 // chain, and let the caller retry with the same strict rules, so a wrong move can only fail again.
 // Returns false when nothing was changed.
@@ -431,7 +431,9 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     for (const ExPolygon *region : nearby_regions) {
         Polylines clipped = intersection_pl(prepared.line, *region);
         for (Polyline &fragment : clipped)
-            fragments.push_back(std::move(fragment));
+            // Clipper returns a single point where a border only touches the line: nothing to bind.
+            if (fragment.size() >= 2)
+                fragments.push_back(std::move(fragment));
     }
     for (size_t i = 0; i < fragments.size(); ++i)
         if (!detail::append_fragment(fragments[i], perimeter, intervals, context, i))

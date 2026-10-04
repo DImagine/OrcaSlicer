@@ -20,7 +20,11 @@
 #include <utility>
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/GCode/SeamPlacer.hpp"
+#include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 #include <cstddef>
+#include <string>
+#include <string_view>
 
 using namespace Slic3r;
 
@@ -1246,4 +1250,179 @@ TEST_CASE("Weak zones type painting's oversampled candidates between their bound
     }
     CHECK(oversampled > 0);
     CHECK(cleared_oversampled >= 15); // About 4 mm of 0.2 mm steps inside the zone.
+}
+
+namespace {
+// A 20 x 20 x 2 mm cube sliced at 0.2 mm, so ten layers, each with one outer wall loop.
+struct ExportFixture {
+    Model model;
+    Print print;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    Vec3d cube_min;
+
+    explicit ExportFixture(const std::string &seam_position, int raft_layers = 0)
+    {
+        config.set_deserialize_strict("seam_position", seam_position);
+        config.set_deserialize_strict("seam_slope_type", "none"); // The loop then starts exactly at the seam.
+        config.set_deserialize_strict("layer_height", "0.2");
+        config.set_deserialize_strict("initial_layer_print_height", "0.2");
+        config.set_deserialize_strict("outer_wall_line_width", "0.4");
+        config.set_deserialize_strict("initial_layer_line_width", "0.4");
+        config.set_deserialize_strict("raft_layers", std::to_string(raft_layers));
+        Test::init_print({make_cube(20, 20, 2)}, print, model, config);
+        const ModelVolume *cube = model.objects.front()->volumes.front();
+        cube_min = cube->mesh().transformed_bounding_box(cube->get_matrix()).min;
+    }
+
+    // Places the helper's minimum corner at `min`, relative to the cube's minimum corner.
+    void add(ModelVolumeType type, TriangleMesh mesh, const Vec3d &min, const std::string &name = "helper")
+    {
+        ModelVolume *volume = model.objects.front()->add_volume(std::move(mesh));
+        volume->set_type(type);
+        volume->name = name;
+        const Vec3d current = volume->mesh().transformed_bounding_box(volume->get_matrix()).min;
+        volume->set_offset(volume->get_offset() + cube_min + min - current);
+    }
+
+    std::string export_gcode()
+    {
+        print.apply(model, config);
+        return Test::gcode(print);
+    }
+
+    std::string warning() const
+    {
+        std::string text;
+        for (const auto &warning : print.step_state_with_warnings(psGCodeExport).warnings)
+            text += warning.message;
+        return text;
+    }
+};
+
+struct OuterLoop {
+    Vec2d seam; // Relative to the loop's centre, which is the cube's centre.
+    BoundingBoxf bounds;
+};
+
+std::vector<OuterLoop> outer_wall_loops(const std::string &gcode)
+{
+    std::vector<OuterLoop> loops;
+    bool outer_wall = false;
+    bool in_loop = false;
+    GCodeReader parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("TYPE:") != std::string_view::npos) {
+            outer_wall = comment.find("Outer wall") != std::string_view::npos;
+            in_loop = false;
+        }
+        if (!outer_wall || !line.extruding(self) || line.dist_XY(self) == 0.f)
+            return;
+        if (!in_loop) {
+            loops.push_back({Vec2d(self.x(), self.y()), {}});
+            loops.back().bounds.merge(loops.back().seam);
+            in_loop = true;
+        }
+        loops.back().bounds.merge(Vec2d(line.new_X(self), line.new_Y(self)));
+    });
+    for (OuterLoop &loop : loops)
+        loop.seam -= loop.bounds.center();
+    return loops;
+}
+
+TriangleMesh helper_with_hole()
+{
+    // 8 x 6 x 4 mm with a 4 x 3 mm hole through every layer of the cube.
+    TriangleMesh helper = make_cube(8, 6, 4);
+    TriangleMesh cavity = make_cube(4, 3, 3);
+    cavity.translate(2., 1.5, 0.5);
+    cavity.flip_triangles();
+    helper.merge(cavity);
+    return helper;
+}
+} // namespace
+
+TEST_CASE("Strong modifiers place the exported seam on the side they cross", "[PreciseSeam]")
+{
+    // The helper crosses the front face (y = 0) at x = 4..6 mm. The loop runs counterclockwise, so on
+    // the front face Left is the x = 4 mm edge and Right the x = 6 mm edge.
+    const auto [type, x] = GENERATE(table<ModelVolumeType, double>({
+        {ModelVolumeType::PRECISE_SEAM_CENTER, 5.},
+        {ModelVolumeType::PRECISE_SEAM_LEFT, 4.},
+        {ModelVolumeType::PRECISE_SEAM_RIGHT, 6.}}));
+    const std::string seam_position = GENERATE(as<std::string>{}, "back", "aligned", "nearest");
+    const int raft_layers = GENERATE(0, 2);
+    CAPTURE(seam_position, raft_layers);
+    ExportFixture fixture(seam_position, raft_layers);
+    fixture.add(type, make_cube(2, 6, 4), Vec3d(4, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10); // Raft layers have no outer wall.
+    for (const OuterLoop &loop : loops) {
+        CHECK_THAT(loop.seam.x(), Catch::Matchers::WithinAbs(x - 10., 0.01));
+        CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.min.y() - loop.bounds.center().y(), 0.01));
+    }
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("Weak modifiers move the exported seam into or out of their zone", "[PreciseSeam]")
+{
+    // INVALID adds no helper: a back seam then lies on the rear face (y = 20 mm).
+    const auto type = GENERATE(ModelVolumeType::INVALID, ModelVolumeType::PRECISE_SEAM_ENFORCED,
+                               ModelVolumeType::PRECISE_SEAM_BLOCKED);
+    ExportFixture fixture("back");
+    if (type == ModelVolumeType::PRECISE_SEAM_ENFORCED)
+        fixture.add(type, make_cube(2, 6, 4), Vec3d(4, -3, -1)); // Front face, x = 4..6 mm.
+    if (type == ModelVolumeType::PRECISE_SEAM_BLOCKED)
+        fixture.add(type, make_cube(30, 6, 4), Vec3d(-5, 17, -1)); // Everything from y = 17 mm back.
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    for (const OuterLoop &loop : loops) {
+        CAPTURE(loop.seam.x(), loop.seam.y());
+        if (type == ModelVolumeType::PRECISE_SEAM_ENFORCED) {
+            CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.min.y() - loop.bounds.center().y(), 0.01));
+            CHECK(loop.seam.x() >= -6.01);
+            CHECK(loop.seam.x() <= -3.99);
+        } else if (type == ModelVolumeType::PRECISE_SEAM_BLOCKED)
+            CHECK(loop.seam.y() < 7.);
+        else
+            CHECK(loop.seam.y() > 7.);
+    }
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("A strong modifier with a hole uses the left of two equal crossings", "[PreciseSeam]")
+{
+    // The hole splits the front face crossing into x = 2..4 and x = 8..10 mm. The lengths tie, both
+    // points lie equally far back, so the left one wins.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, helper_with_hole(), Vec3d(2, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    for (const OuterLoop &loop : loops) {
+        CHECK_THAT(loop.seam.x(), Catch::Matchers::WithinAbs(3. - 10., 0.01));
+        CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.min.y() - loop.bounds.center().y(), 0.01));
+    }
+    // The multiple-intersections reason names the type.
+    CHECK(fixture.warning().find("Seam Center") != std::string::npos);
+}
+
+TEST_CASE("The export warning names a modifier that misses the outer wall centreline", "[PreciseSeam]")
+{
+    // The helper reaches 0.1 mm into the cube, short of the centreline 0.2 mm inside a 0.4 mm outer wall.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(2, 3.1, 4), Vec3d(4, -3, -1), "short helper");
+    fixture.export_gcode();
+    CHECK(fixture.warning().find("short helper") != std::string::npos);
+}
+
+TEST_CASE("Full containment warns for Blocked but not for Enforced", "[PreciseSeam]")
+{
+    const auto type = GENERATE(ModelVolumeType::PRECISE_SEAM_ENFORCED, ModelVolumeType::PRECISE_SEAM_BLOCKED);
+    ExportFixture fixture("back");
+    fixture.add(type, make_cube(30, 30, 4), Vec3d(-5, -5, -1));
+    fixture.export_gcode();
+    if (type == ModelVolumeType::PRECISE_SEAM_BLOCKED)
+        CHECK(fixture.warning().find("Seam Blocked") != std::string::npos);
+    else
+        CHECK(fixture.warning().empty());
 }

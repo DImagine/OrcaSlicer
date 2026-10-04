@@ -167,7 +167,9 @@ the nonzero rule. Clipping an open line yields only pieces of the perimeter, so
 a modifier crossing the whole object produces two separate pieces rather than a
 chord through the body. Holes in a modifier and several regions of one modifier
 simply produce more pieces. The line is cut at vertex zero, so a piece crossing
-that vertex arrives as two fragments.
+that vertex arrives as two fragments. A border that only touches the line can
+come back as a single point; such fragments carry no coverage and are dropped
+before binding.
 
 ### Binding fragments to source edges
 
@@ -349,8 +351,8 @@ painting inside its zone.
 
 Coordinates are integers in scaled units: 1 nm by default, and 10 nm when a bed
 larger than 2147 mm switches `SCALING_FACTOR`. Both Precise Seam tolerances are
-deliberately defined in units rather than physical distances. Clipper rounds to
-whole units at any scale, so the on-edge tolerance must follow the unit; the
+deliberately defined in units rather than physical distances. Clipper truncates
+cuts to whole units at any scale, so the on-edge tolerance must follow the unit; the
 snapping radius scales with it to keep its margin over single-precision
 candidate coordinates, which are coarser on large beds. Distances quoted in
 this document in nanometers and
@@ -563,7 +565,10 @@ last modifier would.
   zones over painting's oversampled candidates, the warning type masks, usage
   tracking for the "had no effect" warning, volume sorting of strong and weak
   groups, restoration of strong points after alignment, raft layer indexing and
-  structured slices.
+  structured slices. End-to-end tests slice a real object with Precise Seam
+  volumes and check the outer wall starts in the exported G-code: every strong
+  mode under several seam positions and with a raft, Enforced and Blocked zones,
+  a modifier with a hole, and the user warning.
 - [Seam placer tests](../../tests/fff_print/test_seam_placer.cpp) cover
   enforced-patch selection independent of the contour start, fully painted
   contours, duplicate removal, and `Print::apply()` synchronization through type
@@ -578,5 +583,3 @@ last modifier would.
   metadata combinations that restore a seam mode.
   [Plugin tests](../../tests/slic3rutils/test_precise_seam_plugin.cpp) cover the
   Python bindings.
-- There is no automated end-to-end test through `SeamPlacer::init()` with a
-  modifier that intersects the object.

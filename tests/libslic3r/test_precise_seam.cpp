@@ -501,10 +501,10 @@ TEST_CASE("Recovered fragments are counted beyond the diagnostic limit", "[Preci
 
 TEST_CASE("Real clipping that rounds a cut beside a vertex is recovered on the fragment's own chain", "[PreciseSeam][SegmentExtraction]")
 {
-    // Inputs found by a randomized search against this Clipper: random perimeters clipped as open
+    // Inputs found by a randomized search against Clipper2: random perimeters clipped as open
     // lines against a half-plane whose border passes a few nanometres from a vertex, keeping fragments
     // that fail bind_fragment() but are bound by append_fragment(). Here the border crosses the
-    // perimeter at a vertex, and Clipper rounds the cut to the vertex height but 1-2 nm beside it.
+    // perimeter at a vertex, and Clipper places the cut at the vertex height but 1-2 nm beside it.
     // If a Clipper change stops producing these cuts, the case only warns that it no longer exercises
     // the fallback; the general extraction checks below remain valid and still apply.
     const auto nm = [](coord_t x, coord_t y) { return Point(x, y); };
@@ -516,10 +516,10 @@ TEST_CASE("Real clipping that rounds a cut beside a vertex is recovered on the f
     };
     const Case cases[] = {
         // Cut 1 nm beside its neighbour in the fragment: dropped as a rounded copy of that vertex.
-        {{nm(120701295, -128335579), nm(120586940, -128250619), nm(120582237, -128248720), nm(120594985, -128327864),
-          nm(120504023, -128324788), nm(120782884, -128380054), nm(120729765, -128355229)},
-         {nm(157083968, -426144373), nm(84375562, 169433907), nm(-213413578, 133079704), nm(-140705172, -462498576)},
-         nm(120729764, -128355229), nm(120729765, -128355229)},
+        {{nm(-24603214, 112634156), nm(-24432144, 112478995), nm(-24498846, 112431640), nm(-24506812, 112403974),
+          nm(-24547188, 111960677), nm(-24140867, 112210640)},
+         {nm(-264026532, 293042572), nm(215012909, -68234624), nm(395651507, 171285096), nm(-83387934, 532562293)},
+         nm(-24506811, 112403974), nm(-24506812, 112403974)},
         // Cut 2 nm beside the vertex before its neighbour: replaced by that chain vertex.
         {{nm(42606838, 119780952), nm(42638884, 119963549), nm(42573013, 119810910), nm(42578384, 120014121),
           nm(42272085, 119667500), nm(42436134, 119614299), nm(42534337, 119521867), nm(42780062, 119646533)},
