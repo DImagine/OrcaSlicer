@@ -1618,19 +1618,11 @@ wxBoxSizer *StatusBasePanel::create_monitoring_page()
 
     m_custom_camera_view = WebView::CreateWebView(this, wxEmptyString);
     m_custom_camera_view->EnableContextMenu(false);
-    Bind(wxEVT_WEBVIEW_NAVIGATING, &StatusBasePanel::on_webview_navigating, this, m_custom_camera_view->GetId());
     m_web_media_controller = std::make_unique<WebMediaController>(m_custom_camera_view);
 
     m_media_play_ctrl = new MediaPlayCtrl(this, m_media_ctrl, wxDefaultPosition, wxSize(-1, FromDIP(40)));
     m_media_play_ctrl->SetWebMediaController(m_web_media_controller.get());
     m_custom_camera_view->Hide();
-    // m_custom_camera_view->Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, [this](wxWebViewEvent& evt) {
-    //     if (evt.GetString() == "leavepictureinpicture") {
-    //         // When leaving PiP, video gets paused in some cases and toggling play
-    //         // programmatically does not work.
-    //         m_custom_camera_view->Reload();
-    //     }
-    // });
 
     sizer->Add(m_media_ctrl, 1, wxEXPAND | wxALL, 0);
     sizer->Add(m_custom_camera_view, 1, wxEXPAND | wxALL, 0);
@@ -1641,12 +1633,6 @@ wxBoxSizer *StatusBasePanel::create_monitoring_page()
 //    sizer->Add(media_ctrl_panel, 1, wxEXPAND | wxALL, 1);
 
     return sizer;
-}
-
-void StatusBasePanel::on_webview_navigating(wxWebViewEvent& evt) {
-    wxGetApp().CallAfter([this] {
-        remove_controls();
-    });
 }
 
 wxBoxSizer *StatusBasePanel::create_machine_control_page(wxWindow *parent)
@@ -5119,29 +5105,6 @@ void StatusPanel::on_camera_enter(wxMouseEvent& event)
         m_camera_popup->update(m_media_play_ctrl->IsStreaming());
         m_camera_popup->Popup();
     }
-}
-
-void StatusBasePanel::remove_controls()
-{
-    // Wrapped in a function: WebView::RunScript() runs it at global scope, where a repeated top-level
-    // const would throw.
-    const std::string js_cleanup_video_element = R"(
-        (() => {
-            document.body.style.overflow='hidden';
-            const video = document.querySelector('video');
-            video.setAttribute('style', 'width: 100% !important;');
-            video.removeAttribute('controls');
-            video.addEventListener('leavepictureinpicture', () => {
-                window.wx.postMessage('leavepictureinpicture');
-            });
-            video.addEventListener('enterpictureinpicture', () => {
-                window.wx.postMessage('enterpictureinpicture');
-            });
-        })();
-    )";
-    // Fire and forget: wxWebView::RunScript() spins in wxYield() until the result arrives, which may
-    // never happen here and hangs startup; RunScriptAsync() calls back into a view that may be gone.
-    WebView::RunScript(m_custom_camera_view, js_cleanup_video_element);
 }
 
 void StatusPanel::on_camera_leave(wxMouseEvent& event)
