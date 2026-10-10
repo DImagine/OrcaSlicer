@@ -248,14 +248,15 @@ TEST_CASE("Painted seams run smoothly along a smooth contour", "[SeamPlacer][Reg
     PrintObject &object = fixture.prepare();
     REQUIRE(object.layers().size() == 10);
     // A circle of radius 6 mm touching the painted front face only near its lowest point. Its vertices
-    // rotate by a fraction of a vertex step on every layer, so the candidates differ from layer to layer.
+    // rotate by an irregular fraction of a vertex step on every layer, so the candidates differ between layers.
     const Vec2d center(10.0, 6.2);
     const double radius = 6.0;
     const size_t vertex_count = 120;
     const double vertex_step = 2.0 * PI / double(vertex_count);
+    const double phases[] = {0.0, 0.62, 0.21, 0.87, 0.40, 0.05, 0.73, 0.31, 0.94, 0.18};
     set_loop_on_every_layer(object, [&](size_t layer) {
         std::vector<Vec2d> xy;
-        const double phase = std::fmod(0.37 * double(layer), 1.0) * vertex_step;
+        const double phase = phases[layer] * vertex_step;
         for (size_t i = 0; i < vertex_count; ++i) {
             const double angle = phase + vertex_step * double(i);
             xy.emplace_back(center + radius * Vec2d(std::cos(angle), std::sin(angle)));
@@ -267,18 +268,20 @@ TEST_CASE("Painted seams run smoothly along a smooth contour", "[SeamPlacer][Reg
 
     const Vec2d placed_center = unscale(fixture.points_in_layer(object, {center}).front());
     const std::vector<Vec2d> seams = placed_seams(placer, object);
-    double previous_angle = 0.0;
+    std::vector<double> along; // Seam position along the loop, mm.
     for (size_t i = 0; i < seams.size(); ++i) {
         const Vec2d offset = seams[i] - placed_center;
         const double angle = std::atan2(offset.y(), offset.x());
         CAPTURE(i, seams[i].x(), seams[i].y());
         // The seam stays on the painted arc near the lowest point (about +-15 degrees).
         CHECK_THAT(angle, Catch::Matchers::WithinAbs(-PI / 2.0, 0.3));
-        if (i > 0) {
-            // Movement along the loop between layers: far below the 0.2 mm candidate spacing near paint.
-            CHECK_THAT(radius * (angle - previous_angle), Catch::Matchers::WithinAbs(0.0, 0.02));
-        }
-        previous_angle = angle;
+        along.push_back(radius * angle);
+    }
+    // The seam line may drift slowly with the candidates, but must not kink between layers: the change
+    // of step stays far below the candidate spacing near paint (0.2 mm).
+    for (size_t i = 1; i + 1 < along.size(); ++i) {
+        CAPTURE(i, along[i - 1], along[i], along[i + 1]);
+        CHECK_THAT(along[i + 1] - 2.0 * along[i] + along[i - 1], Catch::Matchers::WithinAbs(0.0, 0.03));
     }
 }
 

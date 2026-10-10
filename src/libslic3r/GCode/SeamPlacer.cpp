@@ -1148,10 +1148,11 @@ bool is_single_enforced_point(const std::vector<SeamCandidate> &points, size_t i
           points[start + next_idx_modulo(index - start, count)].type != EnforcedBlockedSeamPoint::Enforced);
 }
 
-// Closest point to `target` on the run of consecutive Enforced candidates containing `index`, or on the
-// whole loop if every candidate is Enforced. Distances within 1 um count as equal and then the point
-// nearer to the candidate along the run wins, so numerical noise cannot move the seam along the run.
-Vec3f project_to_enforced_run(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target) {
+// Closest point to `target` within the oversampling distance of the run of consecutive Enforced
+// candidates containing `index` (the whole loop if every candidate is Enforced). Distances to the run
+// within 1 um count as equal and then the point nearer to the candidate along the run wins, so
+// numerical noise cannot move the seam along the run.
+Vec3f clamp_to_enforced_run(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target) {
   const Perimeter &perimeter = points[index].perimeter;
   const size_t start = perimeter.start_index;
   const size_t count = perimeter.end_index - start;
@@ -1215,6 +1216,15 @@ Vec3f project_to_enforced_run(const std::vector<SeamCandidate> &points, size_t i
       best = foot;
     }
   });
+  // The run ends at a candidate, so its ends move in sampling steps between layers. Clamping only to
+  // within that step of the run keeps the seam on the smooth target near the ends.
+  const float slack = SeamPlacer::enforcer_oversampling_distance;
+  const Vec2f off_run = p - best;
+  const float off_distance = off_run.norm();
+  if (off_distance > slack)
+    best += off_run * (slack / off_distance);
+  else
+    best = p;
   return to_3d(best, points[index].position.z());
 }
 
@@ -1616,7 +1626,7 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
           const float corner = std::abs(candidate.local_ccw_angle) >= enforced_corner_angle_max ?
               1.0f : enforced_corner_influence(points, pair.second, protect, enforced_corner_fade_factor * protect);
           t = std::max(t, 0.4f * corner);
-          final_position = project_to_enforced_run(points, pair.second,
+          final_position = clamp_to_enforced_run(points, pair.second,
                                                    t * current_pos + (1.0f - t) * to_3d(fitted_pos, current_pos.z()));
         }
 
