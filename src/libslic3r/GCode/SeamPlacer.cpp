@@ -1139,93 +1139,80 @@ float enforced_corner_influence(const std::vector<SeamCandidate> &points, size_t
   return influence;
 }
 
-bool is_single_enforced_point(const std::vector<SeamCandidate> &points, size_t index) {
+// Point of the loop at a signed arc length from the candidate at `index` (forward follows the index order).
+// The walk is bounded by one turn of the loop.
+Vec2f point_along_loop(const std::vector<SeamCandidate> &points, size_t index, float arc) {
   const Perimeter &perimeter = points[index].perimeter;
   const size_t start = perimeter.start_index;
   const size_t count = perimeter.end_index - start;
-  return count == 1 ||
-         (points[start + prev_idx_modulo(index - start, count)].type != EnforcedBlockedSeamPoint::Enforced &&
-          points[start + next_idx_modulo(index - start, count)].type != EnforcedBlockedSeamPoint::Enforced);
+  const bool forward = arc >= 0.0f;
+  float rest = std::abs(arc);
+  size_t i = index;
+  for (size_t visited = 0; visited < count; ++visited) {
+    const size_t j = start + (forward ? next_idx_modulo(i - start, count) : prev_idx_modulo(i - start, count));
+    const Vec2f a = points[i].position.head<2>();
+    const Vec2f ab = points[j].position.head<2>() - a;
+    const float length = ab.norm();
+    if (rest <= length)
+      return length > 0.0f ? Vec2f(a + ab * (rest / length)) : a;
+    rest -= length;
+    i = j;
+  }
+  return points[i].position.head<2>();
 }
 
-// Closest point to `target` within the oversampling distance of the run of consecutive Enforced
-// candidates containing `index` (the whole loop if every candidate is Enforced). Distances to the run
-// within 1 um count as equal and then the point nearer to the candidate along the run wins, so
-// numerical noise cannot move the seam along the run.
-Vec3f clamp_to_enforced_run(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target) {
+// Seam position on the loop for a blended `target` near the candidate at `index`: the candidate moved
+// along the loop by the target's offset along the loop direction at the candidate, limited to the run of
+// consecutive Enforced candidates containing it, extended past each open end by the oversampling
+// distance unless a Blocked candidate comes first. Moving along the loop rather than taking the closest
+// point keeps an off-loop target from snapping to polygon vertices, and the extension keeps a target near
+// a run end from copying that end's sampling steps between layers.
+Vec3f move_along_enforced_run(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target) {
   const Perimeter &perimeter = points[index].perimeter;
   const size_t start = perimeter.start_index;
   const size_t count = perimeter.end_index - start;
+  if (count < 2)
+    return points[index].position;
   const auto next = [&](size_t i) { return start + next_idx_modulo(i - start, count); };
   const auto prev = [&](size_t i) { return start + prev_idx_modulo(i - start, count); };
-  const auto enforced = [&](size_t i) { return points[i].type == EnforcedBlockedSeamPoint::Enforced; };
+  const auto xy = [&](size_t i) { return Vec2f(points[i].position.head<2>()); };
 
-  size_t first = index;
-  size_t run_size = 1;
-  while (run_size < count && enforced(prev(first))) {
-    first = prev(first);
-    ++run_size;
-  }
-  for (size_t last = index; run_size < count && enforced(next(last)); last = next(last))
-    ++run_size;
-  const bool closed = run_size == count;
-  if (closed)
-    first = start;
-  const size_t edge_count = closed ? count : run_size - 1;
-  if (edge_count == 0)
+  // The loop direction is the chord between the loop points at the target's distance on both sides: on a
+  // curved loop it stays parallel to the tangent wherever the vertices are, so the target's offset across
+  // the loop, which can reach millimeters where the loop size changes quickly between layers, does not
+  // leak into its offset along the loop.
+  const Vec2f to_target = target.head<2>() - xy(index);
+  const float reach = std::max(to_target.norm(), SeamPlacer::enforcer_oversampling_distance);
+  const Vec2f direction = point_along_loop(points, index, reach) - point_along_loop(points, index, -reach);
+  if (direction.squaredNorm() <= 0.0f)
     return points[index].position;
+  float offset = to_target.dot(direction.normalized());
 
-  const Vec2f p = target.head<2>();
-  // Visits the run edges in order from `first`: the edge start, the closest point on the edge, its distance,
-  // the arc position of the edge start and of the closest point.
-  const auto for_each_edge = [&](auto &&visit) {
+  // Reachable arc length from the candidate in one direction: to the run end, then up to the extension.
+  const auto limit = [&](bool forward) {
+    const auto step = [&](size_t i) { return forward ? next(i) : prev(i); };
     float arc = 0.0f;
-    for (size_t e = 0, i = first; e < edge_count; ++e, i = next(i)) {
-      const Vec2f a = points[i].position.head<2>();
-      const Vec2f ab = points[next(i)].position.head<2>() - a;
-      const float length = ab.norm();
-      const float u = length > 0.0f ? std::clamp((p - a).dot(ab) / (length * length), 0.0f, 1.0f) : 0.0f;
-      const Vec2f foot = a + u * ab;
-      visit(i, foot, (foot - p).norm(), arc, arc + u * length);
-      arc += length;
+    size_t i = index;
+    size_t visited = 1;
+    while (visited < count && points[step(i)].type == EnforcedBlockedSeamPoint::Enforced) {
+      arc += (xy(step(i)) - xy(i)).norm();
+      i = step(i);
+      ++visited;
+    }
+    if (visited == count)
+      return std::numeric_limits<float>::max(); // The whole loop is Enforced.
+    for (float rest = SeamPlacer::enforcer_oversampling_distance; rest > 0.0f && visited < count; ++visited) {
+      if (points[step(i)].type == EnforcedBlockedSeamPoint::Blocked)
+        break;
+      const float length = (xy(step(i)) - xy(i)).norm();
+      arc += std::min(length, rest);
+      rest -= length;
+      i = step(i);
     }
     return arc;
   };
-
-  float min_distance = std::numeric_limits<float>::max();
-  float candidate_arc = -1.0f;
-  const float total_arc = for_each_edge([&](size_t i, const Vec2f &, float distance, float edge_arc, float) {
-    min_distance = std::min(min_distance, distance);
-    if (i == index)
-      candidate_arc = edge_arc;
-  });
-  if (candidate_arc < 0.0f)
-    candidate_arc = total_arc; // The candidate ends an open run.
-
-  constexpr float equal_distance = 0.001f;
-  Vec2f best = points[index].position.head<2>();
-  float best_offset = std::numeric_limits<float>::max();
-  for_each_edge([&](size_t, const Vec2f &foot, float distance, float, float arc) {
-    if (distance > min_distance + equal_distance)
-      return;
-    float offset = std::abs(arc - candidate_arc);
-    if (closed)
-      offset = std::min(offset, total_arc - offset);
-    if (offset < best_offset) {
-      best_offset = offset;
-      best = foot;
-    }
-  });
-  // The run ends at a candidate, so its ends move in sampling steps between layers. Clamping only to
-  // within that step of the run keeps the seam on the smooth target near the ends.
-  const float slack = SeamPlacer::enforcer_oversampling_distance;
-  const Vec2f off_run = p - best;
-  const float off_distance = off_run.norm();
-  if (off_distance > slack)
-    best += off_run * (slack / off_distance);
-  else
-    best = p;
-  return to_3d(best, points[index].position.z());
+  offset = std::clamp(offset, -limit(false), limit(true));
+  return to_3d(point_along_loop(points, index, offset), points[index].position.z());
 }
 
 } // namespace SeamPlacerImpl
@@ -1616,7 +1603,7 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
         Vec3f final_position;
         if (candidate.type != EnforcedBlockedSeamPoint::Enforced) {
           final_position = t * current_pos + (1.0f - t) * to_3d(fitted_pos, current_pos.z());
-        } else if (t >= 1.0f || is_single_enforced_point(points, pair.second)) {
+        } else if (t >= 1.0f) {
           final_position = current_pos;
         } else {
           // Keep the 0.4 pull toward the candidate near a measured corner only, then keep the seam on the paint.
@@ -1626,8 +1613,8 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
           const float corner = std::abs(candidate.local_ccw_angle) >= enforced_corner_angle_max ?
               1.0f : enforced_corner_influence(points, pair.second, protect, enforced_corner_fade_factor * protect);
           t = std::max(t, 0.4f * corner);
-          final_position = clamp_to_enforced_run(points, pair.second,
-                                                   t * current_pos + (1.0f - t) * to_3d(fitted_pos, current_pos.z()));
+          final_position = move_along_enforced_run(points, pair.second,
+                                                    t * current_pos + (1.0f - t) * to_3d(fitted_pos, current_pos.z()));
         }
 
         Perimeter &perimeter = layers[pair.first].points[pair.second].perimeter;
