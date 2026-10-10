@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <string>
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -35,9 +37,9 @@ struct PipelineFixture {
     Print print;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
 
-    explicit PipelineFixture(bool trapezoid = false)
+    explicit PipelineFixture(bool trapezoid = false, float height = 0.4f)
     {
-        auto mesh = its_make_cube(20, 20, 0.4);
+        auto mesh = its_make_cube(20, 20, height);
         if (trapezoid) {
             // Opposite painted sides have deliberately different lengths: 20 mm and 6 mm.
             for (auto &vertex : mesh.vertices)
@@ -131,6 +133,31 @@ LayerRegion &clear_first_layer(PrintObject &object)
     for (LayerRegion *region : layer.regions()) region->perimeters.clear();
     return *layer.get_region(0);
 }
+
+// Replaces the perimeters of every layer with one external loop through outline(layer index).
+template<typename Outline> void set_loop_on_every_layer(PrintObject &object, Outline &&outline)
+{
+    for (size_t i = 0; i < object.layers().size(); ++i) {
+        Layer &layer = *object.layers()[i];
+        for (LayerRegion *region : layer.regions()) region->perimeters.clear();
+        append_loop(*layer.get_region(0), outline(i));
+    }
+}
+
+// Start of each layer's loop after the seam is placed, in unscaled XY.
+std::vector<Vec2d> placed_seams(const SeamPlacer &placer, const PrintObject &object)
+{
+    std::vector<Vec2d> starts;
+    for (const Layer *layer : object.layers()) {
+        const auto *loop = dynamic_cast<const ExtrusionLoop *>(layer->get_region(0)->perimeters.entities.front());
+        REQUIRE(loop != nullptr);
+        ExtrusionLoop copy = *loop;
+        float overhang = 0.0f;
+        placer.place_seam(layer, copy, Point(0, 0), overhang);
+        starts.push_back(unscale(copy.first_point()));
+    }
+    return starts;
+}
 } // namespace
 
 TEST_CASE("Painted seams prefer the longer candidate patch regardless of contour origin", "[SeamPlacer][Regression]")
@@ -210,6 +237,73 @@ TEST_CASE("Entirely painted contours keep valid enforced seam candidates", "[Sea
     for (const auto &candidate : data.points) {
         CHECK(candidate.type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Enforced);
         CHECK_FALSE(candidate.central_enforcer); // There is no bounded patch to mark as central.
+    }
+}
+
+TEST_CASE("Painted seams run smoothly along a smooth contour", "[SeamPlacer][Regression]")
+{
+    // 10 layers of 0.2 mm: enough for the seams to be aligned as one string.
+    PipelineFixture fixture(false, 2.0f);
+    fixture.paint(false);
+    PrintObject &object = fixture.prepare();
+    REQUIRE(object.layers().size() == 10);
+    // A circle of radius 6 mm touching the painted front face only near its lowest point. Its vertices
+    // rotate by a fraction of a vertex step on every layer, so the candidates differ from layer to layer.
+    const Vec2d center(10.0, 6.2);
+    const double radius = 6.0;
+    const size_t vertex_count = 120;
+    const double vertex_step = 2.0 * PI / double(vertex_count);
+    set_loop_on_every_layer(object, [&](size_t layer) {
+        std::vector<Vec2d> xy;
+        const double phase = std::fmod(0.37 * double(layer), 1.0) * vertex_step;
+        for (size_t i = 0; i < vertex_count; ++i) {
+            const double angle = phase + vertex_step * double(i);
+            xy.emplace_back(center + radius * Vec2d(std::cos(angle), std::sin(angle)));
+        }
+        return fixture.points_in_layer(object, xy);
+    });
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+
+    const Vec2d placed_center = unscale(fixture.points_in_layer(object, {center}).front());
+    const std::vector<Vec2d> seams = placed_seams(placer, object);
+    double previous_angle = 0.0;
+    for (size_t i = 0; i < seams.size(); ++i) {
+        const Vec2d offset = seams[i] - placed_center;
+        const double angle = std::atan2(offset.y(), offset.x());
+        CAPTURE(i, seams[i].x(), seams[i].y());
+        // The seam stays on the painted arc near the lowest point (about +-15 degrees).
+        CHECK_THAT(angle, Catch::Matchers::WithinAbs(-PI / 2.0, 0.3));
+        if (i > 0) {
+            // Movement along the loop between layers: far below the 0.2 mm candidate spacing near paint.
+            CHECK_THAT(radius * (angle - previous_angle), Catch::Matchers::WithinAbs(0.0, 0.02));
+        }
+        previous_angle = angle;
+    }
+}
+
+TEST_CASE("Painted seams stay at a corner of the painted side", "[SeamPlacer]")
+{
+    const std::string mode = GENERATE("back", "aligned");
+    CAPTURE(mode);
+    PipelineFixture fixture(false, 2.0f);
+    fixture.config.set_deserialize_strict("seam_position", mode);
+    fixture.paint(false);
+    PrintObject &object = fixture.prepare();
+    const std::vector<Vec2d> square = {{0, 0}, {20, 0}, {20, 20}, {0, 20}};
+    set_loop_on_every_layer(object, [&](size_t) { return fixture.points_in_layer(object, square); });
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+
+    const Points corners = fixture.points_in_layer(object, square);
+    for (const Vec2d &seam : placed_seams(placer, object)) {
+        double nearest = std::numeric_limits<double>::max();
+        for (const Point &corner : corners)
+            nearest = std::min(nearest, (unscale(corner) - seam).norm());
+        CAPTURE(seam.x(), seam.y());
+        // Painted sides are y = 0 and y = 20; candidates of the side walls are painted up to the 0.4 mm
+        // line width from them, so the seam lies on a painted corner or within that width of it.
+        CHECK(nearest <= 0.45);
     }
 }
 
