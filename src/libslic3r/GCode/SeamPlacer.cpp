@@ -1139,35 +1139,21 @@ float enforced_corner_influence(const std::vector<SeamCandidate> &points, size_t
   return influence;
 }
 
-// Point of the loop at a signed arc length from the candidate at `index` (forward follows the index order).
-// The walk is bounded by one turn of the loop.
-Vec2f point_along_loop(const std::vector<SeamCandidate> &points, size_t index, float arc) {
-  const Perimeter &perimeter = points[index].perimeter;
-  const size_t start = perimeter.start_index;
-  const size_t count = perimeter.end_index - start;
-  const bool forward = arc >= 0.0f;
-  float rest = std::abs(arc);
-  size_t i = index;
-  for (size_t visited = 0; visited < count; ++visited) {
-    const size_t j = start + (forward ? next_idx_modulo(i - start, count) : prev_idx_modulo(i - start, count));
-    const Vec2f a = points[i].position.head<2>();
-    const Vec2f ab = points[j].position.head<2>() - a;
-    const float length = ab.norm();
-    if (rest <= length)
-      return length > 0.0f ? Vec2f(a + ab * (rest / length)) : a;
-    rest -= length;
-    i = j;
-  }
-  return points[i].position.head<2>();
+// Unit normal of the edge from a to b, zero for a zero-length edge.
+Vec2d edge_normal(const Vec2d &a, const Vec2d &b) {
+  const Vec2d d = b - a;
+  const double length = d.norm();
+  return length > 0.0 ? Vec2d(-d.y() / length, d.x() / length) : Vec2d::Zero();
 }
 
-// Seam position on the loop for a blended `target` near the candidate at `index`: the candidate moved
-// along the loop by the target's offset along the loop direction at the candidate, limited to the run of
-// consecutive Enforced candidates containing it, extended past each open end by the oversampling
-// distance unless a Blocked candidate comes first. Moving along the loop rather than taking the closest
-// point keeps an off-loop target from snapping to polygon vertices, and the extension keeps a target near
-// a run end from copying that end's sampling steps between layers.
-Vec3f move_along_enforced_run(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target) {
+// Seam position on the loop for a `target` near the candidate at `index`: the loop point closest to the
+// candidate along the loop whose normal passes through the target. Normals blend linearly along each edge
+// between vertex normals, so an off-loop target maps continuously onto the loop instead of snapping to
+// vertices as its closest loop point does. The search stays within the allowed arc on each side: the run
+// of Enforced candidates extended by the oversampling distance for an Enforced candidate, the run of
+// candidates that are not Blocked otherwise, and in both cases at most twice the target distance (plus
+// the oversampling distance) away. Without a solution there, the closer end of that arc wins.
+Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target) {
   const Perimeter &perimeter = points[index].perimeter;
   const size_t start = perimeter.start_index;
   const size_t count = perimeter.end_index - start;
@@ -1175,44 +1161,103 @@ Vec3f move_along_enforced_run(const std::vector<SeamCandidate> &points, size_t i
     return points[index].position;
   const auto next = [&](size_t i) { return start + next_idx_modulo(i - start, count); };
   const auto prev = [&](size_t i) { return start + prev_idx_modulo(i - start, count); };
-  const auto xy = [&](size_t i) { return Vec2f(points[i].position.head<2>()); };
+  const auto xy = [&](size_t i) { return Vec2d(points[i].position.head<2>().cast<double>()); };
+  const auto vertex_normal = [&](size_t i) {
+    const Vec2d sum = edge_normal(xy(prev(i)), xy(i)) + edge_normal(xy(i), xy(next(i)));
+    return sum.squaredNorm() > 0.0 ? Vec2d(sum.normalized()) : Vec2d::Zero();
+  };
+  const auto cross = [](const Vec2d &a, const Vec2d &b) { return a.x() * b.y() - a.y() * b.x(); };
 
-  // The loop direction is the chord between the loop points at the target's distance on both sides: on a
-  // curved loop it stays parallel to the tangent wherever the vertices are, so the target's offset across
-  // the loop, which can reach millimeters where the loop size changes quickly between layers, does not
-  // leak into its offset along the loop.
-  const Vec2f to_target = target.head<2>() - xy(index);
-  const float reach = std::max(to_target.norm(), SeamPlacer::enforcer_oversampling_distance);
-  const Vec2f direction = point_along_loop(points, index, reach) - point_along_loop(points, index, -reach);
-  if (direction.squaredNorm() <= 0.0f)
-    return points[index].position;
-  float offset = to_target.dot(direction.normalized());
+  const Vec2d p = target.head<2>().cast<double>();
+  const bool enforced = points[index].type == EnforcedBlockedSeamPoint::Enforced;
+  const bool blocked = points[index].type == EnforcedBlockedSeamPoint::Blocked;
+  const double window = 2.0 * (p - xy(index)).norm() + SeamPlacer::enforcer_oversampling_distance;
 
-  // Reachable arc length from the candidate in one direction: to the run end, then up to the extension.
-  const auto limit = [&](bool forward) {
-    const auto step = [&](size_t i) { return forward ? next(i) : prev(i); };
-    float arc = 0.0f;
+  // Walks away from the candidate in one direction. Returns the arc length to the first solution, or to
+  // the end of the allowed arc if there is none; `point` receives the corresponding loop point.
+  const auto search = [&](bool forward, Vec2d &point, bool &found) {
+    found = false;
+    double arc = 0.0;
+    double extension = enforced ? SeamPlacer::enforcer_oversampling_distance : 0.0;
+    bool in_run = true;
     size_t i = index;
-    size_t visited = 1;
-    while (visited < count && points[step(i)].type == EnforcedBlockedSeamPoint::Enforced) {
-      arc += (xy(step(i)) - xy(i)).norm();
-      i = step(i);
-      ++visited;
-    }
-    if (visited == count)
-      return std::numeric_limits<float>::max(); // The whole loop is Enforced.
-    for (float rest = SeamPlacer::enforcer_oversampling_distance; rest > 0.0f && visited < count; ++visited) {
-      if (points[step(i)].type == EnforcedBlockedSeamPoint::Blocked)
+    point = xy(index);
+    for (size_t visited = 1; visited < count; ++visited) {
+      const size_t j = forward ? next(i) : prev(i);
+      const EnforcedBlockedSeamPoint type = points[j].type;
+      if (in_run && (enforced ? type != EnforcedBlockedSeamPoint::Enforced :
+                                !blocked && type == EnforcedBlockedSeamPoint::Blocked))
+        in_run = false;
+      if (!in_run && (!enforced || type == EnforcedBlockedSeamPoint::Blocked))
+        break; // Only an Enforced run is extended, and never into a Blocked candidate.
+      const double length = (xy(j) - xy(i)).norm();
+      double reach = std::min(length, window - arc);
+      if (!in_run) {
+        reach = std::min(reach, extension);
+        extension -= reach;
+      }
+      if (reach <= 0.0)
         break;
-      const float length = (xy(step(i)) - xy(i)).norm();
-      arc += std::min(length, rest);
-      rest -= length;
-      i = step(i);
+      // Solve cross(p - P(u), N(u)) = 0 on the edge in index order, P and N linear in u.
+      const size_t a = forward ? i : j;
+      const size_t b = forward ? j : i;
+      const Vec2d g = p - xy(a);
+      const Vec2d d = xy(b) - xy(a);
+      Vec2d na = vertex_normal(a);
+      Vec2d nb = vertex_normal(b);
+      if (na.squaredNorm() == 0.0 || nb.squaredNorm() == 0.0)
+        na = nb = edge_normal(xy(a), xy(b));
+      const Vec2d m = nb - na;
+      const double c0 = cross(g, na);
+      const double c1 = cross(g, m) - cross(d, na);
+      const double c2 = -cross(d, m);
+      // Reachable part of the edge in its own parameter, measured from the side of the candidate.
+      const double reach_u = length > 0.0 ? reach / length : 1.0;
+      const double lo = forward ? 0.0 : 1.0 - reach_u;
+      const double hi = forward ? reach_u : 1.0;
+      double best_u = std::numeric_limits<double>::quiet_NaN();
+      const auto consider = [&](double u) {
+        if (u < lo || u > hi)
+          return;
+        if (std::isnan(best_u) || (forward ? u < best_u : u > best_u))
+          best_u = u;
+      };
+      constexpr double eps = 1e-12;
+      if (std::abs(c2) < eps) {
+        if (std::abs(c1) > eps)
+          consider(-c0 / c1);
+      } else {
+        const double discriminant = c1 * c1 - 4.0 * c2 * c0;
+        if (discriminant >= 0.0) {
+          const double root = std::sqrt(discriminant);
+          consider((-c1 - root) / (2.0 * c2));
+          consider((-c1 + root) / (2.0 * c2));
+        }
+      }
+      if (!std::isnan(best_u)) {
+        point = xy(a) + best_u * d;
+        found = true;
+        return arc + (forward ? best_u : 1.0 - best_u) * length;
+      }
+      arc += reach;
+      point = forward ? Vec2d(xy(a) + hi * d) : Vec2d(xy(a) + lo * d);
+      if (reach < length)
+        break;
+      i = j;
     }
     return arc;
   };
-  offset = std::clamp(offset, -limit(false), limit(true));
-  return to_3d(point_along_loop(points, index, offset), points[index].position.z());
+
+  Vec2d ahead, behind;
+  bool found_ahead, found_behind;
+  const double arc_ahead = search(true, ahead, found_ahead);
+  const double arc_behind = search(false, behind, found_behind);
+  Vec2d result;
+  if (found_ahead || found_behind)
+    result = !found_behind || (found_ahead && arc_ahead <= arc_behind) ? ahead : behind;
+  else
+    result = (ahead - p).squaredNorm() <= (behind - p).squaredNorm() ? ahead : behind;
+  return to_3d(Vec2f(result.cast<float>()), points[index].position.z());
 }
 
 } // namespace SeamPlacerImpl
@@ -1601,7 +1646,8 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
         //interpolate between current and fitted position, prefer current pos for large weights.
         Vec3f final_position;
         if (candidate.type != EnforcedBlockedSeamPoint::Enforced) {
-          final_position = t * current_pos + (1.0f - t) * to_3d(fitted_pos, current_pos.z());
+          final_position = t >= 1.0f ? current_pos :
+              place_on_loop(points, pair.second, t * current_pos + (1.0f - t) * to_3d(fitted_pos, current_pos.z()));
         } else if (t >= 1.0f) {
           final_position = current_pos;
         } else {
@@ -1612,8 +1658,8 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
           const float corner = std::abs(candidate.local_ccw_angle) >= enforced_corner_angle_max ?
               1.0f : enforced_corner_influence(points, pair.second, protect, enforced_corner_fade_factor * protect);
           t = std::max(t, 0.4f * corner);
-          final_position = move_along_enforced_run(points, pair.second,
-                                                    t * current_pos + (1.0f - t) * to_3d(fitted_pos, current_pos.z()));
+          final_position = place_on_loop(points, pair.second,
+                                         t * current_pos + (1.0f - t) * to_3d(fitted_pos, current_pos.z()));
         }
 
         Perimeter &perimeter = layers[pair.first].points[pair.second].perimeter;
