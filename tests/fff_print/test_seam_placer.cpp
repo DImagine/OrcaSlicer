@@ -385,6 +385,83 @@ TEST_CASE("Painted seams stay at a corner of the painted side", "[SeamPlacer]")
     }
 }
 
+namespace {
+// Paints the front face (lowest y) of the fixture's box only.
+void paint_front_face(PipelineFixture &fixture)
+{
+    auto &volume = *fixture.model.objects.front()->volumes.front();
+    const auto &mesh = volume.mesh();
+    const double front = mesh.bounding_box().min.y();
+    TriangleSelector selector(mesh);
+    for (size_t i = 0; i < mesh.its.indices.size(); ++i) {
+        bool on_front = true;
+        for (int j = 0; j < 3; ++j)
+            on_front = on_front && std::abs(double(mesh.its.vertices[mesh.its.indices[i][j]].y()) - front) < 1e-6;
+        if (on_front)
+            selector.set_facet(int(i), EnforcerBlockerType::ENFORCER);
+    }
+    volume.seam_facets.set(selector);
+    fixture.print.apply(fixture.model, fixture.config);
+}
+} // namespace
+
+TEST_CASE("Painted ranges end exactly where the paint contour crosses the layer", "[SeamPlacer][Regression]")
+{
+    // The front face spans x 0..20; the loop runs 0.2 mm in front of it from x = -5 to 25. Points within the
+    // 0.4 mm line width of the paint used to be Enforced up to about 0.35 mm past the face, and only from the
+    // vertex before the face, so the middle candidate was off the middle of the face.
+    PipelineFixture fixture;
+    paint_front_face(fixture);
+    PrintObject &object = fixture.prepare();
+    auto &region = clear_first_layer(object);
+    append_loop(region, fixture.points_in_layer(object, {{-5, 0.2}, {-0.3, 0.2}, {25, 0.2}, {25, 10}, {-5, 10}}));
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+    const auto &data = placer.m_seam_per_object.at(&object).layers.front();
+    REQUIRE(data.perimeters.size() == 1);
+    CHECK(data.perimeters.front().exact_enforced_ends);
+
+    const auto face = fixture.points_in_layer(object, {{0, 0.2}, {20, 0.2}, {10, 0.2}});
+    double first = std::numeric_limits<double>::max(), last = std::numeric_limits<double>::lowest();
+    size_t centers = 0;
+    for (const auto &candidate : data.points) {
+        if (candidate.type != SeamType::Enforced)
+            continue;
+        first = std::min(first, double(candidate.position.x()));
+        last = std::max(last, double(candidate.position.x()));
+        if (candidate.central_enforcer) {
+            ++centers;
+            CHECK((candidate.position.head<2>().cast<double>() - unscale(face[2])).norm() < 1e-3);
+        }
+    }
+    CHECK_THAT(first, Catch::Matchers::WithinAbs(unscale<double>(face[0].x()), 1e-3));
+    CHECK_THAT(last, Catch::Matchers::WithinAbs(unscale<double>(face[1].x()), 1e-3));
+    CHECK(centers == 1);
+}
+
+TEST_CASE("Aligned painted seams follow the middle of the painted band", "[SeamPlacer][Regression]")
+{
+    // 10 layers with the loop of the previous test; the vertex before the face moves on every layer, which
+    // used to move the middle candidate and with it the seam.
+    PipelineFixture fixture(false, 2.0f);
+    fixture.config.set_deserialize_strict("seam_position", "aligned");
+    paint_front_face(fixture);
+    PrintObject &object = fixture.prepare();
+    REQUIRE(object.layers().size() == 10);
+    set_loop_on_every_layer(object, [&](size_t layer) {
+        const double before = -0.05 - 0.04 * double(layer);
+        return fixture.points_in_layer(object, {{-5, 0.2}, {before, 0.2}, {25, 0.2}, {25, 10}, {-5, 10}});
+    });
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+
+    const Vec2d middle = unscale(fixture.points_in_layer(object, {{10, 0.2}}).front());
+    for (const Vec2d &seam : placed_seams(placer, object)) {
+        CAPTURE(seam.x(), seam.y());
+        CHECK((seam - middle).norm() < 1e-3);
+    }
+}
+
 TEST_CASE("Seams placed on a regular polygon with an even vertex count lie on the ray from its center", "[SeamPlacer]")
 {
     const Vec2d center(3.0, -2.0);
@@ -459,8 +536,9 @@ TEST_CASE("Seams placed on the loop stay in the allowed arc", "[SeamPlacer]")
     const Vec2d target = xy[16];
     const Vec2d run_end = xy[13];
     const Vec2d past_end = run_end + 0.2 * (xy[14] - run_end).normalized();
-    const auto placed = [&](const std::vector<SeamType> &types) {
+    const auto placed = [&](const std::vector<SeamType> &types, bool exact_ends = false) {
         SeamPlacerImpl::Perimeter perimeter;
+        perimeter.exact_enforced_ends = exact_ends;
         const auto points = loop_candidates(perimeter, xy, types);
         return placed_xy(points, 12, target);
     };
@@ -468,6 +546,8 @@ TEST_CASE("Seams placed on the loop stay in the allowed arc", "[SeamPlacer]")
     // Enforced run 10..13: the seam may go 0.2 mm past its end, but not into a Blocked candidate.
     std::fill(types.begin() + 10, types.begin() + 14, SeamType::Enforced);
     CHECK((placed(types) - past_end).norm() < 1e-5);
+    // A run ending exactly at the paint is not extended.
+    CHECK((placed(types, true) - run_end).norm() < 1e-5);
     types[14] = SeamType::Blocked;
     CHECK((placed(types) - run_end).norm() < 1e-5);
     // A candidate that is not Enforced stays between the Blocked candidates around it.

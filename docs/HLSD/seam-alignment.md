@@ -3,9 +3,11 @@
 ## Purpose and scope
 
 The seam placer joins the seams of neighboring layers into strings and smooths each string with
-a fitted curve. This document covers two parts of `SeamPlacer` that decide whether the seam line
+a fitted curve. This document covers the parts of `SeamPlacer` that decide whether the seam line
 runs evenly on a smooth surface:
 
+- where the painted (Enforced) candidates of a loop begin and end, and which one is central
+  (`process_perimeter_polygon`);
 - how a string is collected (`find_seam_string`);
 - how the final seam position of a string member is derived from the curve (last step of
   `align_seam_points`), including how a painted (Enforced) seam keeps to painted corners.
@@ -18,8 +20,8 @@ candidate as the seam.
 ## Concepts
 
 - **Candidate (C).** The seam candidate chosen for a perimeter in a string. Candidates are the
-  polygon vertices plus points inserted every 0.2 mm along edges near paint, so the chosen
-  candidate moves in discrete steps from layer to layer.
+  polygon vertices plus points inserted near paint (see Painted ranges), so the chosen candidate
+  can move in discrete steps from layer to layer.
 - **Fitted point (F).** The value of the string's fitted curve at the layer height. It need not
   lie on the loop: where the loop size changes quickly between layers, as near the bottom of a
   sphere, it lies up to a few millimeters off it.
@@ -28,8 +30,36 @@ candidate as the seam.
 - **Blend.** `target = t·C + (1 − t)·F`. The angle weight `t = min(1, (|angle C| / 55°)^3)` pulls
   the seam onto sharp corners; at 55° and above the seam is the candidate itself.
 - **Enforced run.** The maximal sequence of consecutive Enforced candidates of the perimeter that
-  contains C, or the whole loop when every candidate is Enforced. It approximates the painted
-  area along the loop with the candidate spacing.
+  contains C, or the whole loop when every candidate is Enforced. With exact painted ranges it
+  covers a range exactly; otherwise it approximates the painted area with the candidate spacing.
+
+## Painted ranges
+
+The paint is a set of small triangles on the model surface. Its **contour** is the set of their
+edges that belong to one painted triangle only, taken from the painted triangles with their T-joints
+split (`get_facets_strict`), so that edges inside the painted area pair up. Each contour edge keeps
+the direction from it into the paint. The contour is built once per object and stored in an AABB
+tree.
+
+On a layer, the contour edges crossing the slicing plane give the exact ends of the painted band.
+Each crossing within the line width of the loop is moved to its closest loop point; the direction
+into the paint, against the loop direction there (the mean of both edges at a vertex), tells whether
+paint lies ahead or behind. Along the loop, ends where paint begins and ends must alternate; each
+pair bounds a **painted range**. Such a loop has **exact ends**:
+
+- a vertex is Enforced if it lies in a range (within 1 µm);
+- points are inserted at the range ends, at the range middle and every 0.2 mm from the range begin,
+  and one in the middle of each gap between ranges, so that ranges with no vertex between them stay
+  separate patches;
+- the central candidate of the longest patch is the middle of its range, unless the patch has a
+  sharp corner, which keeps priority as before.
+
+Otherwise, which includes paint not crossing the layer (a dot between layers, the top and bottom of
+a band, a fully painted closed surface), ends that do not alternate and a contour running along the
+loop, a point is Enforced if paint lies within the line width of it, and edges near paint get points
+every 0.2 mm from their start vertex. Such a run reaches past the paint by up to the line width,
+depending on the vertices, and its central candidate is the middle one by count; on a smooth band
+both shift the seam off the middle of the paint.
 
 ## Seam strings
 
@@ -102,7 +132,8 @@ Properties:
 
 ### Allowed arc
 
-- For an Enforced C: the Enforced run, extended past each open end by the oversampling distance
+- For an Enforced C on a loop with exact ends: the Enforced run itself, which ends at the paint.
+- For another Enforced C: the Enforced run, extended past each open end by the oversampling distance
   (0.2 mm) but never into a Blocked candidate. The run ends sit on candidates and move in sampling
   steps between layers, and Rear tends to choose the candidate right at an end; without the
   extension a target just past an end would copy those steps into the seam.
@@ -117,7 +148,9 @@ Properties:
 | `A0`, `A1` | 15°, 30° | Measured angle where corner contribution starts and becomes full |
 | `R0` | max(line width, largest nozzle diameter); 0.5 mm if both are zero | Full corner protection along the loop |
 | `R1` | 2·`R0` | Corner influence ends |
-| Run extension | 0.2 mm (`enforcer_oversampling_distance`) | How far the seam may go past an end of the Enforced run |
+| Run extension | 0.2 mm (`enforcer_oversampling_distance`); 0 with exact ends | How far the seam may go past an end of the Enforced run |
+| Painted range tolerance | 1 µm (`enforced_end_tolerance`) | Loop positions this close are one point |
+| Range end reach | line width | How far from the loop a contour crossing may lie |
 | Solver threshold | 1e-12 | Absolute threshold on the equation coefficients that tells degenerate equations apart; not a distance tolerance |
 
 ## Known limitations
@@ -142,8 +175,13 @@ the seam lands where the averaged normals point; the farther the target, the mor
 depends on the loop shape around C rather than on the tangent at C.
 
 The Enforced run is built from candidate types, so a gap in the paint or a narrow blocked area
-between two Enforced candidates is not detected; the seam can land there or up to 0.2 mm past a
-run end.
+between two Enforced candidates is not detected; without exact ends the seam can land there or up
+to 0.2 mm past a run end.
+
+With exact ends, paint near the loop that does not cross the layer is ignored on that loop. A range
+end is the closest loop point to the crossing; where the surface is far from vertical, as near the
+bottom of a sphere, the crossing can lie farther than the line width from the loop, and the loop
+falls back to the line-width rule. Blocked candidates still use the line-width rule.
 
 A perimeter left out of the aligned strings, for example in a string shorter than six layers,
 keeps its candidate as the seam.
@@ -154,10 +192,14 @@ staggers them on its own; the placed point is its input, not its output.
 
 ## Implementation and verification
 
-- Code: `src/libslic3r/GCode/SeamPlacer.cpp` — `find_seam_string`, `align_seam_points` and the
-  helpers `enforced_corner_influence` and `place_on_loop` in `SeamPlacerImpl` (declared in
+- Code: `src/libslic3r/GCode/SeamPlacer.cpp` — `append_enforcer_contour`, `exact_enforced_intervals`,
+  `process_perimeter_polygon`, `find_seam_string`, `align_seam_points` and the helpers
+  `enforced_corner_influence` and `place_on_loop` in `SeamPlacerImpl` (declared in
   `SeamPlacer.hpp` for the tests).
 - Tests: `tests/fff_print/test_seam_placer.cpp`:
+  - a painted face crossed by a loop 0.2 mm in front of it: the Enforced candidates span the face
+    exactly (1 µm) and the central one is its middle; over 10 Aligned layers whose vertex before the
+    face moves, the seam stays at that middle;
   - a painted circle whose vertices shift irregularly between layers: the seam stays within
     ±0.3 rad of the point where the circle meets the painted face, its step along the loop between
     layers stays below a quarter of the candidate spacing near paint (0.05 mm) and the change of that
@@ -169,7 +211,8 @@ staggers them on its own; the placed point is its input, not its output.
   - `place_on_loop` directly: the ray property on a regular 24-gon; the same result from
     neighboring candidates on an asymmetric contour; continuity along target sweeps on a short loop,
     across the point where the closest solution would leave a bounded search, and at a duplicated
-    corner point; the ends of an Enforced run with and without a Blocked neighbor, and Blocked
+    corner point; the ends of an Enforced run with and without a Blocked neighbor and with exact
+  ends, and Blocked
     candidates around a Neutral one; a run whose extension ends on the closing edge, also with the
     loop after another one and the run wrapping around the array end; the same arc end held while
     the target passes halfway around the loop; a solution leaving the arc through the end farther

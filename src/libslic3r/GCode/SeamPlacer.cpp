@@ -19,6 +19,7 @@
 #include <boost/log/trivial.hpp>
 #include <boost/format.hpp>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstddef>
 #include <igl/Hit.h>
@@ -330,6 +331,11 @@ struct GlobalModelInfo {
   indexed_triangle_set blockers;
   AABBTreeIndirect::Tree<3, float> enforcers_tree;
   AABBTreeIndirect::Tree<3, float> blockers_tree;
+  // Contour of the painted enforcer region: edges of one enforcer triangle only, with the unit direction from
+  // each edge into the paint.
+  std::vector<Linef3> enforcer_contour;
+  std::vector<Vec3d> enforcer_contour_inward;
+  AABBTreeIndirect::Tree<3, double> enforcer_contour_tree;
 
   // Precise Seam modifiers: strong modifiers (CENTER/LEFT/RIGHT) determine exact seam placement
   std::vector<const ModelVolume*> precise_seam_strong_volumes;
@@ -355,6 +361,23 @@ struct GlobalModelInfo {
     float radius_sqr = radius * radius;
     return AABBTreeIndirect::is_any_triangle_in_radius(blockers.vertices, blockers.indices,
                                                        blockers_tree, position, radius_sqr);
+  }
+
+  // Points where the enforcer contour crosses the plane at z within the XY box, each with the XY direction
+  // from it into the paint.
+  std::vector<std::pair<Vec2d, Vec2d>> enforcer_contour_crossings(double z, const Vec2d &min, const Vec2d &max) const {
+    std::vector<std::pair<Vec2d, Vec2d>> crossings;
+    const Eigen::AlignedBox<double, 3> box(Vec3d(min.x(), min.y(), z), Vec3d(max.x(), max.y(), z));
+    AABBTreeIndirect::traverse(enforcer_contour_tree, AABBTreeIndirect::intersecting(box), [&](const auto &node) {
+      const Linef3 &edge = enforcer_contour[node.idx];
+      // Half-open in z, so that a contour vertex lying on the plane is crossed once.
+      if ((edge.a.z() < z) != (edge.b.z() < z)) {
+        const Vec3d p = edge.intersect_plane(z);
+        crossings.emplace_back(p.head<2>(), enforcer_contour_inward[node.idx].head<2>());
+      }
+      return true;
+    });
+    return crossings;
   }
 
   float calculate_point_visibility(const Vec3f &position) const {
@@ -498,6 +521,80 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
   return polygons;
 }
 
+// Painted range of a loop along its length from its first vertex; `end` exceeds the loop length if the range
+// passes the first vertex.
+struct EnforcedInterval {
+  double begin;
+  double end;
+};
+
+// Two loop positions closer than this (1 um) are one point, mm.
+constexpr double enforced_end_tolerance = 1e-3;
+
+// Painted ranges of a counterclockwise loop at height z, bounded exactly where the enforcer contour crosses the
+// layer: each crossing within `reach` of the loop is moved to its closest loop point, and paint lies ahead of
+// it or behind it along the loop. `arc` holds the length from the first vertex to each vertex, the loop length
+// last. Empty if the contour does not cross near the loop or its crossings do not pair up into ranges.
+std::vector<EnforcedInterval> exact_enforced_intervals(const std::vector<Vec2d> &loop, const std::vector<double> &arc,
+                                                       double z, double reach, const GlobalModelInfo &info) {
+  const size_t count = loop.size();
+  if (count < 3 || info.enforcer_contour.empty())
+    return {};
+  Vec2d min = loop.front(), max = loop.front();
+  for (const Vec2d &p : loop) {
+    min = min.cwiseMin(p);
+    max = max.cwiseMax(p);
+  }
+  const auto crossings = info.enforcer_contour_crossings(z, min - Vec2d(reach, reach), max + Vec2d(reach, reach));
+  const auto direction = [&](size_t i) {
+    const Vec2d d = loop[(i + 1) % count] - loop[i];
+    return d.squaredNorm() > 0.0 ? Vec2d(d.normalized()) : Vec2d::Zero();
+  };
+  std::vector<std::pair<double, bool>> ends; // Position along the loop; true if paint lies ahead.
+  for (const auto &[point, inward] : crossings) {
+    double best = std::numeric_limits<double>::max(), position = 0.0;
+    Vec2d tangent = Vec2d::Zero();
+    for (size_t i = 0; i < count; ++i) {
+      const Vec2d a = loop[i], ab = loop[(i + 1) % count] - a;
+      const double length2 = ab.squaredNorm();
+      const double t = length2 > 0.0 ? std::clamp((point - a).dot(ab) / length2, 0.0, 1.0) : 0.0;
+      const double distance2 = (a + t * ab - point).squaredNorm();
+      if (distance2 < best) {
+        best = distance2;
+        const double along = t * (arc[i + 1] - arc[i]);
+        position = arc[i] + along;
+        // At a vertex the loop turns, so its direction there is the mean of the two edges; a crossing at a
+        // corner may land a rounding error off the vertex, on either edge.
+        tangent = along < enforced_end_tolerance ? direction((i + count - 1) % count) + direction(i) :
+                  arc[i + 1] - position < enforced_end_tolerance ? direction(i) + direction((i + 1) % count) :
+                                                                   direction(i);
+      }
+    }
+    if (best > reach * reach)
+      continue;
+    const double side = inward.dot(tangent);
+    if (std::abs(side) < 1e-6)
+      return {}; // The contour runs along the loop here: no clear end.
+    ends.emplace_back(position, side > 0.0);
+  }
+  if (ends.empty() || ends.size() % 2 != 0)
+    return {};
+  std::sort(ends.begin(), ends.end());
+  for (size_t i = 0; i < ends.size(); ++i)
+    if (ends[i].second == ends[(i + 1) % ends.size()].second)
+      return {}; // Paint must start and stop in turn along the loop.
+  const size_t first = ends.front().second ? 0 : 1;
+  std::vector<EnforcedInterval> intervals;
+  for (size_t i = first; i < first + ends.size(); i += 2) {
+    const double begin = ends[i % ends.size()].first;
+    double end = ends[(i + 1) % ends.size()].first;
+    if (end < begin)
+      end += arc.back();
+    intervals.push_back({begin, end});
+  }
+  return intervals;
+}
+
 // Build SeamCandidates for each vertex of the perimeter polygon and attach them to a shared Perimeter.
 // For each vertex: computes position, angle, and type (Enforcer / Blocker / Neutral).
 // When Precise Seam modifiers are present: inserts strong seam point,
@@ -561,24 +658,81 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   size_t orig_angle_index = 0;
   perimeter.start_index = result.points.size();
   perimeter.flow_width = region != nullptr ? region->flow(FlowRole::frExternalPerimeter).width() : 0.0f;
+
+  // Painted ranges bounded exactly by the paint contour crossing this layer; without them, points within
+  // flow_width of paint are Enforced.
+  std::vector<Vec2d> loop_xy;
+  std::vector<double> loop_arc { 0.0 };
+  for (const Point &point : polygon.points)
+    loop_xy.push_back(unscale(point));
+  for (size_t i = 0; i < loop_xy.size(); ++i)
+    loop_arc.push_back(loop_arc.back() + (loop_xy[(i + 1) % loop_xy.size()] - loop_xy[i]).norm());
+  const double loop_length = loop_arc.back();
+  const std::vector<EnforcedInterval> intervals = exact_enforced_intervals(loop_xy, loop_arc, z_coord,
+                                                                           perimeter.flow_width, global_model_info);
+  perimeter.exact_enforced_ends = !intervals.empty();
+  const auto in_interval = [&](double at) {
+    for (const EnforcedInterval &interval : intervals)
+      for (const double s : { at, at + loop_length })
+        if (s >= interval.begin - enforced_end_tolerance && s <= interval.end + enforced_end_tolerance)
+          return true;
+    return false;
+  };
+  const auto point_at = [&](double s) {
+    const size_t i = std::min(size_t(std::upper_bound(loop_arc.begin(), loop_arc.end(), s) - loop_arc.begin()),
+                              loop_xy.size()) - 1;
+    const double length = loop_arc[i + 1] - loop_arc[i];
+    const Vec2d p = loop_xy[i] + (length > 0.0 ? (s - loop_arc[i]) / length : 0.0) *
+                                     (loop_xy[(i + 1) % loop_xy.size()] - loop_xy[i]);
+    return Vec3f(float(p.x()), float(p.y()), z_coord);
+  };
+  // Points to insert: the range ends, middles and every enforcer_oversampling_distance from their begin, and the
+  // middle of each gap between ranges, which keeps neighboring ranges apart as patches; as sorted loop positions
+  // in [0, loop_length).
+  std::vector<double> marks;
+  std::vector<std::pair<Vec3f, double>> interval_middles; // Middle point and length of each range.
+  for (size_t k = 0; k < intervals.size(); ++k) {
+    const EnforcedInterval &interval = intervals[k];
+    const double middle = 0.5 * (interval.begin + interval.end);
+    // Ranges come in loop order from the first vertex.
+    const double next_begin = k + 1 < intervals.size() ? intervals[k + 1].begin : intervals.front().begin + loop_length;
+    marks.insert(marks.end(), { interval.begin, interval.end, middle, 0.5 * (interval.end + next_begin) });
+    for (double s = interval.begin + SeamPlacer::enforcer_oversampling_distance; s < interval.end - enforced_end_tolerance;
+         s += SeamPlacer::enforcer_oversampling_distance)
+      marks.push_back(s);
+    interval_middles.emplace_back(point_at(std::fmod(middle, loop_length)), interval.end - interval.begin);
+  }
+  for (double &s : marks)
+    s = std::fmod(s, loop_length);
+  std::sort(marks.begin(), marks.end());
+  marks.erase(std::unique(marks.begin(), marks.end(),
+                          [](double a, double b) { return b - a < enforced_end_tolerance; }), marks.end());
+
+  std::queue<double> oversampled_arcs { }; // Loop positions of the inserted points with exact ranges.
   bool some_point_enforced = false;
   while (!orig_polygon_points.empty() || !oversampled_points.empty()) {
     EnforcedBlockedSeamPoint type = EnforcedBlockedSeamPoint::Neutral;
     Vec3f position;
     float local_ccw_angle = 0;
     bool orig_point = false;
+    double at = 0.0; // Loop position, used with exact ranges.
     if (!oversampled_points.empty()) {
       position = oversampled_points.front();
       oversampled_points.pop();
+      if (perimeter.exact_enforced_ends) {
+        at = oversampled_arcs.front();
+        oversampled_arcs.pop();
+      }
     } else {
       position = orig_polygon_points.front();
       orig_polygon_points.pop();
       local_ccw_angle = was_clockwise ? -polygon_angles[orig_angle_index] : polygon_angles[orig_angle_index];
+      at = loop_arc[orig_angle_index];
       orig_angle_index++;
       orig_point = true;
     }
 
-    if (global_model_info.is_enforced(position, perimeter.flow_width)) {
+    if (perimeter.exact_enforced_ends ? in_interval(at) : global_model_info.is_enforced(position, perimeter.flow_width)) {
       type = EnforcedBlockedSeamPoint::Enforced;
     }
 
@@ -587,7 +741,15 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     }
     some_point_enforced = some_point_enforced || type == EnforcedBlockedSeamPoint::Enforced;
 
-    if (orig_point) {
+    if (orig_point && perimeter.exact_enforced_ends) {
+      // Marks strictly inside the edge from this vertex; one at a vertex is the vertex itself.
+      const double from = loop_arc[orig_angle_index - 1], to = loop_arc[orig_angle_index];
+      for (auto it = std::upper_bound(marks.begin(), marks.end(), from + enforced_end_tolerance);
+           it != marks.end() && *it < to - enforced_end_tolerance; ++it) {
+        oversampled_points.push(point_at(*it));
+        oversampled_arcs.push(*it);
+      }
+    } else if (orig_point) {
       Vec3f pos_of_next = orig_polygon_points.empty() ? first : orig_polygon_points.front();
       float distance_to_next = (position - pos_of_next).norm();
       if (global_model_info.is_enforced(position, distance_to_next)) {
@@ -673,6 +835,14 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
       assert(viable_points_indices.size() > 0);
       if (large_angle_points_indices.empty()) {
         size_t central_idx = viable_points_indices[viable_points_indices.size() / 2];
+        // With exact ranges, the middle of the longest range in the patch.
+        double longest = -1.0;
+        for (const size_t idx : viable_points_indices)
+          for (const auto &[middle, length] : interval_middles)
+            if (length > longest && (result.points[idx].position - middle).norm() <= enforced_end_tolerance) {
+              central_idx = idx;
+              longest = length;
+            }
         result.points[central_idx].central_enforcer = true;
       } else {
         size_t central_idx = large_angle_points_indices.size() / 2;
@@ -793,6 +963,28 @@ void compute_global_occlusion(GlobalModelInfo &result, const PrintObject *po,
 #endif
 }
 
+// Appends the contour of painted triangles without T-joints (shared vertices): their edges used by one
+// triangle only. Paint lies to the left of an edge in the triangle's counterclockwise order.
+void append_enforcer_contour(GlobalModelInfo &result, const indexed_triangle_set &painted) {
+  const auto edge_key = [](int a, int b) { return (uint64_t(std::min(a, b)) << 32) | uint64_t(std::max(a, b)); };
+  std::unordered_map<uint64_t, int> uses;
+  for (const stl_triangle_vertex_indices &face : painted.indices)
+    for (int i = 0; i < 3; ++i)
+      ++uses[edge_key(face[i], face[(i + 1) % 3])];
+  for (const stl_triangle_vertex_indices &face : painted.indices) {
+    const Vec3d v[3] = {painted.vertices[face[0]].cast<double>(), painted.vertices[face[1]].cast<double>(),
+                        painted.vertices[face[2]].cast<double>()};
+    const Vec3d normal = (v[1] - v[0]).cross(v[2] - v[0]);
+    for (int i = 0; i < 3; ++i) {
+      const Vec3d inward = normal.cross(v[(i + 1) % 3] - v[i]);
+      if (uses[edge_key(face[i], face[(i + 1) % 3])] == 1 && inward.squaredNorm() > 0.0) {
+        result.enforcer_contour.emplace_back(v[i], v[(i + 1) % 3]);
+        result.enforcer_contour_inward.emplace_back(inward.normalized());
+      }
+    }
+  }
+}
+
 void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
   BOOST_LOG_TRIVIAL(debug)
       << "SeamPlacer: build AABB trees for raycasting enforcers/blockers: start";
@@ -814,6 +1006,10 @@ void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
       its_transform(enforcers, model_transformation, true);
       its_merge(result.enforcers, enforcers);
 
+      indexed_triangle_set painted = mv->seam_facets.get_facets_strict(*mv, EnforcerBlockerType::ENFORCER);
+      its_transform(painted, model_transformation, true);
+      append_enforcer_contour(result, painted);
+
       indexed_triangle_set blockers = mv->seam_facets.get_facets(*mv, EnforcerBlockerType::BLOCKER);
       // ORCA fix (not related to Precise Seam): fix winding for mirrored transforms
       its_transform(blockers, model_transformation, true);
@@ -825,6 +1021,7 @@ void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
                                                                                       result.enforcers.indices);
   result.blockers_tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(result.blockers.vertices,
                                                                                      result.blockers.indices);
+  result.enforcer_contour_tree = AABBTreeLines::build_aabb_tree_over_indexed_lines(result.enforcer_contour);
 
   BOOST_LOG_TRIVIAL(debug)
       << "SeamPlacer: build AABB trees for raycasting enforcers/blockers: end";
@@ -1173,13 +1370,14 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
   };
   const auto cross = [](const Vec2d &a, const Vec2d &b) { return a.x() * b.y() - a.y() * b.x(); };
 
-  // Allowed arc on one side: the Enforced run plus the oversampling distance for an Enforced candidate,
-  // up to a Blocked candidate otherwise. Returns its length and end point; infinite length if unlimited.
+  // Allowed arc on one side: the Enforced run for an Enforced candidate, plus the oversampling distance unless
+  // the run ends exactly at the paint; up to a Blocked candidate otherwise. Returns its length and end point;
+  // infinite length if unlimited.
   const bool enforced = points[index].type == EnforcedBlockedSeamPoint::Enforced;
   const bool blocked = points[index].type == EnforcedBlockedSeamPoint::Blocked;
   const auto allowed_arc = [&](bool forward) {
     double arc = 0.0;
-    double extension = enforced ? SeamPlacer::enforcer_oversampling_distance : 0.0;
+    double extension = enforced && !perimeter.exact_enforced_ends ? SeamPlacer::enforcer_oversampling_distance : 0.0;
     bool in_run = true;
     size_t i = index;
     // All count edges, the closing one back to the candidate included, before the arc is unlimited.
