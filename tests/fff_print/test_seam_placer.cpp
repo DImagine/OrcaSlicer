@@ -161,15 +161,19 @@ std::vector<Vec2d> placed_seams(const SeamPlacer &placer, const PrintObject &obj
 
 using SeamType = SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
-// Seam candidates of one loop through xy at z = 0; Neutral with angle 0 unless given.
+// Seam candidates of one loop through xy at z = 0; Neutral with angle 0 unless given. The loop starts at
+// `offset`, after candidates of another loop.
 std::vector<SeamPlacerImpl::SeamCandidate> loop_candidates(SeamPlacerImpl::Perimeter &perimeter, const std::vector<Vec2d> &xy,
                                                            const std::vector<SeamType> &types = {},
-                                                           const std::vector<float> &angles = {})
+                                                           const std::vector<float> &angles = {}, size_t offset = 0)
 {
-    perimeter.start_index = 0;
-    perimeter.end_index = xy.size();
+    static SeamPlacerImpl::Perimeter other;
+    perimeter.start_index = offset;
+    perimeter.end_index = offset + xy.size();
     std::vector<SeamPlacerImpl::SeamCandidate> points;
-    points.reserve(xy.size());
+    points.reserve(offset + xy.size());
+    for (size_t i = 0; i < offset; ++i)
+        points.emplace_back(Vec3f(100.0f + float(i), 100.0f, 0.0f), other, 0.0f, SeamType::Enforced);
     for (size_t i = 0; i < xy.size(); ++i)
         points.emplace_back(Vec3f(float(xy[i].x()), float(xy[i].y()), 0.0f), perimeter, angles.empty() ? 0.0f : angles[i],
                             types.empty() ? SeamType::Neutral : types[i]);
@@ -492,6 +496,45 @@ TEST_CASE("Seams placed on a short loop keep to the closest solution as the targ
         CHECK(std::abs(seam.x() + 1.0) < 1e-5);
         CHECK((seam - previous).norm() <= 0.0011);
         previous = seam;
+    }
+}
+
+TEST_CASE("Seams placed on the loop respect a painted run ending on the closing edge", "[SeamPlacer][Regression]")
+{
+    // The Enforced run goes around the loop from C and leaves 0.1 mm of its extension for the 10 mm closing
+    // edge back to C: the target on that edge lies outside the allowed arc. The loop is also placed after
+    // another loop and rotated, so that it does not start at index 0 and its run wraps around the array end.
+    const std::vector<Vec2d> xy = {{0, 0}, {10, 0}, {10, 10}, {-10, 10}, {-10, 0.1}, {-10, 0}};
+    std::vector<SeamType> types(6, SeamType::Enforced);
+    types[5] = SeamType::Neutral;
+    for (const size_t rotation : {size_t(0), size_t(3)}) {
+        std::vector<Vec2d> rotated_xy = xy;
+        std::vector<SeamType> rotated_types = types;
+        std::rotate(rotated_xy.begin(), rotated_xy.begin() + rotation, rotated_xy.end());
+        std::rotate(rotated_types.begin(), rotated_types.begin() + rotation, rotated_types.end());
+        for (const size_t offset : {size_t(0), size_t(4)}) {
+            CAPTURE(rotation, offset);
+            SeamPlacerImpl::Perimeter perimeter;
+            const auto points = loop_candidates(perimeter, rotated_xy, rotated_types, {}, offset);
+            const size_t candidate = offset + (6 - rotation) % 6;
+            // The end of the allowed arc closer to the target: 0.2 mm from C toward the Neutral candidate.
+            CHECK((placed_xy(points, candidate, {-5, 0}) - Vec2d(-0.2, 0)).norm() < 1e-5);
+        }
+    }
+}
+
+TEST_CASE("Seams held at the allowed arc do not switch ends while the target moves", "[SeamPlacer][Regression]")
+{
+    // A single Enforced candidate; the target moves along the far side of the loop, past the point halfway
+    // around the loop from C. The end of the allowed arc closer to the target stays the same.
+    std::vector<SeamType> types(5, SeamType::Neutral);
+    types[0] = SeamType::Enforced;
+    SeamPlacerImpl::Perimeter perimeter;
+    const auto points = loop_candidates(perimeter, {{0, 0}, {10, 0}, {10, 1}, {-1, 1}, {-1, 0}}, types);
+    for (int i = 0; i <= 200; ++i) {
+        const Vec2d target(8.9 + 0.001 * i, 1.0);
+        CAPTURE(target.x());
+        CHECK((placed_xy(points, 0, target) - Vec2d(0.2, 0)).norm() < 1e-5);
     }
 }
 

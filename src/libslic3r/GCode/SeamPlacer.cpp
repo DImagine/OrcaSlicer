@@ -1147,7 +1147,7 @@ Vec2d edge_normal(const Vec2d &a, const Vec2d &b) {
 }
 
 // Seam position on the loop for a `target`: the closest loop point to it whose normal passes through it,
-// moved along the loop into the arc allowed around the candidate at `index` if it lies outside.
+// or, if that lies outside the arc allowed around the candidate at `index`, the arc end closer to the target.
 Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target) {
   const Perimeter &perimeter = points[index].perimeter;
   const size_t start = perimeter.start_index;
@@ -1182,7 +1182,8 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
     double extension = enforced ? SeamPlacer::enforcer_oversampling_distance : 0.0;
     bool in_run = true;
     size_t i = index;
-    for (size_t visited = 1; visited < count; ++visited) {
+    // All count edges, the closing one back to the candidate included, before the arc is unlimited.
+    for (size_t visited = 1; visited <= count; ++visited) {
       const size_t j = forward ? next(i) : prev(i);
       const EnforcedBlockedSeamPoint type = points[j].type;
       if (in_run && (enforced ? type != EnforcedBlockedSeamPoint::Enforced :
@@ -1266,16 +1267,14 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
   if (!best)
     return points[index].position;
 
-  // Move a solution outside the allowed arc to the end of that arc it is closer to along the loop.
+  // A solution outside the allowed arc gives way to the end of the arc closer to the target.
   Vec2d result = *best;
   const double loop_length = arc[0] + arc[1];
   const double ahead = best_forward ? best_arc : loop_length - best_arc;
   const auto [ahead_limit, ahead_end] = allowed_arc(true);
   const auto [behind_limit, behind_end] = allowed_arc(false);
-  const double over_ahead = ahead - ahead_limit;
-  const double over_behind = loop_length - ahead - behind_limit;
-  if (over_ahead > 0.0 && over_behind > 0.0)
-    result = over_ahead <= over_behind ? ahead_end : behind_end;
+  if (ahead > ahead_limit && loop_length - ahead > behind_limit)
+    result = (ahead_end - p).squaredNorm() <= (behind_end - p).squaredNorm() ? ahead_end : behind_end;
   return to_3d(Vec2f(result.cast<float>()), points[index].position.z());
 }
 

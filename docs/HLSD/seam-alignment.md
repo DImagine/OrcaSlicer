@@ -76,23 +76,26 @@ blends linearly between its vertex normals. A **solution** is a loop point whose
 through the target; on each edge this is a quadratic equation in the edge parameter.
 
 The seam is the solution closest to the target over the whole loop. If it lies outside the allowed
-arc, it is moved along the loop to the end of the arc it is closer to along the loop. Without any
-solution, which takes a degenerate loop, the seam is C.
+arc, the seam is the end of that arc closer to the target. Without any solution, which takes a
+degenerate loop, the seam is C.
 
 The search walks outward from C on both sides, the shorter walked side first. An edge farther from
 the target than the best solution so far is skipped without solving.
 
 Properties:
 
-- On a regular polygon every normal line passes through the center, so the seam is where the ray
-  from the center through the target meets the loop, wherever the vertices are.
-- Inside the allowed arc the result depends on the target only, not on which candidate was chosen.
-  A candidate step therefore does not pass into the seam directly.
-- As the target moves, a solution moves continuously along the loop until it disappears together
-  with another one (where the target crosses the curve of centers of the normal field) or another
-  solution becomes equally close. Moving a solution into the allowed arc is continuous as well. The
-  seam can therefore jump only where the closest solution changes; for a target near the loop, as
-  in aligned strings, there is one solution nearby.
+- On a regular polygon every normal line passes through the center, so for a target other than
+  the center and a solution inside the allowed arc, the seam is where the ray from the center
+  through the target meets the loop, wherever the vertices are.
+- When the closest solution lies inside the allowed arc, the result depends on the target and that
+  arc only, not on which candidate inside the arc was chosen. A candidate step therefore does not
+  pass into the seam directly.
+- A selected solution varies continuously while its root branch remains nondegenerate. The seam may
+  jump when the closest solution changes (two solutions equally close, or the closest one
+  disappearing together with another where the target crosses the curve of centers of the normal
+  field), when the closest solution leaves the allowed arc and the arc end closer to the target is
+  not the end it leaves through, or when the two arc ends are equally close to a target whose
+  solution lies outside. Changes of the candidate types between layers change the allowed arc.
 
 ### Allowed arc
 
@@ -127,6 +130,10 @@ A painted seam can end up farther from a physical corner than with a fixed minim
 The pull `t ≥ 0.4` bounds how far the target lies from C only relative to `|C − F|`; with a
 distant F the remainder can be millimeters.
 
+The closest solution is searched over the whole loop, by distance to the target, not to C. Where
+another part of the same loop is close in space but far along the loop, as across a thin wall or a
+U-shaped recess, a target between them can land on that other part.
+
 Near a corner the vertex normal is an average of two directions, so for a target well off the loop
 the seam lands where the averaged normals point; the farther the target, the more the result
 depends on the loop shape around C rather than on the tangent at C.
@@ -151,7 +158,8 @@ staggers them on its own; the placed point is its input, not its output.
   - a painted circle whose vertices shift irregularly between layers: the seam stays within
     ±0.3 rad of the point where the circle meets the painted face, its step along the loop between
     layers stays below a quarter of the candidate spacing near paint (0.05 mm) and the change of that
-    step below 0.15 of it (0.03 mm), while a fixed 0.4 pull passes at least 0.4 of it into the seam;
+    step below 0.15 of it (0.03 mm); with a fixed 0.4 pull and an unchanged fitted point, a candidate
+    step of one spacing alone moves the target by 0.4 of it;
   - a 41-layer square whose string starts at layer 39: layers 1 through 39 join the string, including
     layer 38 right below the start;
   - a painted square in Rear and Aligned modes: the seam lies within 0.45 mm of a corner;
@@ -159,7 +167,9 @@ staggers them on its own; the placed point is its input, not its output.
     neighboring candidates on an asymmetric contour; continuity along target sweeps on a short loop,
     across the point where the closest solution would leave a bounded search, and at a duplicated
     corner point; the ends of an Enforced run with and without a Blocked neighbor, and Blocked
-    candidates around a Neutral one;
+    candidates around a Neutral one; a run whose extension ends on the closing edge, also with the
+    loop after another one and the run wrapping around the array end; the same arc end held while
+    the target passes halfway around the loop;
   - `enforced_corner_influence` directly: full protection within `R0`, the middle of the fade band,
     no influence from `R1` on, and a partial measured angle.
 - Not covered by tests: a painted corner with differing C and F through the whole pipeline, weak
