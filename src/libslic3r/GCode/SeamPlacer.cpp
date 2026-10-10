@@ -1146,10 +1146,8 @@ Vec2d edge_normal(const Vec2d &a, const Vec2d &b) {
   return length > 0.0 ? Vec2d(-d.y() / length, d.x() / length) : Vec2d::Zero();
 }
 
-// Seam position on the loop for a `target` near the candidate at `index`: of the loop points whose
-// normal passes through the target, the closest one to it. Normals blend linearly along each edge, so
-// the result does not snap to vertices. The search stays within the allowed arc around the candidate;
-// without a solution there, the arc end closer to the target wins.
+// Seam position on the loop for a `target`: the closest loop point to it whose normal passes through it,
+// moved along the loop into the arc allowed around the candidate at `index` if it lies outside.
 Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target) {
   const Perimeter &perimeter = points[index].perimeter;
   const size_t start = perimeter.start_index;
@@ -1159,28 +1157,31 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
   const auto next = [&](size_t i) { return start + next_idx_modulo(i - start, count); };
   const auto prev = [&](size_t i) { return start + prev_idx_modulo(i - start, count); };
   const auto xy = [&](size_t i) { return Vec2d(points[i].position.head<2>().cast<double>()); };
+  // Nearest neighbor at a different position, so that duplicated points share one normal.
+  const auto distinct = [&](size_t i, bool forward) {
+    size_t j = i;
+    for (size_t step = 1; step < count; ++step) {
+      j = forward ? next(j) : prev(j);
+      if (xy(j) != xy(i))
+        return j;
+    }
+    return i;
+  };
   const auto vertex_normal = [&](size_t i) {
-    const Vec2d sum = edge_normal(xy(prev(i)), xy(i)) + edge_normal(xy(i), xy(next(i)));
+    const Vec2d sum = edge_normal(xy(distinct(i, false)), xy(i)) + edge_normal(xy(i), xy(distinct(i, true)));
     return sum.squaredNorm() > 0.0 ? Vec2d(sum.normalized()) : Vec2d::Zero();
   };
   const auto cross = [](const Vec2d &a, const Vec2d &b) { return a.x() * b.y() - a.y() * b.x(); };
 
-  const Vec2d p = target.head<2>().cast<double>();
+  // Allowed arc on one side: the Enforced run plus the oversampling distance for an Enforced candidate,
+  // up to a Blocked candidate otherwise. Returns its length and end point; infinite length if unlimited.
   const bool enforced = points[index].type == EnforcedBlockedSeamPoint::Enforced;
   const bool blocked = points[index].type == EnforcedBlockedSeamPoint::Blocked;
-  const double window = 2.0 * (p - xy(index)).norm() + SeamPlacer::enforcer_oversampling_distance;
-
-  Vec2d best = xy(index);
-  double best_distance = std::numeric_limits<double>::infinity();
-  // Walks away from the candidate in one direction over the allowed arc: the Enforced run plus the
-  // oversampling distance for an Enforced candidate, up to a Blocked one otherwise, and at most `window`.
-  // Keeps the solution closest to the target in `best`; returns the end of the arc.
-  const auto search = [&](bool forward) {
+  const auto allowed_arc = [&](bool forward) {
     double arc = 0.0;
     double extension = enforced ? SeamPlacer::enforcer_oversampling_distance : 0.0;
     bool in_run = true;
     size_t i = index;
-    Vec2d end = xy(index);
     for (size_t visited = 1; visited < count; ++visited) {
       const size_t j = forward ? next(i) : prev(i);
       const EnforcedBlockedSeamPoint type = points[j].type;
@@ -1188,24 +1189,42 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
                                 !blocked && type == EnforcedBlockedSeamPoint::Blocked))
         in_run = false;
       if (!in_run && (!enforced || type == EnforcedBlockedSeamPoint::Blocked))
-        break; // Only an Enforced run is extended, and never into a Blocked candidate.
+        return std::make_pair(arc, xy(i)); // Only an Enforced run is extended, and never into a Blocked candidate.
       const double length = (xy(j) - xy(i)).norm();
-      if (length <= 0.0) {
-        i = j;
-        continue;
-      }
-      double reach = std::min(length, window - arc);
       if (!in_run) {
-        reach = std::min(reach, extension);
+        const double reach = std::min(length, extension);
         extension -= reach;
+        if (reach < length)
+          return std::make_pair(arc + reach, Vec2d(xy(i) + (reach / length) * (xy(j) - xy(i))));
       }
-      if (reach <= 0.0)
-        break;
-      // Solve cross(p - P(u), N(u)) = 0 on the edge in index order, P and N linear in u.
-      const size_t a = forward ? i : j;
-      const size_t b = forward ? j : i;
-      const Vec2d g = p - xy(a);
-      const Vec2d d = xy(b) - xy(a);
+      arc += length;
+      i = j;
+    }
+    return std::make_pair(std::numeric_limits<double>::infinity(), xy(index));
+  };
+
+  // Closest solution over the whole loop, walking outward on the shorter side first so that solutions near
+  // the candidate prune the edges farther from the target than them.
+  const Vec2d p = target.head<2>().cast<double>();
+  std::optional<Vec2d> best;
+  double best_distance = std::numeric_limits<double>::infinity();
+  bool best_forward = true;
+  double best_arc = 0.0;
+  double arc[2] = { 0.0, 0.0 }; // Walked arc behind and ahead of the candidate.
+  size_t cursor[2] = { index, index };
+  for (size_t visited = 0; visited < count; ++visited) {
+    const bool forward = arc[1] <= arc[0];
+    const size_t i = cursor[forward];
+    const size_t j = forward ? next(i) : prev(i);
+    // The edge in index order; P(u) = xy(a) + u * d.
+    const size_t a = forward ? i : j;
+    const size_t b = forward ? j : i;
+    const Vec2d d = xy(b) - xy(a);
+    const double length = d.norm();
+    const Vec2d g = p - xy(a);
+    const double u_closest = length > 0.0 ? std::clamp(g.dot(d) / (length * length), 0.0, 1.0) : 0.0;
+    if (length > 0.0 && (g - u_closest * d).squaredNorm() < best_distance) {
+      // Solve cross(p - P(u), N(u)) = 0 with the normal N blended linearly between the vertex normals.
       Vec2d na = vertex_normal(a);
       Vec2d nb = vertex_normal(b);
       if (na.squaredNorm() == 0.0 || nb.squaredNorm() == 0.0)
@@ -1214,24 +1233,24 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
       const double c0 = cross(g, na);
       const double c1 = cross(g, m) - cross(d, na);
       const double c2 = -cross(d, m);
-      // Reachable part of the edge in its own parameter, measured from the side of the candidate.
-      const double reach_u = reach / length;
-      const double lo = forward ? 0.0 : 1.0 - reach_u;
-      const double hi = forward ? reach_u : 1.0;
       const auto consider = [&](double u) {
-        if (u < lo || u > hi)
+        if (u < 0.0 || u > 1.0)
           return;
-        const Vec2d q = xy(a) + u * d;
-        const double distance = (q - p).squaredNorm();
+        const double distance = (g - u * d).squaredNorm();
         if (distance < best_distance) {
+          best = Vec2d(xy(a) + u * d);
           best_distance = distance;
-          best = q;
+          best_forward = forward;
+          best_arc = arc[forward] + (forward ? u : 1.0 - u) * length;
         }
       };
+      // Absolute threshold on the coefficients (mm), only to tell the degenerate equations apart.
       constexpr double eps = 1e-12;
-      if (std::abs(c2) < eps) {
-        if (std::abs(c1) > eps)
-          consider(-c0 / c1);
+      if (std::abs(c2) < eps && std::abs(c1) < eps) {
+        if (std::abs(c0) < eps)
+          consider(u_closest); // Every point is a solution.
+      } else if (std::abs(c2) < eps) {
+        consider(-c0 / c1);
       } else {
         const double discriminant = c1 * c1 - 4.0 * c2 * c0;
         if (discriminant >= 0.0) {
@@ -1240,19 +1259,23 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
           consider((-c1 + root) / (2.0 * c2));
         }
       }
-      arc += reach;
-      end = forward ? Vec2d(xy(a) + hi * d) : Vec2d(xy(a) + lo * d);
-      if (reach < length)
-        break;
-      i = j;
     }
-    return end;
-  };
+    arc[forward] += length;
+    cursor[forward] = j;
+  }
+  if (!best)
+    return points[index].position;
 
-  const Vec2d ahead = search(true);
-  const Vec2d behind = search(false);
-  const Vec2d result = std::isfinite(best_distance) ? best :
-                       (ahead - p).squaredNorm() <= (behind - p).squaredNorm() ? ahead : behind;
+  // Move a solution outside the allowed arc to the end of that arc it is closer to along the loop.
+  Vec2d result = *best;
+  const double loop_length = arc[0] + arc[1];
+  const double ahead = best_forward ? best_arc : loop_length - best_arc;
+  const auto [ahead_limit, ahead_end] = allowed_arc(true);
+  const auto [behind_limit, behind_end] = allowed_arc(false);
+  const double over_ahead = ahead - ahead_limit;
+  const double over_behind = loop_length - ahead - behind_limit;
+  if (over_ahead > 0.0 && over_behind > 0.0)
+    result = over_ahead <= over_behind ? ahead_end : behind_end;
   return to_3d(Vec2f(result.cast<float>()), points[index].position.z());
 }
 
@@ -1485,7 +1508,7 @@ std::vector<std::pair<size_t, size_t>> SeamPlacer::find_seam_string(const PrintO
 // aligns the strings via polynomial fit
 // Does not change the positions of the SeamCandidates themselves, instead stores
 // the new aligned position into the shared Perimeter structure of each perimeter
-// Note that this position does not necesarilly lay on the perimeter.
+// This position lies on the perimeter polygon; placement on the printed loop may still move it.
 void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::SeamComparator &comparator) {
   using namespace SeamPlacerImpl;
 

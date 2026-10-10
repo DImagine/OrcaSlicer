@@ -297,19 +297,21 @@ TEST_CASE("Painted seams run smoothly along a smooth contour", "[SeamPlacer][Reg
         const Vec2d offset = seams[i] - placed_center;
         const double angle = std::atan2(offset.y(), offset.x());
         CAPTURE(i, seams[i].x(), seams[i].y());
-        // The seam stays on the painted arc near the lowest point (about +-15 degrees).
+        // The seam stays near the lowest point, where the circle meets the painted face (+-0.3 rad).
         CHECK_THAT(angle, Catch::Matchers::WithinAbs(-PI / 2.0, 0.3));
         along.push_back(radius * angle);
     }
     // The seam line may lean with the curve fitted to the candidates, but must neither step nor kink between
-    // layers: the step stays below 0.05 mm and its change far below the candidate spacing near paint (0.2 mm).
+    // layers. The scale is the candidate spacing near paint: a 0.4 pull toward the candidate passes at least
+    // 0.4 of it into the seam, while the step must stay below a quarter of it and its change below 0.15 of it.
+    const double spacing = SeamPlacer::enforcer_oversampling_distance;
     for (size_t i = 1; i < along.size(); ++i) {
         CAPTURE(i, along[i - 1], along[i]);
-        CHECK_THAT(along[i] - along[i - 1], Catch::Matchers::WithinAbs(0.0, 0.05));
+        CHECK_THAT(along[i] - along[i - 1], Catch::Matchers::WithinAbs(0.0, 0.25 * spacing));
     }
     for (size_t i = 1; i + 1 < along.size(); ++i) {
         CAPTURE(i, along[i - 1], along[i], along[i + 1]);
-        CHECK_THAT(along[i + 1] - 2.0 * along[i] + along[i - 1], Catch::Matchers::WithinAbs(0.0, 0.03));
+        CHECK_THAT(along[i + 1] - 2.0 * along[i] + along[i - 1], Catch::Matchers::WithinAbs(0.0, 0.15 * spacing));
     }
 }
 
@@ -464,11 +466,50 @@ TEST_CASE("Seams placed on the loop stay in the allowed arc", "[SeamPlacer]")
     CHECK((placed(types) - past_end).norm() < 1e-5);
     types[14] = SeamType::Blocked;
     CHECK((placed(types) - run_end).norm() < 1e-5);
-    // A candidate that is not Enforced stops before a Blocked one.
+    // A candidate that is not Enforced stays between the Blocked candidates around it.
     std::fill(types.begin() + 10, types.begin() + 14, SeamType::Neutral);
+    types[40] = SeamType::Blocked;
     CHECK((placed(types) - run_end).norm() < 1e-5);
+    // With the target reachable around the loop, it is the seam.
+    types[40] = SeamType::Neutral;
+    CHECK((placed(types) - target).norm() < 1e-5);
     types[14] = SeamType::Neutral;
     CHECK((placed(types) - target).norm() < 1e-5);
+}
+
+TEST_CASE("Seams placed on a short loop keep to the closest solution as the target moves", "[SeamPlacer][Regression]")
+{
+    // On a short painted square, the target moves upward left of the candidate: the solution on the left
+    // side stays the closest one, and must not be traded for the farther one on the right side.
+    SeamPlacerImpl::Perimeter perimeter;
+    const auto points = loop_candidates(perimeter, {{-1, 0}, {0, 0}, {1, 0}, {1, 2}, {-1, 2}},
+                                        std::vector<SeamType>(5, SeamType::Enforced));
+    Vec2d previous = placed_xy(points, 1, {-0.1, 1.0});
+    for (int i = 1; i <= 1000; ++i) {
+        const Vec2d target(-0.1, 1.0 + 0.0001 * i);
+        const Vec2d seam = placed_xy(points, 1, target);
+        CAPTURE(target.y(), seam.x(), seam.y());
+        CHECK(std::abs(seam.x() + 1.0) < 1e-5);
+        CHECK((seam - previous).norm() <= 0.0011);
+        previous = seam;
+    }
+}
+
+TEST_CASE("Seams placed on the loop do not jump at duplicated points", "[SeamPlacer][Regression]")
+{
+    // Extrusion loops repeat the shared end points of their paths; both copies of the corner must get the
+    // same normal.
+    SeamPlacerImpl::Perimeter perimeter;
+    const auto points = loop_candidates(perimeter, {{0, 0}, {9, 0}, {10, 0}, {10, 0}, {10, 10}, {0, 10}});
+    Vec2d previous = placed_xy(points, 1, {10.1, 0.0});
+    for (int i = 1; i <= 200; ++i) {
+        const Vec2d target(10.1, -0.001 * i);
+        const Vec2d seam = placed_xy(points, 1, target);
+        CAPTURE(target.y(), seam.x(), seam.y());
+        CHECK((seam - previous).norm() <= 0.0011);
+        CHECK((seam - Vec2d(10, 0)).norm() <= 0.11);
+        previous = seam;
+    }
 }
 
 TEST_CASE("Corner influence is full near a corner and fades out along the loop", "[SeamPlacer]")
