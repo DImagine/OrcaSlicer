@@ -1097,7 +1097,7 @@ void pick_random_seam_point(const std::vector<SeamCandidate> &perimeter_points, 
   perimeter.finalized = true;
 }
 
-// Painted seam alignment, see docs/HLSD/painted-seam-alignment.md.
+// Seam alignment on the loop, see docs/HLSD/seam-alignment.md.
 // A painted seam keeps its pull (t >= 0.4) toward the discrete candidate only near a measured corner;
 // on a smooth contour that pull makes the seam jump between candidates from layer to layer.
 constexpr float enforced_corner_angle_min = 15.0f * float(PI) / 180.0f;
@@ -1146,13 +1146,10 @@ Vec2d edge_normal(const Vec2d &a, const Vec2d &b) {
   return length > 0.0 ? Vec2d(-d.y() / length, d.x() / length) : Vec2d::Zero();
 }
 
-// Seam position on the loop for a `target` near the candidate at `index`: the loop point closest to the
-// candidate along the loop whose normal passes through the target. Normals blend linearly along each edge
-// between vertex normals, so an off-loop target maps continuously onto the loop instead of snapping to
-// vertices as its closest loop point does. The search stays within the allowed arc on each side: the run
-// of Enforced candidates extended by the oversampling distance for an Enforced candidate, the run of
-// candidates that are not Blocked otherwise, and in both cases at most twice the target distance (plus
-// the oversampling distance) away. Without a solution there, the closer end of that arc wins.
+// Seam position on the loop for a `target` near the candidate at `index`: of the loop points whose
+// normal passes through the target, the closest one to it. Normals blend linearly along each edge, so
+// the result does not snap to vertices. The search stays within the allowed arc around the candidate;
+// without a solution there, the arc end closer to the target wins.
 Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target) {
   const Perimeter &perimeter = points[index].perimeter;
   const size_t start = perimeter.start_index;
@@ -1173,15 +1170,17 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
   const bool blocked = points[index].type == EnforcedBlockedSeamPoint::Blocked;
   const double window = 2.0 * (p - xy(index)).norm() + SeamPlacer::enforcer_oversampling_distance;
 
-  // Walks away from the candidate in one direction. Returns the arc length to the first solution, or to
-  // the end of the allowed arc if there is none; `point` receives the corresponding loop point.
-  const auto search = [&](bool forward, Vec2d &point, bool &found) {
-    found = false;
+  Vec2d best = xy(index);
+  double best_distance = std::numeric_limits<double>::infinity();
+  // Walks away from the candidate in one direction over the allowed arc: the Enforced run plus the
+  // oversampling distance for an Enforced candidate, up to a Blocked one otherwise, and at most `window`.
+  // Keeps the solution closest to the target in `best`; returns the end of the arc.
+  const auto search = [&](bool forward) {
     double arc = 0.0;
     double extension = enforced ? SeamPlacer::enforcer_oversampling_distance : 0.0;
     bool in_run = true;
     size_t i = index;
-    point = xy(index);
+    Vec2d end = xy(index);
     for (size_t visited = 1; visited < count; ++visited) {
       const size_t j = forward ? next(i) : prev(i);
       const EnforcedBlockedSeamPoint type = points[j].type;
@@ -1191,6 +1190,10 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
       if (!in_run && (!enforced || type == EnforcedBlockedSeamPoint::Blocked))
         break; // Only an Enforced run is extended, and never into a Blocked candidate.
       const double length = (xy(j) - xy(i)).norm();
+      if (length <= 0.0) {
+        i = j;
+        continue;
+      }
       double reach = std::min(length, window - arc);
       if (!in_run) {
         reach = std::min(reach, extension);
@@ -1212,15 +1215,18 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
       const double c1 = cross(g, m) - cross(d, na);
       const double c2 = -cross(d, m);
       // Reachable part of the edge in its own parameter, measured from the side of the candidate.
-      const double reach_u = length > 0.0 ? reach / length : 1.0;
+      const double reach_u = reach / length;
       const double lo = forward ? 0.0 : 1.0 - reach_u;
       const double hi = forward ? reach_u : 1.0;
-      double best_u = std::numeric_limits<double>::quiet_NaN();
       const auto consider = [&](double u) {
         if (u < lo || u > hi)
           return;
-        if (std::isnan(best_u) || (forward ? u < best_u : u > best_u))
-          best_u = u;
+        const Vec2d q = xy(a) + u * d;
+        const double distance = (q - p).squaredNorm();
+        if (distance < best_distance) {
+          best_distance = distance;
+          best = q;
+        }
       };
       constexpr double eps = 1e-12;
       if (std::abs(c2) < eps) {
@@ -1234,29 +1240,19 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
           consider((-c1 + root) / (2.0 * c2));
         }
       }
-      if (!std::isnan(best_u)) {
-        point = xy(a) + best_u * d;
-        found = true;
-        return arc + (forward ? best_u : 1.0 - best_u) * length;
-      }
       arc += reach;
-      point = forward ? Vec2d(xy(a) + hi * d) : Vec2d(xy(a) + lo * d);
+      end = forward ? Vec2d(xy(a) + hi * d) : Vec2d(xy(a) + lo * d);
       if (reach < length)
         break;
       i = j;
     }
-    return arc;
+    return end;
   };
 
-  Vec2d ahead, behind;
-  bool found_ahead, found_behind;
-  const double arc_ahead = search(true, ahead, found_ahead);
-  const double arc_behind = search(false, behind, found_behind);
-  Vec2d result;
-  if (found_ahead || found_behind)
-    result = !found_behind || (found_ahead && arc_ahead <= arc_behind) ? ahead : behind;
-  else
-    result = (ahead - p).squaredNorm() <= (behind - p).squaredNorm() ? ahead : behind;
+  const Vec2d ahead = search(true);
+  const Vec2d behind = search(false);
+  const Vec2d result = std::isfinite(best_distance) ? best :
+                       (ahead - p).squaredNorm() <= (behind - p).squaredNorm() ? ahead : behind;
   return to_3d(Vec2f(result.cast<float>()), points[index].position.z());
 }
 

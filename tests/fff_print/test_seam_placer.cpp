@@ -158,6 +158,30 @@ std::vector<Vec2d> placed_seams(const SeamPlacer &placer, const PrintObject &obj
     }
     return starts;
 }
+
+using SeamType = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+
+// Seam candidates of one loop through xy at z = 0; Neutral with angle 0 unless given.
+std::vector<SeamPlacerImpl::SeamCandidate> loop_candidates(SeamPlacerImpl::Perimeter &perimeter, const std::vector<Vec2d> &xy,
+                                                           const std::vector<SeamType> &types = {},
+                                                           const std::vector<float> &angles = {})
+{
+    perimeter.start_index = 0;
+    perimeter.end_index = xy.size();
+    std::vector<SeamPlacerImpl::SeamCandidate> points;
+    points.reserve(xy.size());
+    for (size_t i = 0; i < xy.size(); ++i)
+        points.emplace_back(Vec3f(float(xy[i].x()), float(xy[i].y()), 0.0f), perimeter, angles.empty() ? 0.0f : angles[i],
+                            types.empty() ? SeamType::Neutral : types[i]);
+    return points;
+}
+
+Vec2d placed_xy(const std::vector<SeamPlacerImpl::SeamCandidate> &points, size_t index, const Vec2d &target)
+{
+    return SeamPlacerImpl::place_on_loop(points, index, Vec3f(float(target.x()), float(target.y()), 0.0f))
+        .head<2>()
+        .cast<double>();
+}
 } // namespace
 
 TEST_CASE("Painted seams prefer the longer candidate patch regardless of contour origin", "[SeamPlacer][Regression]")
@@ -277,8 +301,12 @@ TEST_CASE("Painted seams run smoothly along a smooth contour", "[SeamPlacer][Reg
         CHECK_THAT(angle, Catch::Matchers::WithinAbs(-PI / 2.0, 0.3));
         along.push_back(radius * angle);
     }
-    // The seam line may drift slowly with the candidates, but must not kink between layers: the change
-    // of step stays far below the candidate spacing near paint (0.2 mm).
+    // The seam line may lean with the curve fitted to the candidates, but must neither step nor kink between
+    // layers: the step stays below 0.05 mm and its change far below the candidate spacing near paint (0.2 mm).
+    for (size_t i = 1; i < along.size(); ++i) {
+        CAPTURE(i, along[i - 1], along[i]);
+        CHECK_THAT(along[i] - along[i - 1], Catch::Matchers::WithinAbs(0.0, 0.05));
+    }
     for (size_t i = 1; i + 1 < along.size(); ++i) {
         CAPTURE(i, along[i - 1], along[i], along[i + 1]);
         CHECK_THAT(along[i + 1] - 2.0 * along[i] + along[i - 1], Catch::Matchers::WithinAbs(0.0, 0.03));
@@ -349,6 +377,125 @@ TEST_CASE("Painted seams stay at a corner of the painted side", "[SeamPlacer]")
         // line width from them, so the seam lies on a painted corner or within that width of it.
         CHECK(nearest <= 0.45);
     }
+}
+
+TEST_CASE("Seams placed on a regular polygon lie on the ray from its center", "[SeamPlacer]")
+{
+    const Vec2d center(3.0, -2.0);
+    const double radius = 5.0;
+    const size_t count = 24;
+    const double step = 2.0 * PI / double(count);
+    std::vector<Vec2d> xy;
+    for (size_t i = 0; i < count; ++i)
+        xy.emplace_back(center + radius * Vec2d(std::cos((0.3 + double(i)) * step), std::sin((0.3 + double(i)) * step)));
+    SeamPlacerImpl::Perimeter perimeter;
+    const auto points = loop_candidates(perimeter, xy);
+    // Targets inside and outside the loop around vertex 5, placed from two neighboring candidates.
+    for (const double offset : {-0.1, -0.03, 0.0, 0.05, 0.12})
+        for (const double distance : {3.5, 5.0, 6.5}) {
+            const double angle = (5.3 * step) + offset;
+            const Vec2d target = center + distance * Vec2d(std::cos(angle), std::sin(angle));
+            const Vec2d from_5 = placed_xy(points, 5, target);
+            const Vec2d from_6 = placed_xy(points, 6, target);
+            CAPTURE(offset, distance, from_5.x(), from_5.y());
+            CHECK_THAT(std::atan2(from_5.y() - center.y(), from_5.x() - center.x()), Catch::Matchers::WithinAbs(angle, 1e-5));
+            CHECK((from_5 - center).norm() <= radius + 1e-5);
+            CHECK((from_5 - center).norm() >= radius * std::cos(step / 2.0) - 1e-5);
+            CHECK((from_6 - from_5).norm() < 1e-5);
+        }
+}
+
+TEST_CASE("Seams placed on the loop do not depend on the chosen candidate", "[SeamPlacer]")
+{
+    // Inserted candidates at (0, 0) and (0.2, 0) on an asymmetric painted contour; a chord around the
+    // candidate would turn the target's offset across the bottom edge into a move along it.
+    SeamPlacerImpl::Perimeter perimeter;
+    const auto points = loop_candidates(perimeter, {{-1, 0}, {0, 0}, {0.2, 0}, {1, 0}, {1, 5}, {-6, 5}},
+                                        std::vector<SeamType>(6, SeamType::Enforced));
+    for (const Vec2d &target : {Vec2d(0, 3), Vec2d(0, 0.5), Vec2d(0.5, 1)}) {
+        const Vec2d from_1 = placed_xy(points, 1, target);
+        const Vec2d from_2 = placed_xy(points, 2, target);
+        CAPTURE(target.x(), target.y(), from_1.x(), from_1.y(), from_2.x(), from_2.y());
+        CHECK((from_2 - from_1).norm() < 1e-5);
+    }
+    // Straight above the candidate the seam stays on the bottom edge.
+    CHECK((placed_xy(points, 2, {0, 0.5}) - Vec2d(0, 0)).norm() < 1e-5);
+}
+
+TEST_CASE("Seams placed on a short loop follow a moving target continuously", "[SeamPlacer]")
+{
+    // A 2 x 2 mm painted square with a candidate inserted at (0, 0); the target goes up along the right
+    // side and beyond the loop, up to 5 mm from the candidate.
+    SeamPlacerImpl::Perimeter perimeter;
+    const auto points = loop_candidates(perimeter, {{-1, 0}, {0, 0}, {1, 0}, {1, 2}, {-1, 2}},
+                                        std::vector<SeamType>(5, SeamType::Enforced));
+    Vec2d previous = placed_xy(points, 1, {1, 0});
+    for (int i = 1; i <= 500; ++i) {
+        const Vec2d target(1.0, 0.01 * i);
+        const Vec2d seam = placed_xy(points, 1, target);
+        CAPTURE(target.y(), seam.x(), seam.y());
+        if (target.y() <= 2.0)
+            CHECK((seam - target).norm() < 1e-5); // A target on the loop is the seam.
+        CHECK((seam - previous).norm() <= 0.0101);
+        previous = seam;
+    }
+    // Above the loop the normals of the top side point to the square's center.
+    CHECK((previous - Vec2d(0.25, 2.0)).norm() < 1e-5);
+}
+
+TEST_CASE("Seams placed on the loop stay in the allowed arc", "[SeamPlacer]")
+{
+    // A circle of 60 vertices; the target lies on vertex 16, beyond the arc allowed from candidate 12.
+    const size_t count = 60;
+    std::vector<Vec2d> xy;
+    for (size_t i = 0; i < count; ++i)
+        xy.emplace_back(10.0 * Vec2d(std::cos(2.0 * PI * double(i) / count), std::sin(2.0 * PI * double(i) / count)));
+    const Vec2d target = xy[16];
+    const Vec2d run_end = xy[13];
+    const Vec2d past_end = run_end + 0.2 * (xy[14] - run_end).normalized();
+    const auto placed = [&](const std::vector<SeamType> &types) {
+        SeamPlacerImpl::Perimeter perimeter;
+        const auto points = loop_candidates(perimeter, xy, types);
+        return placed_xy(points, 12, target);
+    };
+    std::vector<SeamType> types(count, SeamType::Neutral);
+    // Enforced run 10..13: the seam may go 0.2 mm past its end, but not into a Blocked candidate.
+    std::fill(types.begin() + 10, types.begin() + 14, SeamType::Enforced);
+    CHECK((placed(types) - past_end).norm() < 1e-5);
+    types[14] = SeamType::Blocked;
+    CHECK((placed(types) - run_end).norm() < 1e-5);
+    // A candidate that is not Enforced stops before a Blocked one.
+    std::fill(types.begin() + 10, types.begin() + 14, SeamType::Neutral);
+    CHECK((placed(types) - run_end).norm() < 1e-5);
+    types[14] = SeamType::Neutral;
+    CHECK((placed(types) - target).norm() < 1e-5);
+}
+
+TEST_CASE("Corner influence is full near a corner and fades out along the loop", "[SeamPlacer]")
+{
+    // Candidates every 0.1 mm along the bottom of a 3 x 3 mm loop; angles are set directly.
+    std::vector<Vec2d> xy;
+    for (int i = 0; i <= 30; ++i)
+        xy.emplace_back(0.1 * i, 0.0);
+    xy.emplace_back(3.0, 3.0);
+    xy.emplace_back(0.0, 3.0);
+    const auto influence = [&](float corner_angle, size_t index) {
+        std::vector<float> angles(xy.size(), 0.0f);
+        angles[10] = corner_angle;
+        SeamPlacerImpl::Perimeter perimeter;
+        const auto points = loop_candidates(perimeter, xy, {}, angles);
+        return double(SeamPlacerImpl::enforced_corner_influence(points, index, 0.4f, 0.8f));
+    };
+    const float deg = float(PI) / 180.0f;
+    using Catch::Matchers::WithinAbs;
+    CHECK_THAT(influence(45.0f * deg, 10), WithinAbs(1.0, 1e-4));
+    CHECK_THAT(influence(-45.0f * deg, 14), WithinAbs(1.0, 1e-4)); // Within R0 = 0.4 mm, either turn.
+    CHECK_THAT(influence(45.0f * deg, 6), WithinAbs(1.0, 1e-4));
+    CHECK_THAT(influence(45.0f * deg, 16), WithinAbs(0.5, 1e-4));  // Halfway through the fade band.
+    CHECK_THAT(influence(45.0f * deg, 18), WithinAbs(0.0, 1e-4));  // R1 = 0.8 mm.
+    CHECK_THAT(influence(45.0f * deg, 25), WithinAbs(0.0, 1e-4));
+    CHECK_THAT(influence(22.5f * deg, 10), WithinAbs(0.5, 1e-4));  // Halfway between 15 and 30 degrees.
+    CHECK_THAT(influence(10.0f * deg, 10), WithinAbs(0.0, 1e-4));
 }
 
 TEST_CASE("Seam painting acts only from model parts and negative volumes", "[SeamPlacer]")

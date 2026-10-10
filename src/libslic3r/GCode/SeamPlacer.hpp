@@ -91,6 +91,10 @@ struct SeamCandidateCoordinateFunctor {
     return seam_candidates[index].position[dim];
   }
 };
+
+// Seam alignment helpers, declared here for the tests.
+float enforced_corner_influence(const std::vector<SeamCandidate> &points, size_t index, float protect, float fade_end);
+Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target);
 } // namespace SeamPlacerImpl
 
 struct PrintObjectSeamData
