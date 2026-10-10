@@ -523,7 +523,7 @@ TEST_CASE("Seams placed on the loop respect a painted run ending on the closing 
     }
 }
 
-TEST_CASE("Seams held at the allowed arc do not switch ends while the target moves", "[SeamPlacer][Regression]")
+TEST_CASE("Seams held at the allowed arc keep their end across the arc midpoint", "[SeamPlacer][Regression]")
 {
     // A single Enforced candidate; the target moves along the far side of the loop, past the point halfway
     // around the loop from C. The end of the allowed arc closer to the target stays the same.
@@ -535,6 +535,27 @@ TEST_CASE("Seams held at the allowed arc do not switch ends while the target mov
         const Vec2d target(8.9 + 0.001 * i, 1.0);
         CAPTURE(target.x());
         CHECK((placed_xy(points, 0, target) - Vec2d(0.2, 0)).norm() < 1e-5);
+    }
+}
+
+TEST_CASE("Seams placed on the loop stay at the arc end their solution leaves through", "[SeamPlacer][Regression]")
+{
+    // The Enforced run of C = (4.2, 0) goes around the loop and ends 0.2 mm past (0, 0); the gap up to
+    // 0.2 mm before C is not allowed. The target follows the normal line through (x, 0) at a height of
+    // 2.15 mm, so that (x, 0) is its closest solution, while the target stays closer to the other arc end.
+    std::vector<SeamType> types(6, SeamType::Enforced);
+    types[1] = SeamType::Neutral;
+    SeamPlacerImpl::Perimeter perimeter;
+    const auto points = loop_candidates(perimeter, {{0, 0}, {3, 0}, {4.2, 0}, {100, 0}, {100, 100}, {0, 100}}, types);
+    const double a = 1.0 / std::sqrt(2.0);
+    for (int i = 0; i <= 200; ++i) {
+        // Normal at (x, 0), blended between (a, a) at (0, 0) and (0, 1) at (3, 0).
+        const double x = 0.1 + 0.001 * i;
+        const Vec2d normal(a * (1.0 - x / 3.0), a + (1.0 - a) * x / 3.0);
+        const Vec2d target(x + 2.15 * normal.x() / normal.y(), 2.15);
+        CAPTURE(x);
+        // The float target moves the solution by about 1e-5 mm here; the sweep step is 1e-3 mm.
+        CHECK((placed_xy(points, 2, target) - Vec2d(std::min(x, 0.2), 0)).norm() < 1e-4);
     }
 }
 

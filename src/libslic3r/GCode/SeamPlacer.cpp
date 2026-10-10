@@ -1147,7 +1147,7 @@ Vec2d edge_normal(const Vec2d &a, const Vec2d &b) {
 }
 
 // Seam position on the loop for a `target`: the closest loop point to it whose normal passes through it,
-// or, if that lies outside the arc allowed around the candidate at `index`, the arc end closer to the target.
+// or, if that lies outside the arc allowed around the candidate at `index`, the arc end closer to that point.
 Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, const Vec3f &target) {
   const Perimeter &perimeter = points[index].perimeter;
   const size_t start = perimeter.start_index;
@@ -1267,14 +1267,15 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
   if (!best)
     return points[index].position;
 
-  // A solution outside the allowed arc gives way to the end of the arc closer to the target.
+  // A solution outside the allowed arc gives way to the arc end closer to it, so that a solution leaving
+  // the arc stays at the end it left through.
   Vec2d result = *best;
   const double loop_length = arc[0] + arc[1];
   const double ahead = best_forward ? best_arc : loop_length - best_arc;
   const auto [ahead_limit, ahead_end] = allowed_arc(true);
   const auto [behind_limit, behind_end] = allowed_arc(false);
   if (ahead > ahead_limit && loop_length - ahead > behind_limit)
-    result = (ahead_end - p).squaredNorm() <= (behind_end - p).squaredNorm() ? ahead_end : behind_end;
+    result = (ahead_end - *best).squaredNorm() <= (behind_end - *best).squaredNorm() ? ahead_end : behind_end;
   return to_3d(Vec2f(result.cast<float>()), points[index].position.z());
 }
 

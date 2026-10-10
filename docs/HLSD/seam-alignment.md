@@ -76,8 +76,8 @@ blends linearly between its vertex normals. A **solution** is a loop point whose
 through the target; on each edge this is a quadratic equation in the edge parameter.
 
 The seam is the solution closest to the target over the whole loop. If it lies outside the allowed
-arc, the seam is the end of that arc closer to the target. Without any solution, which takes a
-degenerate loop, the seam is C.
+arc, the seam is the end of that arc closer to the solution, so a solution leaving the arc stays at
+the end it leaves through. Without any solution, which takes a degenerate loop, the seam is C.
 
 The search walks outward from C on both sides, the shorter walked side first. An edge farther from
 the target than the best solution so far is skipped without solving.
@@ -87,15 +87,16 @@ Properties:
 - On a regular polygon every normal line passes through the center, so for a target other than
   the center and a solution inside the allowed arc, the seam is where the ray from the center
   through the target meets the loop, wherever the vertices are.
-- When the closest solution lies inside the allowed arc, the result depends on the target and that
-  arc only, not on which candidate inside the arc was chosen. A candidate step therefore does not
-  pass into the seam directly.
-- A selected solution varies continuously while its root branch remains nondegenerate. The seam may
-  jump when the closest solution changes (two solutions equally close, or the closest one
-  disappearing together with another where the target crosses the curve of centers of the normal
-  field), when the closest solution leaves the allowed arc and the arc end closer to the target is
-  not the end it leaves through, or when the two arc ends are equally close to a target whose
-  solution lies outside. Changes of the candidate types between layers change the allowed arc.
+- When the closest solution is unique and lies inside the allowed arc, the result depends on the
+  target and that arc only, not on which candidate inside the arc was chosen. A candidate step
+  therefore does not pass into the seam directly. At an exact distance tie, the first solution found
+  from C is kept.
+- A selected solution varies continuously while its root branch remains nondegenerate, and so does
+  the seam when the solution leaves or enters the allowed arc. The seam may jump when the closest
+  solution changes (two solutions equally close, or the closest one disappearing together with
+  another where the target crosses the curve of centers of the normal field), or when a solution
+  outside the arc becomes equally close to both arc ends. Changes of the candidate types between
+  layers change the allowed arc.
 
 ### Allowed arc
 
@@ -169,7 +170,8 @@ staggers them on its own; the placed point is its input, not its output.
     corner point; the ends of an Enforced run with and without a Blocked neighbor, and Blocked
     candidates around a Neutral one; a run whose extension ends on the closing edge, also with the
     loop after another one and the run wrapping around the array end; the same arc end held while
-    the target passes halfway around the loop;
+    the target passes halfway around the loop; a solution leaving the arc through the end farther
+    from the target stays at that end;
   - `enforced_corner_influence` directly: full protection within `R0`, the middle of the fade band,
     no influence from `R1` on, and a partial measured angle.
 - Not covered by tests: a painted corner with differing C and F through the whole pipeline, weak
