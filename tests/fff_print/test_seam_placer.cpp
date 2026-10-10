@@ -285,6 +285,47 @@ TEST_CASE("Painted seams run smoothly along a smooth contour", "[SeamPlacer][Reg
     }
 }
 
+TEST_CASE("Seam strings leave out no layer below their start", "[SeamPlacer][Regression]")
+{
+    // 41 layers of 0.2 mm with one square each. Painting the top face enforces the candidates of the top
+    // two layers only (paint radius 0.4 mm), so the aligned string starts at layer 39, the first of them.
+    // Layer 40 is a small square in the middle, out of reach of layer 39's seam, so the string cannot
+    // continue upward and turns down from layer 39. The string is long enough that alignment tries only
+    // some alternative starts, so a layer skipped when turning down stays out of it.
+    PipelineFixture fixture(false, 8.2f);
+    {
+        auto &volume = *fixture.model.objects.front()->volumes.front();
+        const auto &mesh = volume.mesh();
+        const double top = mesh.bounding_box().max.z();
+        TriangleSelector selector(mesh);
+        for (size_t i = 0; i < mesh.its.indices.size(); ++i) {
+            bool on_top = true;
+            for (int j = 0; j < 3; ++j)
+                on_top = on_top && std::abs(double(mesh.its.vertices[mesh.its.indices[i][j]].z()) - top) < 1e-6;
+            if (on_top)
+                selector.set_facet(int(i), EnforcerBlockerType::ENFORCER);
+        }
+        volume.seam_facets.set(selector);
+        fixture.print.apply(fixture.model, fixture.config);
+    }
+    PrintObject &object = fixture.prepare();
+    REQUIRE(object.layers().size() == 41);
+    set_loop_on_every_layer(object, [&](size_t layer) {
+        if (layer == 40)
+            return fixture.points_in_layer(object, {{9, 9}, {11, 9}, {11, 11}, {9, 11}});
+        return fixture.points_in_layer(object, {{0, 0}, {20, 0}, {20, 20}, {0, 20}});
+    });
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+    const auto &layers = placer.m_seam_per_object.at(&object).layers;
+    // Layer 0 is left out: with no layer below, its own seam differs and it does not join the string here.
+    for (size_t i = 1; i <= 39; ++i) {
+        CAPTURE(i);
+        REQUIRE(layers[i].perimeters.size() == 1);
+        CHECK(layers[i].perimeters.front().finalized);
+    }
+}
+
 TEST_CASE("Painted seams stay at a corner of the painted side", "[SeamPlacer]")
 {
     const std::string mode = GENERATE("back", "aligned");

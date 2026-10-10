@@ -1428,10 +1428,9 @@ std::vector<std::pair<size_t, size_t>> SeamPlacer::find_seam_string(const PrintO
       //String added, prev_point_index updated
     } else {
       if (step == 1) {
+        // Continue right below the start seam; stepping now would skip that layer.
         reverse_lookup_direction();
-        if (next_layer < 0) {
-          break;
-        }
+        continue;
       } else {
         break;
       }
