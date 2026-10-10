@@ -84,9 +84,11 @@ the target than the best solution so far is skipped without solving.
 
 Properties:
 
-- On a regular polygon every normal line passes through the center, so for a target other than
-  the center and a solution inside the allowed arc, the seam is where the ray from the center
-  through the target meets the loop, wherever the vertices are.
+- On a regular polygon every normal line passes through the center. For a target other than the
+  center, the closest solution is the nearer of the two intersections of the loop with the line
+  through the center and the target, wherever the vertices are; the seam equals it when it lies
+  inside the allowed arc. With an even number of vertices the two intersections are symmetric about
+  the center, so the nearer one is on the ray from the center through the target.
 - When the closest solution is unique and lies inside the allowed arc, the result depends on the
   target and that arc only, not on which candidate inside the arc was chosen. A candidate step
   therefore does not pass into the seam directly. At an exact distance tie, the first solution found
@@ -164,7 +166,7 @@ staggers them on its own; the placed point is its input, not its output.
   - a 41-layer square whose string starts at layer 39: layers 1 through 39 join the string, including
     layer 38 right below the start;
   - a painted square in Rear and Aligned modes: the seam lies within 0.45 mm of a corner;
-  - `place_on_loop` directly: the ray property on a regular polygon; the same result from
+  - `place_on_loop` directly: the ray property on a regular 24-gon; the same result from
     neighboring candidates on an asymmetric contour; continuity along target sweeps on a short loop,
     across the point where the closest solution would leave a bounded search, and at a duplicated
     corner point; the ends of an Enforced run with and without a Blocked neighbor, and Blocked

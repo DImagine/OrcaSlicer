@@ -385,7 +385,7 @@ TEST_CASE("Painted seams stay at a corner of the painted side", "[SeamPlacer]")
     }
 }
 
-TEST_CASE("Seams placed on a regular polygon lie on the ray from its center", "[SeamPlacer]")
+TEST_CASE("Seams placed on a regular polygon with an even vertex count lie on the ray from its center", "[SeamPlacer]")
 {
     const Vec2d center(3.0, -2.0);
     const double radius = 5.0;
