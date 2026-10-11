@@ -34,8 +34,9 @@ Exact painted intervals impose linear bounds on the displacement coefficients. F
 at 55 degrees fixes the corresponding displacement to zero; the solver eliminates these equalities.
 Legacy Enforced candidates without exact intervals retain their original positions when their
 allowed painted range cannot be reconstructed reliably. Outside all painted facets' heights, with
-no weak modifiers, an Enforced mark is provably only a proximity preference: it stays movable and
-keeps its old soft anchor cost. No green interval is invented where paint does not cross the layer.
+no weak modifiers, an Enforced mark is provably only a proximity preference: it stays movable with
+the ordinary angle-based anchor cost, without the painted-center preference or its extra weight.
+No green interval is invented where paint does not cross the layer.
 Fixed points remain part of the length calculation.
 Strong Precise Seam, Blocked-selected strings and embedded joins keep the original string.
 

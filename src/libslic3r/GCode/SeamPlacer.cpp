@@ -2008,7 +2008,9 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
         }
       }
       size_t anchor = selected;
-      if (candidate.type == EnforcedBlockedSeamPoint::Enforced) {
+      // A proven paint-proximity fringe has no painted center to attract the seam to.
+      const bool painted_preference = candidate.type == EnforcedBlockedSeamPoint::Enforced && !perimeter.enforcer_proximity_only;
+      if (painted_preference) {
         for (size_t j = 0; j < order.size(); ++j) {
           const double s = arc[j] + std::round((point.candidate_arc - arc[j]) / arc.back()) * arc.back();
           if (candidates[order[j]].central_enforcer && s >= point.lower_arc && s <= point.upper_arc) {
@@ -2019,7 +2021,7 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
         }
       }
       const double angle_weight = 1. / (0.1 + compute_angle_penalty(candidates[order[anchor]].local_ccw_angle));
-      point.anchor_weight = candidate.type == EnforcedBlockedSeamPoint::Enforced ? angle_weight + 3. : angle_weight * t;
+      point.anchor_weight = painted_preference ? angle_weight + 3. : angle_weight * t;
       if (legacy_paint) {
         // Unknown paint is fixed; proven absent paint has no hard interval, including the old proximity fringe.
         point.lower_arc = -std::numeric_limits<double>::infinity();
