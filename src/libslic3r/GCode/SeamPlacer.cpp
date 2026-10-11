@@ -37,6 +37,7 @@
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <utility>
 
@@ -332,8 +333,11 @@ struct GlobalModelInfo {
 
   indexed_triangle_set enforcers;
   indexed_triangle_set blockers;
+  // Non-green surface proves that missing paint ends do not mean full coverage.
+  indexed_triangle_set non_enforcers;
   AABBTreeIndirect::Tree<3, float> enforcers_tree;
   AABBTreeIndirect::Tree<3, float> blockers_tree;
+  AABBTreeIndirect::Tree<3, float> non_enforcers_tree;
   // Contour of the painted enforcer region: edges of one enforcer triangle only, with the unit direction from
   // each edge into the paint.
   std::vector<Linef3> enforcer_contour;
@@ -534,6 +538,47 @@ struct EnforcedInterval {
 // Two loop positions closer than this (1 um) are one point, mm.
 constexpr double enforced_end_tolerance = 1e-3;
 
+// Prove complete coverage before sampling candidates; proximity at vertices alone can miss paint gaps.
+bool fully_enforced_loop(const std::vector<Vec2d> &loop, double z, double reach, const GlobalModelInfo &info) {
+  if (loop.size() < 3 || info.enforcers.empty())
+    return false;
+  if (info.non_enforcers.empty())
+    return true; // Every relevant model surface is green, so paint adds no seam information.
+  if (reach <= enforced_end_tolerance)
+    return false;
+  Vec2d min = loop.front(), max = loop.front();
+  for (const Vec2d &point : loop) {
+    min = min.cwiseMin(point);
+    max = max.cwiseMax(point);
+  }
+  // A conservative box also rejects tiny gaps and a nearby opposite unpainted wall.
+  const Eigen::AlignedBox<float, 3> box(Vec3f(float(min.x() - reach), float(min.y() - reach), float(z - reach)),
+                                       Vec3f(float(max.x() + reach), float(max.y() + reach), float(z + reach)));
+  bool non_green_nearby = false;
+  AABBTreeIndirect::traverse(info.non_enforcers_tree, AABBTreeIndirect::intersecting(box), [&](const auto &) {
+    non_green_nearby = true;
+    return false; // Stop on the first uncertain surface rather than infer a full painted ring.
+  });
+  if (non_green_nearby)
+    return false;
+  const auto covered = [&](const auto &self, const Vec3d &a, const Vec3d &b, unsigned depth) -> bool {
+    const Vec3d middle = 0.5 * (a + b);
+    // A paint point this close to the midpoint covers the entire segment by the triangle inequality.
+    const double radius = reach - 0.5 * (b - a).norm() - enforced_end_tolerance;
+    if (radius > 0.0 && info.is_enforced(middle.cast<float>(), float(radius)))
+      return true;
+    if (depth == 8)
+      return false; // A bounded proof failure preserves the existing conservative paint behavior.
+    return self(self, a, middle, depth + 1) && self(self, middle, b, depth + 1);
+  };
+  for (size_t i = 0; i < loop.size(); ++i) {
+    const Vec2d &a = loop[i], &b = loop[(i + 1) % loop.size()];
+    if (!covered(covered, Vec3d(a.x(), a.y(), z), Vec3d(b.x(), b.y(), z), 0))
+      return false;
+  }
+  return true;
+}
+
 // Painted ranges of a counterclockwise loop at height z, bounded exactly where the enforcer contour crosses the
 // layer: each crossing within `reach` of the loop is moved to its closest loop point, and paint lies ahead of
 // it or behind it along the loop. `arc` holds the length from the first vertex to each vertex, the loop length
@@ -673,6 +718,11 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   const double loop_length = loop_arc.back();
   const std::vector<EnforcedInterval> intervals = exact_enforced_intervals(loop_xy, loop_arc, z_coord,
                                                                            perimeter.flow_width, global_model_info);
+  // Keep active Precise Seam modifiers authoritative; normalize ordinary full paint only.
+  const bool ignore_full_paint = intervals.empty() && !inserted_seam_position && weak_segments.empty() &&
+      fully_enforced_loop(loop_xy, z_coord, perimeter.flow_width, global_model_info);
+  if (ignore_full_paint)
+    BOOST_LOG_TRIVIAL(debug) << "[SeamPaint] full_perimeter z=" << z_coord << " normalized=true";
   perimeter.exact_enforced_ends = !intervals.empty();
   if (!perimeter.exact_enforced_ends && weak_volumes.empty()) {
     // Prove that no green paint exists at this height; do not infer absence from failed interval reconstruction.
@@ -741,7 +791,8 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
       orig_point = true;
     }
 
-    if (perimeter.exact_enforced_ends ? in_interval(at) : global_model_info.is_enforced(position, perimeter.flow_width)) {
+    if (!ignore_full_paint &&
+        (perimeter.exact_enforced_ends ? in_interval(at) : global_model_info.is_enforced(position, perimeter.flow_width))) {
       type = EnforcedBlockedSeamPoint::Enforced;
     }
 
@@ -761,7 +812,7 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     } else if (orig_point) {
       Vec3f pos_of_next = orig_polygon_points.empty() ? first : orig_polygon_points.front();
       float distance_to_next = (position - pos_of_next).norm();
-      if (global_model_info.is_enforced(position, distance_to_next)) {
+      if (!ignore_full_paint && global_model_info.is_enforced(position, distance_to_next)) {
         Vec3f vec_to_next = (pos_of_next - position).normalized();
         float step_size = SeamPlacer::enforcer_oversampling_distance;
         float step = step_size;
@@ -1007,9 +1058,8 @@ void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
     // making it editable also needs model_custom_seam_data_changed() to track it.
     if (!mv->is_model_part() && !mv->is_negative_volume())
       continue;
+    const auto model_transformation = obj_transform * mv->get_matrix();
     if (mv->is_seam_painted()) {
-      auto model_transformation = obj_transform * mv->get_matrix();
-
       indexed_triangle_set enforcers = mv->seam_facets.get_facets(*mv, EnforcerBlockerType::ENFORCER);
       // ORCA fix (not related to Precise Seam): fix winding for mirrored transforms
       its_transform(enforcers, model_transformation, true);
@@ -1024,6 +1074,21 @@ void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
       its_transform(blockers, model_transformation, true);
       its_merge(result.blockers, blockers);
     }
+  }
+
+  // Unpainted objects need no extra surface copy or tree; only green paint requires a coverage proof.
+  if (!result.enforcers.empty()) {
+    for (const ModelVolume *mv : po->model_object()->volumes) {
+      if (!mv->is_model_part() && !mv->is_negative_volume())
+        continue;
+      indexed_triangle_set non_green = mv->is_seam_painted() ?
+          mv->seam_facets.get_facets(*mv, EnforcerBlockerType::NONE) : mv->mesh().its;
+      its_transform(non_green, obj_transform * mv->get_matrix(), true);
+      its_merge(result.non_enforcers, non_green);
+    }
+    its_merge(result.non_enforcers, result.blockers); // Red paint must also prevent full-green normalization.
+    result.non_enforcers_tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(result.non_enforcers.vertices,
+                                                                                          result.non_enforcers.indices);
   }
 
   result.enforcers_tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(result.enforcers.vertices,
@@ -1716,6 +1781,90 @@ std::vector<std::pair<size_t, size_t>> SeamPlacer::find_seam_string(const PrintO
 // Does not change the positions of the SeamCandidates themselves, instead stores
 // the new aligned position into the shared Perimeter structure of each perimeter
 // This position lies on the perimeter polygon; placement on the printed loop may still move it.
+namespace {
+// Surface patches use the actual transformed model, independently of the fitted seam's curvature.
+struct SeamProjectionSurface {
+  indexed_triangle_set mesh;
+  AABBTreeIndirect::Tree<3, float> tree;
+  std::vector<Vec3i32> neighbors;
+  struct Patch { Vec3d normal = Vec3d::Zero(); double confidence = 0.; double radius = 0.; };
+
+  explicit SeamProjectionSurface(const PrintObject *po) {
+    for (const ModelVolume *volume : po->model_object()->volumes) {
+      if (volume->type() != ModelVolumeType::MODEL_PART && volume->type() != ModelVolumeType::NEGATIVE_VOLUME) continue;
+      indexed_triangle_set part = volume->mesh().its;
+      its_transform(part, po->trafo_sliced() * volume->get_matrix(), true);
+      // The normal of a subtractive surface points into its volume from the remaining material.
+      if (volume->type() == ModelVolumeType::NEGATIVE_VOLUME)
+        for (auto &face : part.indices) std::swap(face[0], face[1]);
+      its_merge(mesh, part);
+    }
+    tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(mesh.vertices, mesh.indices);
+    neighbors = its_face_neighbors_par(mesh);
+  }
+
+  Patch patch(const Vec3d &position, double width, const SeamPlacerImpl::SeamChainOptions &options) const {
+    if (tree.empty()) return {};
+    size_t nearest_face = 0;
+    Vec3d hit;
+    const double distance = AABBTreeIndirect::squared_distance_to_indexed_triangle_set(
+        mesh.vertices, mesh.indices, tree, position, nearest_face, hit);
+    if (distance < 0. || distance > width * width) return {};
+    auto face_normal = [&](size_t i) -> Vec3d {
+      const auto &face = mesh.indices[i];
+      const Vec3d a = mesh.vertices[face[0]].cast<double>();
+      const Vec3d b = mesh.vertices[face[1]].cast<double>();
+      const Vec3d c = mesh.vertices[face[2]].cast<double>();
+      return (b - a).cross(c - a);
+    };
+    Vec3d closest_normal = face_normal(nearest_face);
+    if (closest_normal.norm() < 1e-12) return {};
+    closest_normal.normalize();
+    if (std::abs(closest_normal.z()) > std::sin(options.max_face_tilt * PI / 180.)) return {};
+    const double radius = options.max_motion_widths * width;
+    double safe_radius = radius;
+    const double threshold = std::cos(options.sharp_surface_angle * PI / 180.);
+    std::vector<size_t> pending{nearest_face};
+    std::unordered_set<size_t> visited{nearest_face};
+    // Follow only the connected smooth side; an opposite thin wall is not part of this surface patch.
+    while (!pending.empty()) {
+      const size_t i = pending.back();
+      pending.pop_back();
+      Vec3d normal = face_normal(i);
+      const double area = 0.5 * normal.norm();
+      if (area < 1e-12) continue;
+      normal.normalize();
+      const auto &face = mesh.indices[i];
+      const Vec3d foot = AABBTreeIndirect::detail::closest_point_to_triangle<Vec3d>(position,
+          mesh.vertices[face[0]].cast<double>(), mesh.vertices[face[1]].cast<double>(), mesh.vertices[face[2]].cast<double>());
+      const double weight = std::min(area, radius * radius) * std::max(0., 1. - (foot - position).norm() / radius);
+      if (weight <= 0.) continue;
+      for (int edge_index = 0; edge_index < 3; ++edge_index) {
+        const int neighbor = neighbors[i][edge_index];
+        Vec3d other = neighbor >= 0 ? face_normal(size_t(neighbor)) : Vec3d::Zero();
+        const bool smooth = other.norm() > 1e-12 && normal.dot(other.normalized()) >= threshold &&
+                            closest_normal.dot(other.normalized()) >= threshold &&
+                            std::abs(other.normalized().z()) <= std::sin(options.max_face_tilt * PI / 180.);
+        if (smooth) {
+          if (visited.insert(size_t(neighbor)).second) pending.push_back(size_t(neighbor));
+        } else {
+          // Never allow a frozen chart to cross the sharp or open edge that clipped its support.
+          const Vec2i32 indices = its_triangle_edge(face, edge_index);
+          const Vec3d a = mesh.vertices[indices[0]].cast<double>();
+          const Vec3d b = mesh.vertices[indices[1]].cast<double>();
+          const Vec3d edge = b - a;
+          const double t = edge.squaredNorm() > 0. ? std::clamp((position - a).dot(edge) / edge.squaredNorm(), 0., 1.) : 0.;
+          safe_radius = std::min(safe_radius, (position - a - t * edge).norm());
+        }
+      }
+    }
+    if (safe_radius < 1e-5) return {};
+    // The supporting face defines the frame; traversal only restricts motion near invalid or sharp boundaries.
+    return {closest_normal, 1., safe_radius};
+  }
+};
+} // namespace
+
 void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::SeamComparator &comparator) {
   using namespace SeamPlacerImpl;
 
@@ -1930,13 +2079,45 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
     length_weight = end != setting && *end == '\0' && std::isfinite(parsed) && parsed >= 0. ? parsed : 0.;
   }
   const char *dump = std::getenv("ORCA_SEAM_CHAIN_DUMP");
-  std::ofstream dump_points, dump_vertices;
+  // Independent experimental controls leave the ordinary length pass exactly reproducible.
+  auto setting = [](const char *name, double fallback) {
+    if (const char *value = std::getenv(name)) {
+      char *end = nullptr;
+      const double parsed = std::strtod(value, &end);
+      return end != value && *end == '\0' && std::isfinite(parsed) && parsed >= 0. ? parsed : 0.;
+    }
+    return fallback;
+  };
+  auto projection_options = SeamChainOptions::projected_defaults();
+  projection_options.vertical_weight = setting("ORCA_SEAM_CHAIN_VERTICAL_WEIGHT", projection_options.vertical_weight);
+  projection_options.geometric_probe = setting("ORCA_SEAM_CHAIN_GEOMETRIC_PROBE", projection_options.geometric_probe) > 0.;
+  projection_options.projection_span = setting("ORCA_SEAM_CHAIN_PROJECTION_SPAN", projection_options.projection_span);
+  projection_options.direction_layers = setting("ORCA_SEAM_CHAIN_DIRECTION_LAYERS", projection_options.direction_layers) == 0. ? 0 : 3;
+  projection_options.relative_length_growth = setting("ORCA_SEAM_CHAIN_LENGTH_GROWTH", projection_options.relative_length_growth);
+  projection_options.max_projection_angle = std::min(90., setting("ORCA_SEAM_CHAIN_MAX_ANGLE", projection_options.max_projection_angle));
+  projection_options.max_face_tilt = std::min(89., setting("ORCA_SEAM_CHAIN_FACE_TILT", projection_options.max_face_tilt));
+  projection_options.max_motion_widths = setting("ORCA_SEAM_CHAIN_MOTION_WIDTHS", projection_options.max_motion_widths);
+  projection_options.boundary_taper_fraction = setting("ORCA_SEAM_CHAIN_BOUNDARY_TAPER", projection_options.boundary_taper_fraction);
+  projection_options.hold_free_center = setting("ORCA_SEAM_CHAIN_HOLD_CENTER", projection_options.hold_free_center) > 0.;
+  const double vertical_weight = projection_options.vertical_weight;
+  const bool geometric_probe = projection_options.geometric_probe;
+  const double projection_span = projection_options.projection_span;
+  std::unique_ptr<SeamProjectionSurface> projection_surface;
+  std::ofstream dump_points, dump_vertices, dump_stage1, dump_projection, dump_passes, dump_domain;
   if (dump) {
     // Diagnostic files are opt-in and never share application configuration or output paths.
     dump_points.open(std::string(dump) + "-points.csv", std::ios::app);
     dump_vertices.open(std::string(dump) + "-vertices.csv", std::ios::app);
+    dump_stage1.open(std::string(dump) + "-stage1-points.csv", std::ios::app);
+    dump_projection.open(std::string(dump) + "-projection.csv", std::ios::app);
+    dump_passes.open(std::string(dump) + "-passes.csv", std::ios::app);
+    dump_domain.open(std::string(dump) + "-domain.csv", std::ios::app);
     dump_points << std::setprecision(17);
     dump_vertices << std::setprecision(17);
+    dump_stage1 << std::setprecision(17);
+    dump_projection << std::setprecision(17);
+    dump_passes << std::setprecision(17);
+    dump_domain << std::setprecision(17);
   }
   size_t chain_id = 0;
   for (const auto &[string, segments] : optimization_strings) {
@@ -2034,14 +2215,64 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
     SeamChainOptions options;
     options.length_weight = length_weight;
     options.segments = segments;
-    const auto optimized = optimize_seam_chain(chain, options);
+    const auto stage1 = optimize_seam_chain(chain, options);
+    auto optimized = stage1;
+    std::vector<SeamChainPoint> projection_chain = chain;
+    SeamChainResult stage2;
+    stage2.status = SeamChainStatus::Disabled;
+    if ((vertical_weight > 0. || geometric_probe) && projection_span > 0. && projection_options.max_motion_widths > 0.) {
+      if (!projection_surface) projection_surface = std::make_unique<SeamProjectionSurface>(po);
+      for (size_t i = 0; i < chain.size(); ++i) {
+        auto &point = projection_chain[i];
+        point.initial = stage1.positions[i];
+        const auto patch = projection_surface->patch(point.initial, point.width, projection_options);
+        point.surface_normal = patch.normal;
+        point.surface_confidence = patch.confidence;
+        point.surface_radius = patch.confidence > 0. ? patch.radius : projection_options.max_motion_widths * point.width;
+      }
+      prepare_seam_projection(projection_chain, projection_options);
+      if (std::any_of(projection_chain.begin(), projection_chain.end(), [](const SeamChainPoint &p) {
+            return !p.fixed && p.surface_confidence > 0.;
+          })) {
+        projection_options.length_weight = length_weight;
+        projection_options.segments = segments;
+        stage2 = optimize_seam_chain(projection_chain, projection_options);
+        if (stage2.status == SeamChainStatus::Improved) for (size_t i = 0; i < chain.size(); ++i) {
+          if (projection_chain[i].surface_confidence <= 0. || (stage2.positions[i] - projection_chain[i].initial).norm() < 1e-8) continue;
+          const auto final_frame = projection_surface->patch(stage2.positions[i], chain[i].width, projection_options);
+          // Verify the accepted route remains on the same eligible side without changing the frozen objective.
+          if (final_frame.confidence == 0. || final_frame.normal.dot(projection_chain[i].surface_normal) <
+              std::cos(projection_options.sharp_surface_angle * PI / 180.)) {
+            stage2.status = SeamChainStatus::Failed;
+            break;
+          }
+        }
+        // Any failure of the second pass keeps the complete first-pass result, not the pre-length line.
+        if (stage2.status == SeamChainStatus::Improved) optimized = stage2;
+      }
+    }
     BOOST_LOG_TRIVIAL(info) << "[SeamChain] id=" << chain_id << " points=" << chain.size() << " segments=" << segments
       << " status=" << int(optimized.status) << " iterations=" << optimized.iterations << " weight=" << length_weight
-      << " energy=" << optimized.initial_energy << "->" << optimized.energy
+      << " energy=" << stage1.initial_energy << "->" << stage1.energy
       << " trial=" << optimized.trial_energy << " residual=" << optimized.stationarity
       << " resolution_stop=" << optimized.resolution_converged
       << " qp_failure=" << optimized.qp_failure
-      << " length=" << optimized.initial_length << "->" << optimized.length;
+      << " length=" << stage1.initial_length << "->" << optimized.length;
+    BOOST_LOG_TRIVIAL(info) << "[SeamProjection] id=" << chain_id << " stage1_status=" << int(stage1.status)
+      << " status=" << int(stage2.status) << " weight=" << vertical_weight << " probe=" << geometric_probe
+      << " span=" << projection_span << " direction_layers=" << projection_options.direction_layers
+      << " max_angle=" << projection_options.max_projection_angle << " face_tilt=" << projection_options.max_face_tilt
+      << " length_growth=" << projection_options.relative_length_growth << " motion_widths=" << projection_options.max_motion_widths
+      << " hold_center=" << projection_options.hold_free_center << " taper=" << projection_options.boundary_taper_fraction
+      << " iterations=" << stage2.iterations
+      << " energy=" << stage2.initial_energy << "->" << stage2.energy
+      << " preference=" << stage2.preference_cost << " length_cost=" << stage2.length_cost
+      << " projection=" << stage2.projection_cost << " length=" << stage2.initial_length << "->" << stage2.length;
+    if (dump_passes) dump_passes << chain_id << ',' << int(stage1.status) << ',' << stage1.initial_energy << ',' << stage1.energy
+      << ',' << stage1.initial_length << ',' << stage1.length << ',' << int(stage2.status) << ',' << stage2.initial_energy
+      << ',' << stage2.energy << ',' << stage2.initial_length << ',' << stage2.length << ',' << stage2.preference_cost
+      << ',' << stage2.length_cost << ',' << stage2.projection_cost << ',' << stage2.trial_length
+      << ',' << stage2.length_rejections << '\n';
     for (size_t i = 0; i < chain.size(); ++i) {
       const auto &[layer_index, candidate_index] = string[i];
       const auto &point = chain[i];
@@ -2051,6 +2282,17 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
           << ',' << point.initial.x() << ',' << point.initial.y() << ',' << point.initial.z() << ',' << position.x() << ',' << position.y()
           << ',' << point.width << ',' << point.anchor_weight << ',' << point.fixed << ',' << point.candidate_arc << ',' << point.anchor_arc
           << ',' << point.lower_arc << ',' << point.upper_arc << '\n';
+        dump_stage1 << chain_id << ',' << i << ',' << layer_index + 1 << ',' << segments << ',' << int(stage1.status)
+          << ',' << point.initial.x() << ',' << point.initial.y() << ',' << point.initial.z()
+          << ',' << stage1.positions[i].x() << ',' << stage1.positions[i].y()
+          << ',' << point.width << ',' << point.anchor_weight << ',' << point.fixed << ',' << point.candidate_arc << ',' << point.anchor_arc
+          << ',' << point.lower_arc << ',' << point.upper_arc << '\n';
+        dump_projection << chain_id << ',' << i << ',' << projection_chain[i].initial.x() << ',' << projection_chain[i].initial.y()
+          << ',' << projection_chain[i].surface_normal.x() << ',' << projection_chain[i].surface_normal.y()
+          << ',' << projection_chain[i].surface_normal.z() << ',' << projection_chain[i].surface_confidence
+          << ',' << projection_chain[i].surface_radius << '\n';
+        dump_domain << chain_id << ',' << i << ',' << projection_chain[i].fixed << ',' << projection_chain[i].projection_hold
+          << ',' << projection_chain[i].projection_angle << '\n';
         for (size_t j = 0; j < point.vertices.size(); ++j) {
           const auto &v = point.vertices[j];
           dump_vertices << chain_id << ',' << i << ',' << j << ',' << v.position.x() << ',' << v.position.y() << ',' << v.quality << ',' << v.overhang << '\n';

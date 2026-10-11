@@ -10,6 +10,226 @@
 
 using namespace Slic3r;
 
+TEST_CASE("Projected seam search accepts a bounded length tradeoff instead of rolling it back", "[SeamPlacer][SeamChain][Regression]")
+{
+    using namespace SeamPlacerImpl;
+    std::vector<SeamChainPoint> chain;
+    for (size_t i = 0; i <= 40; ++i) {
+        SeamChainPoint point;
+        const double z = .25 * double(i), depth = .3 * z;
+        point.vertices = {{Vec2d(-10., depth)}, {Vec2d(10., depth)},
+                          {Vec2d(10., depth + 10.)}, {Vec2d(-10., depth + 10.)}};
+        point.initial = Vec3d(0., depth, z);
+        point.candidate_arc = point.anchor_arc = 10.;
+        // A frozen frame requests a sideways correction to an initially shortest admissible line.
+        point.surface_normal = Vec3d(.25, -1., 0.).normalized();
+        point.surface_confidence = 1.;
+        point.fixed = i == 0;
+        chain.push_back(std::move(point));
+    }
+    SeamChainOptions options;
+    options.segments = 4;
+    options.vertical_weight = 3.;
+    options.relative_length_growth = .015;
+    const auto allowed = optimize_seam_chain(chain, options);
+    INFO("status=" << int(allowed.status) << " trial=" << allowed.trial_energy);
+    REQUIRE(allowed.status == SeamChainStatus::Improved);
+    CHECK(allowed.energy < allowed.initial_energy);
+    CHECK(allowed.length > allowed.initial_length + 1e-5);
+    CHECK(allowed.length <= allowed.initial_length * 1.015 + 1e-5);
+    options.relative_length_growth = 0.;
+    const auto restricted = optimize_seam_chain(chain, options);
+    CHECK(restricted.length <= restricted.initial_length + 1e-5);
+    CHECK(restricted.length_rejections > 0);
+    CHECK((allowed.positions.front() - chain.front().initial).norm() < 1e-12);
+}
+
+TEST_CASE("Projection eligibility freezes inclined seams and unsuitable faces", "[SeamPlacer][SeamChain][Regression]")
+{
+    using namespace SeamPlacerImpl;
+    const double inclination = GENERATE(5., 20.);
+    const double tilt = GENERATE(0., 60.);
+    std::vector<SeamChainPoint> chain;
+    for (size_t i = 0; i < 21; ++i) {
+        SeamChainPoint point;
+        const double z = .25 * double(i), x = z * std::tan(inclination * PI / 180.);
+        point.vertices = {{Vec2d(-10., 0.)}, {Vec2d(10., 0.)}, {Vec2d(10., 10.)}, {Vec2d(-10., 10.)}};
+        point.initial = Vec3d(x, 0., z);
+        point.candidate_arc = point.anchor_arc = x + 10.;
+        point.surface_normal = Vec3d(0., -std::cos(tilt * PI / 180.), std::sin(tilt * PI / 180.));
+        point.surface_confidence = 1.;
+        chain.push_back(std::move(point));
+    }
+    auto options = SeamChainOptions::projected_defaults();
+    options.hold_free_center = false;
+    prepare_seam_projection(chain, options);
+    const bool suitable = tilt <= options.max_face_tilt;
+    const bool held = suitable && inclination > options.max_projection_angle;
+    for (const auto &point : chain) {
+        CHECK(point.fixed == held);
+        if (!suitable) CHECK(point.surface_confidence < 1e-12);
+    }
+    if (held) {
+        const auto result = optimize_seam_chain(chain, options);
+        CHECK(result.status == SeamChainStatus::NoFreedom);
+        for (size_t i = 0; i < chain.size(); ++i) CHECK((result.positions[i] - chain[i].initial).norm() < 1e-12);
+    }
+}
+
+TEST_CASE("A free projected seam holds its midpoint by spatial arc length", "[SeamPlacer][SeamChain][Regression]")
+{
+    using namespace SeamPlacerImpl;
+    std::vector<SeamChainPoint> chain(5);
+    for (size_t i = 0; i < chain.size(); ++i) {
+        chain[i].initial = Vec3d(i == 0 ? -10. : 0., 0., double(i));
+        chain[i].surface_normal = Vec3d(0., -1., 0.);
+        chain[i].surface_confidence = 1.;
+    }
+    auto options = SeamChainOptions::projected_defaults();
+    options.projection_gate = false; // Isolate midpoint selection from the deliberately inclined first segment.
+    prepare_seam_projection(chain, options);
+    // Most of the length is in the first segment; the nearest existing midpoint is layer 1, not layer 2.
+    CHECK(chain[1].fixed);
+    CHECK_FALSE(chain[1].projection_hold);
+    CHECK_FALSE(chain[2].fixed);
+}
+
+TEST_CASE("An unsuitable seam normal omits its vertical weight while retaining contour motion", "[SeamPlacer][SeamChain][Regression]")
+{
+    using namespace SeamPlacerImpl;
+    std::vector<SeamChainPoint> chain;
+    for (size_t i = 0; i <= 40; ++i) {
+        SeamChainPoint point;
+        const double z = .25 * double(i), x = .15 * std::sin(PI * z / 10.);
+        point.vertices = {{Vec2d(-10., 0.)}, {Vec2d(10., 0.)}, {Vec2d(10., 10.)}, {Vec2d(-10., 10.)}};
+        point.initial = Vec3d(x, 0., z);
+        point.candidate_arc = point.anchor_arc = x + 10.;
+        point.surface_normal = i == 20 ? Vec3d(0., 0., 1.) : Vec3d(0., -1., 0.);
+        point.surface_confidence = 1.;
+        point.fixed = i == 0 || i == 40;
+        chain.push_back(std::move(point));
+    }
+    auto options = SeamChainOptions::projected_defaults();
+    prepare_seam_projection(chain, options);
+    CHECK_FALSE(chain[20].fixed);
+    CHECK(chain[20].surface_confidence < 1e-12);
+    const auto result = optimize_seam_chain(chain, options);
+    INFO("status=" << int(result.status) << " trial=" << result.trial_energy);
+    REQUIRE(result.status == SeamChainStatus::Improved);
+    CHECK(result.energy < result.initial_energy);
+    CHECK(std::abs(result.positions[20].x()) < .5 * chain[20].initial.x());
+    CHECK(std::abs(result.positions[20].y()) < 1e-12);
+}
+
+TEST_CASE("A geometric seam probe straightens a route beyond the displacement spline", "[SeamPlacer][SeamChain][Regression]")
+{
+    using namespace SeamPlacerImpl;
+    const size_t painted_layers = GENERATE(size_t(1), size_t(4));
+    const double rotation = GENERATE(0., 0.3 * PI);
+    const Vec2d side(std::cos(rotation), std::sin(rotation));
+    const Vec2d depth(-side.y(), side.x());
+    std::vector<SeamChainPoint> chain;
+    for (size_t i = 0; i <= 40; ++i) {
+        SeamChainPoint point;
+        const double z = double(i) * .25;
+        const double y = .01 * z * z;
+        const double x = .15 * std::sin(PI * z / 10.);
+        // An opposite thin wall tests that a depth change cannot hijack the sideways probe.
+        point.vertices = {{-10. * side + y * depth}, {10. * side + y * depth},
+                          {10. * side + (y + .02) * depth}, {-10. * side + (y + .02) * depth}};
+        const Vec2d xy = x * side + y * depth;
+        point.initial = Vec3d(xy.x(), xy.y(), z);
+        point.candidate_arc = point.anchor_arc = 10. + x;
+        point.anchor_weight = .03;
+        // Known analytic surface normals make this test independent of mesh sampling.
+        point.surface_normal = Vec3d(-depth.x(), -depth.y(), .02 * z).normalized();
+        point.surface_confidence = 1.;
+        if (i > 40 - painted_layers) {
+            point.lower_arc = 9.95;
+            point.upper_arc = 10.05;
+            point.anchor_weight = 3.7;
+        }
+        chain.push_back(std::move(point));
+    }
+    SeamChainOptions options;
+    options.segments = 1;
+    // Use a visible projection penalty to test the extra mode, not default-weight calibration.
+    options.vertical_weight = 3.;
+    const auto spline_only = optimize_seam_chain(chain, options);
+    options.geometric_probe = true;
+    const auto probe = optimize_seam_chain(chain, options);
+    REQUIRE(probe.status == SeamChainStatus::Improved);
+    CHECK(probe.energy < probe.initial_energy);
+    CHECK(probe.energy < spline_only.energy);
+    CHECK(probe.length <= probe.initial_length + 1e-5);
+    double old_drift = 0., new_drift = 0.;
+    for (size_t i = 0; i < chain.size(); ++i) {
+        old_drift = std::max(old_drift, std::abs(side.dot(spline_only.positions[i].head<2>())));
+        new_drift = std::max(new_drift, std::abs(side.dot(probe.positions[i].head<2>())));
+        CHECK(std::abs(depth.dot((probe.positions[i] - chain[i].initial).head<2>())) < 1e-10);
+        CHECK(probe.arcs[i] >= chain[i].lower_arc - 1e-8);
+        CHECK(probe.arcs[i] <= chain[i].upper_arc + 1e-8);
+    }
+    CHECK(new_drift < .7 * old_drift);
+}
+
+TEST_CASE("A projected seam stays in its frozen surface patches and preserves sharp anchors", "[SeamPlacer][SeamChain][Regression]")
+{
+    using namespace SeamPlacerImpl;
+    const bool geometric_probe = GENERATE(false, true);
+    std::vector<SeamChainPoint> chain;
+    for (size_t i = 0; i <= 40; ++i) {
+        SeamChainPoint point;
+        const double z = double(i) * .25;
+        const double x = .3 * std::sin(PI * z / 10.);
+        point.vertices = {{Vec2d(-10., 0.)}, {Vec2d(10., 0.)}, {Vec2d(10., 10.)}, {Vec2d(-10., 10.)}};
+        point.initial = Vec3d(x, 0., z);
+        point.candidate_arc = point.anchor_arc = 10. + x;
+        point.surface_normal = Vec3d(0., -1., 0.);
+        point.surface_confidence = 1.;
+        // One chart ends at a sharp surface boundary closer than the nominal patch radius.
+        if (i == 20) point.surface_radius = .01;
+        point.fixed = i == 0 || i == 40;
+        chain.push_back(std::move(point));
+    }
+    SeamChainOptions options;
+    options.segments = 4;
+    options.vertical_weight = 3.;
+    options.geometric_probe = geometric_probe;
+    options.projection_span = .1;
+    options.max_motion_widths = .125; // Motion budget is independent of the direction-analysis window.
+    const auto result = optimize_seam_chain(chain, options);
+    for (size_t i = 0; i < chain.size(); ++i) {
+        CHECK((result.positions[i] - chain[i].initial).norm() <= .05 + 1e-5);
+        CHECK((result.positions[i] - chain[i].initial).norm() <= chain[i].surface_radius + 1e-5);
+        if (chain[i].fixed) CHECK((result.positions[i] - chain[i].initial).norm() < 1e-12);
+        if (result.status != SeamChainStatus::Improved)
+            CHECK((result.positions[i] - chain[i].initial).norm() < 1e-12);
+    }
+}
+
+TEST_CASE("Unknown surface normals do not invent a projected seam preference", "[SeamPlacer][SeamChain][Regression]")
+{
+    using namespace SeamPlacerImpl;
+    std::vector<SeamChainPoint> chain;
+    for (size_t i = 0; i <= 20; ++i) {
+        SeamChainPoint point;
+        const double x = .1 * std::sin(PI * double(i) / 20.);
+        point.vertices = {{Vec2d(-10., 0.)}, {Vec2d(10., 0.)}, {Vec2d(10., 10.)}, {Vec2d(-10., 10.)}};
+        point.initial = Vec3d(x, 0., double(i) * .25);
+        point.candidate_arc = point.anchor_arc = 10. + x;
+        chain.push_back(std::move(point));
+    }
+    SeamChainOptions options;
+    const auto baseline = optimize_seam_chain(chain, options);
+    options.vertical_weight = 3.;
+    options.geometric_probe = true;
+    const auto unknown = optimize_seam_chain(chain, options);
+    CHECK(unknown.status == baseline.status);
+    for (size_t i = 0; i < chain.size(); ++i)
+        CHECK((unknown.positions[i] - baseline.positions[i]).norm() < 1e-12);
+}
+
 TEST_CASE("Length optimization shortens a smooth seam while keeping its fixed ends", "[SeamPlacer][SeamChain][Regression]")
 {
     using namespace SeamPlacerImpl;

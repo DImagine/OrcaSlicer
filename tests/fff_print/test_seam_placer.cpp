@@ -282,7 +282,7 @@ TEST_CASE("Painted seams prefer the longer candidate patch regardless of contour
     CHECK(centers == 1); // The old wrapped-length formula instead selected the short top patch.
 }
 
-TEST_CASE("Entirely painted contours keep valid enforced seam candidates", "[SeamPlacer]")
+TEST_CASE("Entirely painted contours keep ordinary neutral seam candidates", "[SeamPlacer][Regression]")
 {
     PipelineFixture fixture;
     fixture.paint(true);
@@ -297,9 +297,154 @@ TEST_CASE("Entirely painted contours keep valid enforced seam candidates", "[Sea
     CHECK(perimeter.seam_index >= perimeter.start_index);
     CHECK(perimeter.seam_index < perimeter.end_index);
     for (const auto &candidate : data.points) {
-        CHECK(candidate.type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Enforced);
+        CHECK(candidate.type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral);
         CHECK_FALSE(candidate.central_enforcer); // There is no bounded patch to mark as central.
     }
+}
+
+TEST_CASE("Full surface paint preserves unpainted candidates and placed seams", "[SeamPlacer][SeamChain][Regression]")
+{
+    const std::string mode = GENERATE("back", "aligned");
+    const bool bevel = GENERATE(false, true);
+    CAPTURE(mode, bevel);
+    std::vector<std::vector<Vec3f>> expected_candidates;
+    std::vector<Vec2d> expected_seams;
+    for (const bool painted : {false, true}) {
+        PipelineFixture fixture(false, 2.0f);
+        fixture.config.set_deserialize_strict("seam_position", mode);
+        if (painted) fixture.paint(true);
+        fixture.print.apply(fixture.model, fixture.config); // Apply the requested seam mode in both comparisons.
+        PrintObject &object = fixture.prepare();
+        const std::vector<Vec2d> outline = bevel ?
+            std::vector<Vec2d>{{0, 1}, {1, 0}, {19, 0}, {20, 1}, {20, 19}, {19, 20}, {1, 20}, {0, 19}} :
+            std::vector<Vec2d>{{0, 0}, {20, 0}, {20, 20}, {0, 20}};
+        set_loop_on_every_layer(object, [&](size_t) { return fixture.points_in_layer(object, outline); });
+        SeamPlacer placer;
+        placer.init(fixture.print, [] {});
+        const auto &layers = placer.m_seam_per_object.at(&object).layers;
+        if (!painted) {
+            for (const auto &layer : layers) {
+                std::vector<Vec3f> positions;
+                for (const auto &candidate : layer.points) positions.push_back(candidate.position);
+                expected_candidates.push_back(std::move(positions));
+            }
+            expected_seams = placed_seams(placer, object);
+        } else {
+            REQUIRE(layers.size() == expected_candidates.size());
+            for (size_t i = 0; i < layers.size(); ++i) {
+                // Equality of candidates catches paint oversampling even when a sharp seam happens to match.
+                REQUIRE(layers[i].points.size() == expected_candidates[i].size());
+                for (size_t j = 0; j < layers[i].points.size(); ++j) {
+                    const auto &candidate = layers[i].points[j];
+                    CHECK(candidate.type == SeamType::Neutral);
+                    CHECK_FALSE(candidate.central_enforcer);
+                    CHECK_THAT(double((candidate.position - expected_candidates[i][j]).norm()),
+                               Catch::Matchers::WithinAbs(0.0, 1e-6));
+                }
+            }
+            const auto actual = placed_seams(placer, object);
+            REQUIRE(actual.size() == expected_seams.size());
+            for (size_t i = 0; i < actual.size(); ++i)
+                CHECK_THAT((actual[i] - expected_seams[i]).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+        }
+    }
+}
+
+TEST_CASE("Full surface paint preserves strong Precise Seam positions", "[SeamPlacer][PreciseSeam][Regression]")
+{
+    std::vector<Vec2d> expected;
+    for (const bool painted : {false, true}) {
+        PipelineFixture fixture(false, 2.0f);
+        fixture.config.set_deserialize_strict("seam_position", "aligned");
+        if (painted) fixture.paint(true);
+        auto *part = fixture.model.objects.front()->volumes.front();
+        const Vec3d center = part->get_matrix() * (part->mesh().bounding_box().min + Vec3d(10, 0, 1));
+        auto *helper = fixture.model.objects.front()->add_volume(make_cube(4, 4, 4));
+        helper->set_type(ModelVolumeType::PRECISE_SEAM_CENTER);
+        helper->set_offset(center); // Cross the front side without adding another printing surface.
+        fixture.print.apply(fixture.model, fixture.config);
+        PrintObject &object = fixture.prepare();
+        set_loop_on_every_layer(object, [&](size_t) {
+            return fixture.points_in_layer(object, {{0, 0}, {20, 0}, {20, 20}, {0, 20}});
+        });
+        SeamPlacer placer;
+        placer.init(fixture.print, [] {});
+        for (const auto &layer : placer.m_seam_per_object.at(&object).layers) {
+            REQUIRE(layer.perimeters.size() == 1);
+            const auto &perimeter = layer.perimeters.front();
+            REQUIRE(perimeter.precise_seam_point.has_value());
+            CHECK(perimeter.final_seam_position == *perimeter.precise_seam_point); // Strong placement stays exact.
+        }
+        const auto actual = placed_seams(placer, object);
+        if (!painted) expected = actual;
+        else {
+            REQUIRE(actual.size() == expected.size());
+            for (size_t i = 0; i < actual.size(); ++i)
+                CHECK_THAT((actual[i] - expected[i]).norm(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+        }
+    }
+}
+
+TEST_CASE("Complete side-wall paint is neutral away from unpainted caps", "[SeamPlacer][Regression]")
+{
+    PipelineFixture fixture(false, 2.0f);
+    auto &volume = *fixture.model.objects.front()->volumes.front();
+    const auto &mesh = volume.mesh();
+    TriangleSelector selector(mesh);
+    for (size_t i = 0; i < mesh.its.indices.size(); ++i) {
+        const auto &face = mesh.its.indices[i];
+        const auto &a = mesh.its.vertices[face[0]], &b = mesh.its.vertices[face[1]], &c = mesh.its.vertices[face[2]];
+        if (std::abs((b - a).cross(c - a).z()) < 1e-6)
+            selector.set_facet(int(i), EnforcerBlockerType::ENFORCER); // Keep the top and bottom gray.
+    }
+    volume.seam_facets.set(selector);
+    fixture.print.apply(fixture.model, fixture.config);
+    PrintObject &object = fixture.prepare();
+    set_loop_on_every_layer(object, [&](size_t) {
+        return fixture.points_in_layer(object, {{0, 0}, {20, 0}, {20, 20}, {0, 20}});
+    });
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+    const auto &layers = placer.m_seam_per_object.at(&object).layers;
+    REQUIRE(layers.size() == 10);
+    for (const auto &candidate : layers[4].points) CHECK(candidate.type == SeamType::Neutral);
+    // Near a gray cap the proof is intentionally conservative and retains the old paint semantics.
+    CHECK(std::any_of(layers.front().points.begin(), layers.front().points.end(), [](const auto &candidate) {
+        return candidate.type == SeamType::Enforced;
+    }));
+}
+
+TEST_CASE("A nearby gray or blocked facet prevents full-green normalization", "[SeamPlacer][Regression]")
+{
+    const auto other = GENERATE(EnforcerBlockerType::NONE, EnforcerBlockerType::BLOCKER);
+    PipelineFixture fixture(false, 2.0f);
+    auto &volume = *fixture.model.objects.front()->volumes.front();
+    const auto &mesh = volume.mesh();
+    const float front = mesh.bounding_box().min.y();
+    TriangleSelector selector(mesh);
+    bool changed = false;
+    for (size_t i = 0; i < mesh.its.indices.size(); ++i) {
+        selector.set_facet(int(i), EnforcerBlockerType::ENFORCER);
+        const auto &face = mesh.its.indices[i];
+        if (!changed && std::abs(mesh.its.vertices[face[0]].y() - front) < 1e-6 &&
+            std::abs(mesh.its.vertices[face[1]].y() - front) < 1e-6 &&
+            std::abs(mesh.its.vertices[face[2]].y() - front) < 1e-6) {
+            selector.set_facet(int(i), other); // Vertices may still see neighboring green facets within line width.
+            changed = true;
+        }
+    }
+    REQUIRE(changed);
+    volume.seam_facets.set(selector);
+    fixture.print.apply(fixture.model, fixture.config);
+    PrintObject &object = fixture.prepare();
+    auto &region = clear_first_layer(object);
+    append_loop(region, fixture.points_in_layer(object, {{0, 0}, {20, 0}, {20, 20}, {0, 20}}));
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+    const auto &points = placer.m_seam_per_object.at(&object).layers.front().points;
+    CHECK(std::any_of(points.begin(), points.end(), [](const auto &candidate) { return candidate.type == SeamType::Enforced; }));
+    if (other == EnforcerBlockerType::BLOCKER)
+        CHECK(std::any_of(points.begin(), points.end(), [](const auto &candidate) { return candidate.type == SeamType::Blocked; }));
 }
 
 TEST_CASE("Painted seams run smoothly along a smooth contour", "[SeamPlacer][Regression]")
