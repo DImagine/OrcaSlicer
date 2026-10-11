@@ -19,6 +19,37 @@ candidate as the seam.
 
 ## Concepts
 
+Aligned and Aligned Back also apply a bounded length optimization after every original string has
+been fitted. A scalar cubic B-spline, with the original string's knot spacing, represents signed
+displacements along consistently oriented layer contours. Zero coefficients reproduce the original
+positions. Each objective evaluation uses actual points on those contours, not a spatial curve
+followed by projection.
+
+The objective combines finite penalties derived from the original angle, visibility, overhang and
+paint-center preferences with 3D polyline length. The experimental length multiplier defaults to
+0.3 after conservative sphere trials; `ORCA_SEAM_CHAIN_LENGTH_WEIGHT=0` bypasses the entire stage. This scalar cost is not an exact
+reformulation of the original lexicographic candidate selection.
+
+Exact painted intervals impose linear bounds on the displacement coefficients. Full angle snapping
+at 55 degrees fixes the corresponding displacement to zero; the solver eliminates these equalities.
+Legacy Enforced candidates without exact intervals retain their original positions when their
+allowed painted range cannot be reconstructed reliably. Outside all painted facets' heights, with
+no weak modifiers, an Enforced mark is provably only a proximity preference: it stays movable and
+keeps its old soft anchor cost. No green interval is invented where paint does not cross the layer.
+Fixed points remain part of the length calculation.
+Strong Precise Seam, Blocked-selected strings and embedded joins keep the original string.
+
+The solver uses a damped quadratic model, feasible active-set QP steps and backtracking on the actual
+objective. QP directions are solved in the active constraints' null space to avoid ill-conditioning
+from nearly coincident bounds. At mesh vertices, feasible local and coherent spline probes test the
+actual cost at several scales down to 0.001 mm. A complete poll without significant improvement
+certifies a stop at this search resolution, not exact KKT stationarity or a global minimum.
+All loops have finite budgets. Only a converged, feasible improvement with non-increasing
+length replaces a string; errors, exhausted budgets and unsuccessful searches restore the complete
+original string. Support metadata is sampled at moved positions; fixed positions keep their metadata.
+Smooth scalar displacement couples layers but does not guarantee a continuously differentiable
+spatial path on a faceted surface. Final placement on the printed loops remains part of validation.
+
 - **Candidate (C).** The seam candidate chosen for a perimeter in a string. Candidates are the
   polygon vertices plus points inserted near paint (see Painted ranges), so the chosen candidate
   can move in discrete steps from layer to layer.

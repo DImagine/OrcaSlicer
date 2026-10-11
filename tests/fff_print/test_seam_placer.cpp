@@ -188,6 +188,40 @@ Vec2d placed_xy(const std::vector<SeamPlacerImpl::SeamCandidate> &points, size_t
 }
 } // namespace
 
+TEST_CASE("Paint proximity beyond painted facet heights remains a soft seam preference", "[SeamPlacer][SeamChain][Regression]")
+{
+    const bool horizontal_paint = GENERATE(false, true);
+    PipelineFixture fixture;
+    if (horizontal_paint) {
+        auto &volume = *fixture.model.objects.front()->volumes.front();
+        const auto &mesh = volume.mesh();
+        const double bottom = mesh.bounding_box().min.z();
+        TriangleSelector selector(mesh);
+        for (size_t i = 0; i < mesh.its.indices.size(); ++i) {
+            const auto &face = mesh.its.indices[i];
+            bool on_bottom = true;
+            for (int j = 0; j < 3; ++j)
+                on_bottom = on_bottom && std::abs(mesh.its.vertices[face[j]].z() - bottom) < 1e-6;
+            if (on_bottom) selector.set_facet(int(i), EnforcerBlockerType::ENFORCER);
+        }
+        volume.seam_facets.set(selector);
+        fixture.print.apply(fixture.model, fixture.config);
+    } else fixture.paint(false);
+    PrintObject &object = fixture.prepare();
+    auto &region = clear_first_layer(object);
+    append_loop(region, fixture.points_in_layer(object, {{0, 0}, {20, 0}, {20, 20}, {0, 20}}));
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+    const auto &data = placer.m_seam_per_object.at(&object).layers.front();
+    REQUIRE(data.perimeters.size() == 1);
+    const auto &perimeter = data.perimeters.front();
+    // The horizontal painted face is below the slice, but the old paint-radius test still marks candidates.
+    CHECK(perimeter.enforcer_proximity_only == horizontal_paint);
+    CHECK(std::count_if(data.points.begin(), data.points.end(), [](const auto &point) {
+        return point.type == SeamPlacerImpl::EnforcedBlockedSeamPoint::Enforced;
+    }) > 0);
+}
+
 TEST_CASE("Painted seams prefer the longer candidate patch regardless of contour origin", "[SeamPlacer][Regression]")
 {
     const bool clockwise = GENERATE(false, true);

@@ -8,6 +8,7 @@ add_executable(${_TEST_NAME}_tests
     test_precise_seam_3mf.cpp
     # Pure perimeter extraction is independent of Print/Layer fixtures.
     test_precise_seam.cpp
+    test_seam_chain.cpp
     test_aabbindirect.cpp
     test_appconfig.cpp
     test_arachne_walls.cpp

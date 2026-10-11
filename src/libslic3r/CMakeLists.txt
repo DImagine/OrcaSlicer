@@ -278,6 +278,8 @@ set(lisbslic3r_sources
     GCode/RetractWhenCrossingPerimeters.cpp
     GCode/RetractWhenCrossingPerimeters.hpp
     GCode/SeamPlacer.cpp
+    GCode/SeamChain.cpp
+    GCode/SeamChain.hpp
     GCode/SeamPlacer.hpp
     GCode/PreciseSeam.cpp
     GCode/PreciseSeam.hpp

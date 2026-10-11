@@ -55,6 +55,11 @@ struct Perimeter {
   // Random position also uses this flexibility to set final seam point position
   bool finalized = false;
   Vec3f final_seam_position = Vec3f::Zero();
+  // A moved seam samples support and angle at its actual contour position, not its old candidate.
+  std::optional<float> optimized_unsupported_dist;
+  std::optional<float> optimized_angle;
+  // Outside all painted facets' heights, a legacy Enforced mark is only a proximity preference.
+  bool enforcer_proximity_only = false;
 
   // Stores precise seam coordinates found by Precise Seam modifiers
   std::optional<Vec3f> precise_seam_point;

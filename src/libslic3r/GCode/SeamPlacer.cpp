@@ -1,4 +1,5 @@
 #include "SeamPlacer.hpp"
+#include "SeamChain.hpp"
 
 #include "libslic3r/Point.hpp"
 #include "libslic3r/AABBTreeIndirect.hpp"
@@ -26,6 +27,8 @@
 #include <optional>
 #include <cassert>
 #include <functional>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <numeric>
 #include <memory>
@@ -671,6 +674,12 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   const std::vector<EnforcedInterval> intervals = exact_enforced_intervals(loop_xy, loop_arc, z_coord,
                                                                            perimeter.flow_width, global_model_info);
   perimeter.exact_enforced_ends = !intervals.empty();
+  if (!perimeter.exact_enforced_ends && weak_volumes.empty()) {
+    // Prove that no green paint exists at this height; do not infer absence from failed interval reconstruction.
+    const auto &nodes = global_model_info.enforcers_tree.nodes();
+    perimeter.enforcer_proximity_only = nodes.empty() ||
+      z_coord < nodes.front().bbox.min().z() - 1e-5f || z_coord > nodes.front().bbox.max().z() + 1e-5f;
+  }
   const auto in_interval = [&](double at) {
     for (const EnforcedInterval &interval : intervals)
       for (const double s : { at, at + loop_length })
@@ -1757,6 +1766,8 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
   std::vector<Vec2f> observations;
   std::vector<float> observation_points;
   std::vector<float> weights;
+  // Finish the original pass first, so optimization cannot change how subsequent strings are collected.
+  std::vector<std::pair<std::vector<std::pair<size_t, size_t>>, size_t>> optimization_strings;
 
   // Corner angles are measured on arms at least one nozzle diameter long.
   float max_nozzle_diameter = 0.0f;
@@ -1847,6 +1858,8 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
       size_t number_of_segments = std::max(size_t(1),
                                            size_t(std::max(0.0f,total_length) / SeamPlacer::seam_align_mm_per_segment));
       auto curve = Geometry::fit_cubic_bspline(observations, observation_points, weights, number_of_segments);
+      if (comparator.setup == spAligned || comparator.setup == spAlignedBack)
+        optimization_strings.emplace_back(seam_string, number_of_segments);
 
       // Do alignment - compute fitted point for each point in the string from its Z coord, and store the position into
       // Perimeter structure of the point; also set flag aligned to true
@@ -1907,6 +1920,159 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
                 color[2]);
       }
 #endif
+    }
+  }
+
+  double length_weight = SeamChainOptions{}.length_weight;
+  if (const char *setting = std::getenv("ORCA_SEAM_CHAIN_LENGTH_WEIGHT")) {
+    char *end = nullptr;
+    const double parsed = std::strtod(setting, &end);
+    length_weight = end != setting && *end == '\0' && std::isfinite(parsed) && parsed >= 0. ? parsed : 0.;
+  }
+  const char *dump = std::getenv("ORCA_SEAM_CHAIN_DUMP");
+  std::ofstream dump_points, dump_vertices;
+  if (dump) {
+    // Diagnostic files are opt-in and never share application configuration or output paths.
+    dump_points.open(std::string(dump) + "-points.csv", std::ios::app);
+    dump_vertices.open(std::string(dump) + "-vertices.csv", std::ios::app);
+    dump_points << std::setprecision(17);
+    dump_vertices << std::setprecision(17);
+  }
+  size_t chain_id = 0;
+  for (const auto &[string, segments] : optimization_strings) {
+    ++chain_id;
+    if (length_weight == 0.) continue;
+    std::vector<SeamChainPoint> chain;
+    std::vector<std::vector<size_t>> indices;
+    bool supported = true;
+    for (const auto &[layer_index, candidate_index] : string) {
+      const auto &candidates = layers[layer_index].points;
+      const auto &candidate = candidates[candidate_index];
+      const auto &perimeter = candidate.perimeter;
+      if (perimeter.precise_seam_point || candidate.type == EnforcedBlockedSeamPoint::Blocked) {
+        BOOST_LOG_TRIVIAL(debug) << "[SeamChain] unsupported id=" << chain_id << " layer=" << layer_index + 1
+          << " type=" << int(candidate.type) << " exact=" << perimeter.exact_enforced_ends << " precise=" << bool(perimeter.precise_seam_point);
+        supported = false; break;
+      }
+      SeamChainPoint point;
+      point.initial = perimeter.final_seam_position.cast<double>();
+      point.width = std::max(double(perimeter.flow_width), double(max_nozzle_diameter));
+      const float t = std::min(1.f, std::pow(std::abs(candidate.local_ccw_angle) / sharp_angle_snapping_threshold, 3.f));
+      // Preserve uncertain legacy paint; a proven proximity-only mark remains movable.
+      const bool legacy_paint = candidate.type == EnforcedBlockedSeamPoint::Enforced && !perimeter.exact_enforced_ends;
+      point.fixed = t >= 1.f || (legacy_paint && !perimeter.enforcer_proximity_only);
+      std::vector<size_t> order;
+      double area = 0.;
+      for (size_t j = perimeter.start_index; j < perimeter.end_index; ++j) {
+        const auto &a = candidates[j];
+        const auto &b = candidates[j + 1 == perimeter.end_index ? perimeter.start_index : j + 1];
+        area += double(a.position.x()) * b.position.y() - double(a.position.y()) * b.position.x();
+        order.push_back(j);
+        if (a.embedded_distance < -0.5f) {
+          BOOST_LOG_TRIVIAL(debug) << "[SeamChain] embedded id=" << chain_id << " layer=" << layer_index + 1 << " distance=" << a.embedded_distance;
+          supported = false;
+        }
+      }
+      // Signed arc displacement has the same CCW orientation on every layer, even for reversed loops.
+      if (area < 0.) std::reverse(order.begin(), order.end());
+      std::vector<double> arc(1, 0.);
+      size_t selected = 0;
+      for (size_t j = 0; j < order.size(); ++j) {
+        const auto &a = candidates[order[j]];
+        const auto &b = candidates[order[(j + 1) % order.size()]];
+        if (order[j] == candidate_index) selected = j;
+        point.vertices.push_back({a.position.head<2>().cast<double>(),
+            double(a.overhang + a.visibility + angle_importance_aligned * compute_angle_penalty(a.local_ccw_angle)), a.overhang});
+        arc.push_back(arc.back() + (a.position.head<2>().cast<double>() - b.position.head<2>().cast<double>()).norm());
+      }
+      if (order.empty() || arc.back() <= 0.) { supported = false; break; }
+      point.candidate_arc = point.anchor_arc = arc[selected];
+      for (const bool forward : {false, true}) {
+        size_t j = selected;
+        double reach = 0.;
+        bool bounded = false;
+        for (size_t visited = 1; visited <= order.size(); ++visited) {
+          const size_t next = forward ? (j + 1) % order.size() : (j + order.size() - 1) % order.size();
+          const auto type = candidates[order[next]].type;
+          if (type == EnforcedBlockedSeamPoint::Blocked ||
+              (candidate.type == EnforcedBlockedSeamPoint::Enforced && type != EnforcedBlockedSeamPoint::Enforced)) {
+            bounded = true;
+            break;
+          }
+          reach += (point.vertices[next].position - point.vertices[j].position).norm();
+          j = next;
+        }
+        if (bounded) {
+          if (forward) point.upper_arc = point.candidate_arc + reach;
+          else point.lower_arc = point.candidate_arc - reach;
+        }
+      }
+      size_t anchor = selected;
+      if (candidate.type == EnforcedBlockedSeamPoint::Enforced) {
+        for (size_t j = 0; j < order.size(); ++j) {
+          const double s = arc[j] + std::round((point.candidate_arc - arc[j]) / arc.back()) * arc.back();
+          if (candidates[order[j]].central_enforcer && s >= point.lower_arc && s <= point.upper_arc) {
+            anchor = j;
+            point.anchor_arc = s;
+            break;
+          }
+        }
+      }
+      const double angle_weight = 1. / (0.1 + compute_angle_penalty(candidates[order[anchor]].local_ccw_angle));
+      point.anchor_weight = candidate.type == EnforcedBlockedSeamPoint::Enforced ? angle_weight + 3. : angle_weight * t;
+      if (legacy_paint) {
+        // Unknown paint is fixed; proven absent paint has no hard interval, including the old proximity fringe.
+        point.lower_arc = -std::numeric_limits<double>::infinity();
+        point.upper_arc = std::numeric_limits<double>::infinity();
+      }
+      indices.push_back(std::move(order));
+      chain.push_back(std::move(point));
+    }
+    if (!supported) continue;
+    SeamChainOptions options;
+    options.length_weight = length_weight;
+    options.segments = segments;
+    const auto optimized = optimize_seam_chain(chain, options);
+    BOOST_LOG_TRIVIAL(info) << "[SeamChain] id=" << chain_id << " points=" << chain.size() << " segments=" << segments
+      << " status=" << int(optimized.status) << " iterations=" << optimized.iterations << " weight=" << length_weight
+      << " energy=" << optimized.initial_energy << "->" << optimized.energy
+      << " trial=" << optimized.trial_energy << " residual=" << optimized.stationarity
+      << " resolution_stop=" << optimized.resolution_converged
+      << " qp_failure=" << optimized.qp_failure
+      << " length=" << optimized.initial_length << "->" << optimized.length;
+    for (size_t i = 0; i < chain.size(); ++i) {
+      const auto &[layer_index, candidate_index] = string[i];
+      const auto &point = chain[i];
+      const Vec3d &position = optimized.positions[i];
+      if (dump_points) {
+        dump_points << chain_id << ',' << i << ',' << layer_index + 1 << ',' << segments << ',' << int(optimized.status)
+          << ',' << point.initial.x() << ',' << point.initial.y() << ',' << point.initial.z() << ',' << position.x() << ',' << position.y()
+          << ',' << point.width << ',' << point.anchor_weight << ',' << point.fixed << ',' << point.candidate_arc << ',' << point.anchor_arc
+          << ',' << point.lower_arc << ',' << point.upper_arc << '\n';
+        for (size_t j = 0; j < point.vertices.size(); ++j) {
+          const auto &v = point.vertices[j];
+          dump_vertices << chain_id << ',' << i << ',' << j << ',' << v.position.x() << ',' << v.position.y() << ',' << v.quality << ',' << v.overhang << '\n';
+        }
+      }
+      if (optimized.status != SeamChainStatus::Improved || point.fixed) continue;
+      auto &perimeter = layers[layer_index].points[candidate_index].perimeter;
+      double distance = std::numeric_limits<double>::infinity();
+      size_t edge = 0;
+      double fraction = 0.;
+      for (size_t j = 0; j < point.vertices.size(); ++j) {
+        const Vec2d delta = point.vertices[(j + 1) % point.vertices.size()].position - point.vertices[j].position;
+        if (delta.squaredNorm() == 0.) continue;
+        const double t_edge = std::clamp((position.head<2>() - point.vertices[j].position).dot(delta) / delta.squaredNorm(), 0., 1.);
+        const double d = (position.head<2>() - point.vertices[j].position - t_edge * delta).squaredNorm();
+        if (d < distance) { distance = d; edge = j; fraction = t_edge; }
+      }
+      const auto &a = layers[layer_index].points[indices[i][edge]];
+      const auto &b = layers[layer_index].points[indices[i][(edge + 1) % indices[i].size()]];
+      perimeter.final_seam_position = position.cast<float>();
+      perimeter.seam_index = fraction < 0.5 ? indices[i][edge] : indices[i][(edge + 1) % indices[i].size()];
+      perimeter.optimized_unsupported_dist = float((1. - fraction) * a.unsupported_dist + fraction * b.unsupported_dist);
+      // Angular penalty was interpolated for optimization; inner-wall geometry needs the actual local edge angle.
+      perimeter.optimized_angle = fraction < 1e-5 ? a.local_ccw_angle : fraction > 1. - 1e-5 ? b.local_ccw_angle : 0.f;
     }
   }
 
@@ -2162,14 +2328,15 @@ void SeamPlacer::place_seam(const Layer *layer, ExtrusionLoop &loop,
   }
 
   Point seam_point = Point::new_scale(seam_position.x(), seam_position.y());
-  overhang = layer_perimeters.points[seam_index].unsupported_dist;
+  overhang = layer_perimeters.points[seam_index].perimeter.optimized_unsupported_dist.value_or(layer_perimeters.points[seam_index].unsupported_dist);
 
   if (loop.role() == ExtrusionRole::erPerimeter) { //Hopefully inner perimeter
     const SeamCandidate &perimeter_point = layer_perimeters.points[seam_index];
     ExtrusionLoop::ClosestPathPoint projected_point = loop.get_closest_path_and_point(seam_point, false);
     // determine depth of the seam point.
     float depth = (float) unscale(Point(seam_point - projected_point.foot_pt)).norm();
-    float beta_angle = cos(perimeter_point.local_ccw_angle / 2.0f);
+    const float local_angle = perimeter_point.perimeter.optimized_angle.value_or(perimeter_point.local_ccw_angle);
+    float beta_angle = cos(local_angle / 2.0f);
     size_t index_of_prev =
         seam_index == perimeter_point.perimeter.start_index ?
                                                             perimeter_point.perimeter.end_index - 1 :
@@ -2180,7 +2347,7 @@ void SeamPlacer::place_seam(const Layer *layer, ExtrusionLoop &loop,
                                                               seam_index + 1;
 
     if ((seam_position - perimeter_point.position).squaredNorm() < depth && // seam is on perimeter point
-        perimeter_point.local_ccw_angle < -EPSILON // In concave angles
+        local_angle < -EPSILON // In concave angles
     ) { // In this case, we are at internal perimeter, where the external perimeter has seam in concave angle. We want to align
                                                                             // the internal seam into the concave corner, and not on the perpendicular projection on the closest edge (which is what the split_at function does)
       Vec2f dir_to_middle =
