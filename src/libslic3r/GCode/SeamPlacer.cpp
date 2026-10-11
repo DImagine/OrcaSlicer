@@ -1,5 +1,6 @@
 #include "SeamPlacer.hpp"
 #include "SeamChain.hpp"
+#include "SeamFeature.hpp"
 
 #include "libslic3r/Point.hpp"
 #include "libslic3r/AABBTreeIndirect.hpp"
@@ -2113,6 +2114,41 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
     angle_options.minimum_degrees = minimum_angle;
     angle_options.full_degrees = full_angle;
   }
+  const bool feature_enabled = setting("ORCA_SEAM_FEATURE_ENABLED", 0.) > 0.;
+  SeamFeatureOptions feature_options;
+  feature_options.corridor_widths = setting("ORCA_SEAM_FEATURE_CORRIDOR_WIDTHS", feature_options.corridor_widths);
+  feature_options.minimum_angle = setting("ORCA_SEAM_FEATURE_MIN_ANGLE", feature_options.minimum_angle);
+  feature_options.minimum_edge_widths = setting("ORCA_SEAM_FEATURE_EDGE_WIDTHS", feature_options.minimum_edge_widths);
+  feature_options.trace_angle = setting("ORCA_SEAM_FEATURE_TRACE_ANGLE", feature_options.trace_angle);
+  feature_options.offset_min_widths = setting("ORCA_SEAM_FEATURE_OFFSET_MIN", feature_options.offset_min_widths);
+  feature_options.offset_max_widths = setting("ORCA_SEAM_FEATURE_OFFSET_MAX", feature_options.offset_max_widths);
+  feature_options.offset_difference_widths = setting("ORCA_SEAM_FEATURE_OFFSET_DIFFERENCE", feature_options.offset_difference_widths);
+  feature_options.geometry_tolerance = setting("ORCA_SEAM_FEATURE_GEOMETRY_TOLERANCE", feature_options.geometry_tolerance);
+  feature_options.node_widths = setting("ORCA_SEAM_FEATURE_NODE_WIDTHS", feature_options.node_widths);
+  feature_options.horizontal_normal_min = setting("ORCA_SEAM_FEATURE_NORMAL_MIN", feature_options.horizontal_normal_min);
+  feature_options.capture_widths = setting("ORCA_SEAM_FEATURE_CAPTURE_WIDTHS", feature_options.capture_widths);
+  feature_options.evidence_span_widths = setting("ORCA_SEAM_FEATURE_EVIDENCE_SPAN", feature_options.evidence_span_widths);
+  feature_options.route_margin = setting("ORCA_SEAM_FEATURE_ROUTE_MARGIN", feature_options.route_margin);
+  feature_options.unbound_cost = setting("ORCA_SEAM_FEATURE_UNBOUND_COST", feature_options.unbound_cost);
+  feature_options.transition_span = setting("ORCA_SEAM_FEATURE_TRANSITION_SPAN", feature_options.transition_span);
+  feature_options.transition_bending = setting("ORCA_SEAM_FEATURE_TRANSITION_BENDING", feature_options.transition_bending);
+  feature_options.bridge_motion_widths = setting("ORCA_SEAM_FEATURE_BRIDGE_WIDTHS", feature_options.bridge_motion_widths);
+  feature_options.arc_chart_fraction = setting("ORCA_SEAM_FEATURE_ARC_FRACTION", feature_options.arc_chart_fraction);
+  feature_options.step_growth = setting("ORCA_SEAM_FEATURE_STEP_GROWTH", feature_options.step_growth);
+  feature_options.step_allowance_widths = setting("ORCA_SEAM_FEATURE_STEP_WIDTHS", feature_options.step_allowance_widths);
+  feature_options.turn_allowance = setting("ORCA_SEAM_FEATURE_TURN_ALLOWANCE", feature_options.turn_allowance);
+  feature_options.support_allowance_widths = setting("ORCA_SEAM_FEATURE_SUPPORT_WIDTHS", feature_options.support_allowance_widths);
+  feature_options.carrier_reference_steps = setting("ORCA_SEAM_FEATURE_CARRIER_STEPS", 1.) != 0.;
+  feature_options.bridge_repair_turns = setting("ORCA_SEAM_FEATURE_TURN_REPAIR", 1.) != 0.;
+  feature_options.bridge_repair_samples = size_t(std::clamp(setting("ORCA_SEAM_FEATURE_REPAIR_SAMPLES", double(feature_options.bridge_repair_samples)), 1., 256.));
+  feature_options.solve_tolerance = setting("ORCA_SEAM_FEATURE_SOLVE_TOLERANCE", feature_options.solve_tolerance);
+  feature_options.evidence_layers = size_t(std::min(1000000., setting("ORCA_SEAM_FEATURE_EVIDENCE_LAYERS", double(feature_options.evidence_layers))));
+  feature_options.evidence_window = size_t(std::min(1000000., setting("ORCA_SEAM_FEATURE_EVIDENCE_WINDOW", double(feature_options.evidence_window))));
+  feature_options.max_iterations = size_t(std::min(1000000., setting("ORCA_SEAM_FEATURE_MAX_ITERATIONS", double(feature_options.max_iterations))));
+  feature_options.bridge_repair_sweeps = size_t(std::min(1000000., setting("ORCA_SEAM_FEATURE_REPAIR_SWEEPS", double(feature_options.bridge_repair_sweeps))));
+  feature_options.max_chain_points = size_t(std::min(1000000., setting("ORCA_SEAM_FEATURE_MAX_POINTS", double(feature_options.max_chain_points))));
+  feature_options.max_edge_queries = size_t(std::min(1000000., setting("ORCA_SEAM_FEATURE_MAX_QUERIES", double(feature_options.max_edge_queries))));
+  feature_options.max_candidates = size_t(std::min(1000000., setting("ORCA_SEAM_FEATURE_MAX_CANDIDATES", double(feature_options.max_candidates))));
   std::unique_ptr<SeamProjectionSurface> projection_surface;
   std::ofstream dump_points, dump_vertices, dump_stage1, dump_projection, dump_passes, dump_domain, dump_angles;
   if (dump) {
@@ -2132,10 +2168,19 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
     dump_domain << std::setprecision(17);
     dump_angles << std::setprecision(17);
   }
+  struct PreparedChain {
+    size_t id, segments;
+    const std::vector<std::pair<size_t, size_t>> *string;
+    std::vector<SeamChainPoint> points;
+    std::vector<std::vector<size_t>> indices;
+    std::vector<SeamChainPoint> original;
+    SeamFeatureResult features;
+  };
+  std::vector<PreparedChain> prepared;
   size_t chain_id = 0;
   for (const auto &[string, segments] : optimization_strings) {
     ++chain_id;
-    if (length_weight == 0.) continue;
+    if (length_weight == 0. && !feature_enabled) continue;
     std::vector<SeamChainPoint> chain;
     std::vector<std::vector<size_t>> indices;
     bool supported = true;
@@ -2143,18 +2188,20 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
       const auto &candidates = layers[layer_index].points;
       const auto &candidate = candidates[candidate_index];
       const auto &perimeter = candidate.perimeter;
-      if (perimeter.precise_seam_point || candidate.type == EnforcedBlockedSeamPoint::Blocked) {
+      if ((!feature_enabled && perimeter.precise_seam_point) || candidate.type == EnforcedBlockedSeamPoint::Blocked) {
         BOOST_LOG_TRIVIAL(debug) << "[SeamChain] unsupported id=" << chain_id << " layer=" << layer_index + 1
           << " type=" << int(candidate.type) << " exact=" << perimeter.exact_enforced_ends << " precise=" << bool(perimeter.precise_seam_point);
         supported = false; break;
       }
       SeamChainPoint point;
-      point.initial = perimeter.final_seam_position.cast<double>();
+      point.initial = feature_enabled && perimeter.precise_seam_point ? perimeter.precise_seam_point->cast<double>() :
+          perimeter.final_seam_position.cast<double>();
       point.width = std::max(double(perimeter.flow_width), double(max_nozzle_diameter));
       const float t = std::min(1.f, std::pow(std::abs(candidate.local_ccw_angle) / sharp_angle_snapping_threshold, 3.f));
       // Preserve uncertain legacy paint; a proven proximity-only mark remains movable.
       const bool legacy_paint = candidate.type == EnforcedBlockedSeamPoint::Enforced && !perimeter.exact_enforced_ends;
-      point.fixed = t >= 1.f || (legacy_paint && !perimeter.enforcer_proximity_only);
+      point.fixed = t >= 1.f || (legacy_paint && !perimeter.enforcer_proximity_only) ||
+                    (feature_enabled && perimeter.precise_seam_point.has_value());
       std::vector<size_t> order;
       double area = 0.;
       for (size_t j = perimeter.start_index; j < perimeter.end_index; ++j) {
@@ -2176,7 +2223,9 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
         const auto &b = candidates[order[(j + 1) % order.size()]];
         if (order[j] == candidate_index) selected = j;
         point.vertices.push_back({a.position.head<2>().cast<double>(),
-            double(a.overhang + a.visibility + angle_importance_aligned * compute_angle_penalty(a.local_ccw_angle)), a.overhang});
+            double(a.overhang + a.visibility + angle_importance_aligned * compute_angle_penalty(a.local_ccw_angle)), a.overhang,
+            a.type != EnforcedBlockedSeamPoint::Blocked &&
+            (candidate.type != EnforcedBlockedSeamPoint::Enforced || a.type == EnforcedBlockedSeamPoint::Enforced)});
         arc.push_back(arc.back() + (a.position.head<2>().cast<double>() - b.position.head<2>().cast<double>()).norm());
       }
       if (order.empty() || arc.back() <= 0.) { supported = false; break; }
@@ -2228,10 +2277,58 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
       chain.push_back(std::move(point));
     }
     if (!supported) continue;
+    prepared.push_back({chain_id, segments, &string, std::move(chain), std::move(indices), {}, {}});
+  }
+  if (feature_enabled && !prepared.empty()) {
+    // All first approximations precede geometry discovery, so chain traversal cannot change the common graph.
+    bool subtractive = false;
+    for (const ModelVolume *v : po->model_object()->volumes)
+      subtractive = subtractive || v->type() == ModelVolumeType::NEGATIVE_VOLUME;
+    if (!subtractive) {
+      SeamProjectionSurface surface(po);
+      std::vector<std::vector<SeamChainPoint>> sources;
+      for (const auto &p : prepared) sources.push_back(p.points);
+      auto results = bind_seam_features(surface.mesh, sources, feature_options);
+      for (size_t j = 0; j < prepared.size(); ++j) {
+        auto &p = prepared[j];
+        p.features = std::move(results[j]);
+        if (!p.features.accepted) continue;
+        p.original = std::move(sources[j]);
+        for (size_t i = 0; i < p.points.size(); ++i) {
+          p.points[i].initial = p.features.positions[i];
+          p.points[i].fixed = p.features.locked[i];
+        }
+      }
+    }
+  }
+  std::ofstream dump_features;
+  if (dump && feature_enabled) {
+    dump_features.open(std::string(dump) + "-features.csv", std::ios::app);
+    dump_features << std::setprecision(17);
+  }
+  for (auto &prepared_chain : prepared) {
+    chain_id = prepared_chain.id;
+    const auto &string = *prepared_chain.string;
+    const size_t segments = prepared_chain.segments;
+    auto &chain = prepared_chain.points;
+    auto &indices = prepared_chain.indices;
+    const auto &features = prepared_chain.features;
+    const auto continuous = [&](const std::vector<Vec3d> &positions) {
+      if (!features.accepted) return true;
+      for (size_t i = 0; i < chain.size(); ++i)
+        if (features.locked[i] && (positions[i] - chain[i].initial).norm() > 1e-5) return false;
+      return seam_feature_continuous(prepared_chain.original, positions, features.geometric, feature_options, nullptr, &features.bindings);
+    };
     SeamChainOptions options;
     options.length_weight = length_weight;
     options.segments = segments;
-    const auto stage1 = optimize_seam_chain(chain, options);
+    options.independent_intervals = features.accepted;
+    auto stage1 = optimize_seam_chain(chain, options);
+    if (!continuous(stage1.positions)) {
+      auto disabled = options; disabled.length_weight = 0.;
+      stage1 = optimize_seam_chain(chain, disabled);
+      stage1.status = SeamChainStatus::Failed;
+    }
     auto optimized = stage1;
     std::vector<SeamChainPoint> projection_chain = chain;
     SeamChainResult stage2;
@@ -2263,6 +2360,7 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
             break;
           }
         }
+        if (!continuous(stage2.positions)) stage2.status = SeamChainStatus::Failed;
         // Any failure of the second pass keeps the complete first-pass result, not the pre-length line.
         if (stage2.status == SeamChainStatus::Improved) optimized = stage2;
       }
@@ -2314,7 +2412,19 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
           dump_vertices << chain_id << ',' << i << ',' << j << ',' << v.position.x() << ',' << v.position.y() << ',' << v.quality << ',' << v.overhang << '\n';
         }
       }
-      if (optimized.status != SeamChainStatus::Improved || point.fixed) continue;
+      if (dump_features) {
+        const auto &source = features.accepted ? prepared_chain.original[i] : chain[i];
+        const bool has_binding = features.bindings.size() == chain.size();
+        const auto binding = has_binding ? features.bindings[i] : SeamFeatureBinding{};
+        dump_features << chain_id << ',' << i << ',' << layer_index + 1 << ',' << int(binding.state) << ','
+          << (binding.edge == size_t(-1) ? -1 : int64_t(binding.edge)) << ','
+          << source.initial.x() << ',' << source.initial.y() << ',' << source.initial.z() << ','
+          << chain[i].initial.x() << ',' << chain[i].initial.y() << ',' << position.x() << ',' << position.y() << ','
+          << source.fixed << ',' << chain[i].fixed << ',' << features.accepted << ','
+          << binding.carrier_direction.x() << ',' << binding.carrier_direction.y() << ',' << binding.carrier_direction.z() << '\n';
+      }
+      if (!features.accepted && (optimized.status != SeamChainStatus::Improved || point.fixed)) continue;
+      if (features.accepted && prepared_chain.original[i].fixed) continue;
       auto &perimeter = layers[layer_index].points[candidate_index].perimeter;
       double distance = std::numeric_limits<double>::infinity();
       size_t edge = 0;

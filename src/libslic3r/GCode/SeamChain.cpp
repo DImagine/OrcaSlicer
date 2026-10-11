@@ -459,7 +459,7 @@ SeamChainResult optimize_seam_chain(const std::vector<SeamChainPoint> &points, c
     const bool patches = std::any_of(points.begin(), points.end(), [](const SeamChainPoint &p) {
         return p.surface_confidence > 0.;
     });
-    if (options.projection_gate) {
+    if (options.projection_gate || options.independent_intervals) {
         // Independent smooth deformation fields retain freedom when ineligible rows would kill a global spline.
         basis.resize(Eigen::Index(points.size()), 0);
         for (size_t first = 0; first < points.size();) {

@@ -280,6 +280,8 @@ set(lisbslic3r_sources
     GCode/SeamPlacer.cpp
     GCode/SeamChain.cpp
     GCode/SeamChain.hpp
+    GCode/SeamFeature.cpp
+    GCode/SeamFeature.hpp
     GCode/SeamPlacer.hpp
     GCode/PreciseSeam.cpp
     GCode/PreciseSeam.hpp

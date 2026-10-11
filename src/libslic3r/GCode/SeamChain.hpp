@@ -12,6 +12,7 @@ struct SeamChainVertex {
     Vec2d position;
     double quality = 0.;
     double overhang = 0.;
+    bool feature_allowed = true;
 };
 
 struct SeamChainPoint {
@@ -65,6 +66,7 @@ struct SeamChainOptions {
     double boundary_taper_fraction = 0.25;
     bool projection_gate = false;
     bool hold_free_center = false;
+    bool independent_intervals = false;
     size_t segments = 1;
     size_t max_iterations = 100;
     size_t max_evaluations = 5000;

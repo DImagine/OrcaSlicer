@@ -113,6 +113,65 @@ No green interval is invented where paint does not cross the layer.
 Fixed points remain part of the length calculation.
 Strong Precise Seam, Blocked-selected strings and embedded joins keep the original string.
 
+### Optional mesh feature binding
+
+`ORCA_SEAM_FEATURE_ENABLED=1` inserts a separate geometry pass after original fitting and before
+length/vertical optimization. Its default is off. Initial candidate ranking, string construction
+and curve fitting are unchanged. With feature binding enabled, an individual strong Precise Seam
+point is immutable and its remaining string participates in the solve. Selected blocked candidates and
+embedded joins still exclude a string. Objects containing subtractive volumes bypass mesh binding,
+because the uncut source mesh cannot certify their final Boolean surface.
+
+`SeamFeatureOptions` owns all experimental feature thresholds. A common indexed mesh graph is
+collected for every eligible first approximation before any point is moved. An AABB tree limits
+inspection to corridors around those strings. Creases require two incident faces and a minimum
+dihedral angle; mesh vertex identities define junctions without welding coincident components.
+The full incident star of every inspected crease endpoint establishes actual connectivity.
+Features remain atomic mesh edges; coplanar subdivisions are not consolidated into long carriers.
+
+A proposed target must be an actual corner of the printed layer contour. Both neighboring contour
+directions must agree with the two face-plane traces, and their inward offsets must be plausible
+and agree within tolerance. Thus the target is the offset printed-loop corner, rather than the
+raw mesh intersection. Extensions beyond an edge's height range require proximity to a real
+junction. Painted intervals, blocked vertices, support limits and pre-existing locks apply before
+any proposal. Incident carriers describing the same printed corner near their real common node
+count as one target. Coincident coordinates on disconnected components remain competing alternatives.
+Multiple close geometric alternatives prevent a new lock.
+
+Forward/backward dynamic programming retains all routes within a cost margin of the best route;
+cost is squared distance to the original approximation in extrusion widths. An explicit unbound
+state permits real endings. Only a unique close target shared by the plausible routes, supported
+on enough neighboring layers and a minimum physical height span, becomes a provisional binding.
+Neither route cost nor neighbor agreement is interpreted as a statistical probability.
+
+Provisional targets are validated transactionally. A strictly convex quadratic finds a bounded
+correction along each layer's contour: old anchor preference, correction slope and correction
+slope change determine the free neighbors, while proposed targets and old locks are equalities.
+The smoothness penalties act on the correction field; they do not round the feature itself.
+An active-set box solver has a finite iteration budget. The complete spatial line is checked for
+new step growth and additional turning at free/locked transitions. For two exact targets on the
+same certified carrier, the reference step also accounts for that mesh edge's inclination and
+the layer height difference; a locally compressed initial spline cannot prohibit following it.
+Different carriers, unproved points and coordinates moved off their certified targets retain
+the original step bound. A finite local repair can adjust a free coordinate inside its existing
+paint/support chart: exact contour/sphere intersections bound both neighboring steps. The
+quadratic optimum, interval endpoints and a bounded set of samples are compared first by the
+largest affected step/turn violation, then by quadratic cost. Only non-worsening corrections are
+retained. The search also runs for turn-only failures, preserves every target, and keeps the
+existing paint, support, movement and free-transition continuity thresholds. Its result must
+still pass the complete turn and step checks. Triples certified on geometry
+retain their real junction bend. A failing transition removes the nearest complete provisional
+run and retries; solver exhaustion commits no new locks.
+
+After acceptance, the target coordinates and fixed mask are permanent for both subsequent
+optimizers. Free intervals receive independent cubic displacement bases. Every subsequent result
+must preserve the locks and pass the same complete-line continuity check; otherwise that optimizer's
+result is discarded. A zero length weight can be used to inspect the feature pass alone. With
+feature binding disabled, zero length weight continues to bypass both optimization passes.
+The geometric and continuity tolerances bound the accepted change; they do not prove global
+optimality or rule out every subjective visual artifact. Diagnostic feature states distinguish
+ambiguity, insufficient evidence, transition rejection and exhausted budgets.
+
 The solver uses a damped quadratic model, feasible active-set QP steps and backtracking on the actual
 objective. QP directions are solved in the active constraints' null space to avoid ill-conditioning
 from nearly coincident bounds. At mesh vertices, feasible local and coherent spline probes test the
@@ -340,5 +399,13 @@ staggers them on its own; the placed point is its input, not its output.
     from the target stays at that end;
   - `enforced_corner_influence` directly: full protection within `R0`, the middle of the fade band,
     no influence from `R1` on, and a partial measured angle.
+- Mesh binding: `src/libslic3r/GCode/SeamFeature.hpp/.cpp`; contour optimization and independent
+  intervals: `src/libslic3r/GCode/SeamChain.hpp/.cpp`.
+- `tests/libslic3r/test_seam_feature.cpp` checks exact printed targets, painted/support exclusions,
+  competing creases, common four-edge junctions, disconnected coincident components, chain-order
+  invariance, transition rollback, solver budgets, individual immutable points and independent bases.
+  Regression cases distinguish rejected quadratic seeds from feasible step and turn repairs,
+  preserve existing anchors and painted bounds, and require carrier evidence to use geometric spacing.
+  The helper tests do not exercise the complete mesh-binding adapter through `SeamPlacer::init`.
 - Not covered by tests: a painted corner with differing C and F through the whole pipeline, weak
   and lost corner measurements, mixed bridge loops, Arachne and inner-wall staggering.
