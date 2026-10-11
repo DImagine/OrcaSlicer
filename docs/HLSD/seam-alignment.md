@@ -10,7 +10,8 @@ runs evenly on a smooth surface:
   (`process_perimeter_polygon`);
 - how a string is collected (`find_seam_string`);
 - how the final seam position of a string member is derived from the curve (last step of
-  `align_seam_points`), including how a painted (Enforced) seam keeps to painted corners.
+  `align_seam_points`), including how a painted (Enforced) seam keeps to painted corners;
+- how optional geometry binding and subsequent contour optimizers preserve accepted positions.
 
 Candidate selection, curve fitting and seam placement on the printed loop (`place_seam`) are
 referred to only where they shape the result. Alignment runs for the Aligned, Aligned Back and Rear
@@ -18,6 +19,12 @@ seam positions; Nearest and Random do not align. A perimeter outside every align
 candidate as the seam.
 
 ## Concepts
+
+After original string fitting and placement, the optional mesh feature pass can accept immutable
+printed-corner targets and bounded transitions. Length optimization then operates on the accepted
+line's remaining free positions, followed by projected optimization with frozen surface frames.
+Each pass preserves its input on failure. The feature proof, transition contracts and complete
+control registry are described in [Seam binding to mesh features](seam-feature-binding.md).
 
 Aligned and Aligned Back also apply a bounded length optimization after every original string has
 been fitted. A scalar cubic B-spline, with the original string's knot spacing, represents signed
@@ -27,7 +34,8 @@ followed by projection.
 
 The objective combines finite penalties derived from the original angle, visibility, overhang and
 paint-center preferences with 3D polyline length. The experimental length multiplier defaults to
-0.15; `ORCA_SEAM_CHAIN_LENGTH_WEIGHT=0` bypasses the entire stage. This scalar cost is not an exact
+0.15; `ORCA_SEAM_CHAIN_LENGTH_WEIGHT=0` bypasses both numerical optimization passes, while an
+enabled mesh feature pass remains active. This scalar cost is not an exact
 reformulation of the original lexicographic candidate selection.
 
 Only the post-fit anchor penalty uses the configurable `SeamChainAngleOptions` response.
@@ -111,9 +119,13 @@ no weak modifiers, an Enforced mark is provably only a proximity preference: it 
 the ordinary angle-based anchor cost, without the painted-center preference or its extra weight.
 No green interval is invented where paint does not cross the layer.
 Fixed points remain part of the length calculation.
-Strong Precise Seam, Blocked-selected strings and embedded joins keep the original string.
+With feature binding disabled, strong Precise Seam excludes its whole string from optimization.
+Selected Blocked candidates and embedded joins exclude their strings in either mode.
 
 ### Optional mesh feature binding
+
+The detailed geometry proof, support semantics, transition guards, configuration defaults and
+diagnostic contract are in [Seam binding to mesh features](seam-feature-binding.md).
 
 `ORCA_SEAM_FEATURE_ENABLED=1` inserts a separate geometry pass after original fitting and before
 length/vertical optimization. Its default is off. Initial candidate ranking, string construction
