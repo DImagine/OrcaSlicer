@@ -324,6 +324,28 @@ struct CoordinateFunctor {
   }
 };
 
+// A paint boundary uses the same geometry for green preferences and red exclusions.
+struct PaintedContour {
+  std::vector<Linef3> edges;
+  std::vector<Vec3d> inward;
+  AABBTreeIndirect::Tree<3, double> tree;
+
+  std::vector<std::pair<Vec2d, Vec2d>> crossings(double z, const Vec2d &min, const Vec2d &max) const {
+    std::vector<std::pair<Vec2d, Vec2d>> result;
+    const Eigen::AlignedBox<double, 3> box(Vec3d(min.x(), min.y(), z), Vec3d(max.x(), max.y(), z));
+    AABBTreeIndirect::traverse(tree, AABBTreeIndirect::intersecting(box), [&](const auto &node) {
+      const Linef3 &edge = edges[node.idx];
+      // Half-open in z counts a contour vertex on the plane once.
+      if ((edge.a.z() < z) != (edge.b.z() < z)) {
+        const Vec3d p = edge.intersect_plane(z);
+        result.emplace_back(p.head<2>(), inward[node.idx].head<2>());
+      }
+      return true;
+    });
+    return result;
+  }
+};
+
 // structure to store global information about the model - occlusion hits, enforcers, blockers
 struct GlobalModelInfo {
   TriangleSetSamples mesh_samples;
@@ -341,9 +363,8 @@ struct GlobalModelInfo {
   AABBTreeIndirect::Tree<3, float> non_enforcers_tree;
   // Contour of the painted enforcer region: edges of one enforcer triangle only, with the unit direction from
   // each edge into the paint.
-  std::vector<Linef3> enforcer_contour;
-  std::vector<Vec3d> enforcer_contour_inward;
-  AABBTreeIndirect::Tree<3, double> enforcer_contour_tree;
+  PaintedContour enforcer_contour;
+  PaintedContour blocker_contour;
 
   // Precise Seam modifiers: strong modifiers (CENTER/LEFT/RIGHT) determine exact seam placement
   std::vector<const ModelVolume*> precise_seam_strong_volumes;
@@ -369,23 +390,6 @@ struct GlobalModelInfo {
     float radius_sqr = radius * radius;
     return AABBTreeIndirect::is_any_triangle_in_radius(blockers.vertices, blockers.indices,
                                                        blockers_tree, position, radius_sqr);
-  }
-
-  // Points where the enforcer contour crosses the plane at z within the XY box, each with the XY direction
-  // from it into the paint.
-  std::vector<std::pair<Vec2d, Vec2d>> enforcer_contour_crossings(double z, const Vec2d &min, const Vec2d &max) const {
-    std::vector<std::pair<Vec2d, Vec2d>> crossings;
-    const Eigen::AlignedBox<double, 3> box(Vec3d(min.x(), min.y(), z), Vec3d(max.x(), max.y(), z));
-    AABBTreeIndirect::traverse(enforcer_contour_tree, AABBTreeIndirect::intersecting(box), [&](const auto &node) {
-      const Linef3 &edge = enforcer_contour[node.idx];
-      // Half-open in z, so that a contour vertex lying on the plane is crossed once.
-      if ((edge.a.z() < z) != (edge.b.z() < z)) {
-        const Vec3d p = edge.intersect_plane(z);
-        crossings.emplace_back(p.head<2>(), enforcer_contour_inward[node.idx].head<2>());
-      }
-      return true;
-    });
-    return crossings;
   }
 
   float calculate_point_visibility(const Vec3f &position) const {
@@ -531,7 +535,7 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
 
 // Painted range of a loop along its length from its first vertex; `end` exceeds the loop length if the range
 // passes the first vertex.
-struct EnforcedInterval {
+struct PaintedInterval {
   double begin;
   double end;
 };
@@ -580,21 +584,21 @@ bool fully_enforced_loop(const std::vector<Vec2d> &loop, double z, double reach,
   return true;
 }
 
-// Painted ranges of a counterclockwise loop at height z, bounded exactly where the enforcer contour crosses the
+// Painted ranges of a counterclockwise loop at height z, bounded exactly where the paint contour crosses the
 // layer: each crossing within `reach` of the loop is moved to its closest loop point, and paint lies ahead of
 // it or behind it along the loop. `arc` holds the length from the first vertex to each vertex, the loop length
 // last. Empty if the contour does not cross near the loop or its crossings do not pair up into ranges.
-std::vector<EnforcedInterval> exact_enforced_intervals(const std::vector<Vec2d> &loop, const std::vector<double> &arc,
-                                                       double z, double reach, const GlobalModelInfo &info) {
+std::vector<PaintedInterval> exact_painted_intervals(const std::vector<Vec2d> &loop, const std::vector<double> &arc,
+                                                   double z, double reach, const PaintedContour &contour) {
   const size_t count = loop.size();
-  if (count < 3 || info.enforcer_contour.empty())
+  if (count < 3 || contour.edges.empty())
     return {};
   Vec2d min = loop.front(), max = loop.front();
   for (const Vec2d &p : loop) {
     min = min.cwiseMin(p);
     max = max.cwiseMax(p);
   }
-  const auto crossings = info.enforcer_contour_crossings(z, min - Vec2d(reach, reach), max + Vec2d(reach, reach));
+  const auto crossings = contour.crossings(z, min - Vec2d(reach, reach), max + Vec2d(reach, reach));
   const auto direction = [&](size_t i) {
     const Vec2d d = loop[(i + 1) % count] - loop[i];
     return d.squaredNorm() > 0.0 ? Vec2d(d.normalized()) : Vec2d::Zero();
@@ -633,7 +637,7 @@ std::vector<EnforcedInterval> exact_enforced_intervals(const std::vector<Vec2d> 
     if (ends[i].second == ends[(i + 1) % ends.size()].second)
       return {}; // Paint must start and stop in turn along the loop.
   const size_t first = ends.front().second ? 0 : 1;
-  std::vector<EnforcedInterval> intervals;
+  std::vector<PaintedInterval> intervals;
   for (size_t i = first; i < first + ends.size(); i += 2) {
     const double begin = ends[i % ends.size()].first;
     double end = ends[(i + 1) % ends.size()].first;
@@ -717,8 +721,12 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   for (size_t i = 0; i < loop_xy.size(); ++i)
     loop_arc.push_back(loop_arc.back() + (loop_xy[(i + 1) % loop_xy.size()] - loop_xy[i]).norm());
   const double loop_length = loop_arc.back();
-  const std::vector<EnforcedInterval> intervals = exact_enforced_intervals(loop_xy, loop_arc, z_coord,
-                                                                           perimeter.flow_width, global_model_info);
+  const auto intervals = exact_painted_intervals(loop_xy, loop_arc, z_coord, perimeter.flow_width,
+                                                 global_model_info.enforcer_contour);
+  const auto blocked_intervals = exact_painted_intervals(loop_xy, loop_arc, z_coord, perimeter.flow_width,
+                                                         global_model_info.blocker_contour);
+  perimeter.exact_blocked_ends = !blocked_intervals.empty();
+  const bool exact_marks = !intervals.empty() || perimeter.exact_blocked_ends;
   // Keep active Precise Seam modifiers authoritative; normalize ordinary full paint only.
   const bool ignore_full_paint = intervals.empty() && !inserted_seam_position && weak_segments.empty() &&
       fully_enforced_loop(loop_xy, z_coord, perimeter.flow_width, global_model_info);
@@ -731,8 +739,8 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     perimeter.enforcer_proximity_only = nodes.empty() ||
       z_coord < nodes.front().bbox.min().z() - 1e-5f || z_coord > nodes.front().bbox.max().z() + 1e-5f;
   }
-  const auto in_interval = [&](double at) {
-    for (const EnforcedInterval &interval : intervals)
+  const auto in_interval = [&](double at, const std::vector<PaintedInterval> &ranges) {
+    for (const PaintedInterval &interval : ranges)
       for (const double s : { at, at + loop_length })
         if (s >= interval.begin - enforced_end_tolerance && s <= interval.end + enforced_end_tolerance)
           return true;
@@ -752,7 +760,7 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   std::vector<double> marks;
   std::vector<std::pair<Vec3f, double>> interval_middles; // Middle point and length of each range.
   for (size_t k = 0; k < intervals.size(); ++k) {
-    const EnforcedInterval &interval = intervals[k];
+    const PaintedInterval &interval = intervals[k];
     const double middle = 0.5 * (interval.begin + interval.end);
     // Ranges come in loop order from the first vertex.
     const double next_begin = k + 1 < intervals.size() ? intervals[k + 1].begin : intervals.front().begin + loop_length;
@@ -761,6 +769,27 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
          s += SeamPlacer::enforcer_oversampling_distance)
       marks.push_back(s);
     interval_middles.emplace_back(point_at(std::fmod(middle, loop_length)), interval.end - interval.begin);
+  }
+  for (size_t k = 0; k < blocked_intervals.size(); ++k) {
+    const auto &interval = blocked_intervals[k];
+    const double next_begin = k + 1 < blocked_intervals.size() ? blocked_intervals[k + 1].begin :
+                                                              blocked_intervals.front().begin + loop_length;
+    const double gap = next_begin - interval.end;
+    // Keep the boundary itself blocked, with a permitted sample just outside it. Both alignment and
+    // the iterative solvers stop at these samples, within 2 um of the geometric paint edge.
+    const double guard = std::min(2.0 * enforced_end_tolerance, 0.25 * gap);
+    marks.insert(marks.end(), {interval.begin, interval.end, 0.5 * (interval.begin + interval.end),
+                               interval.end + guard, next_begin - guard, 0.5 * (interval.end + next_begin)});
+  }
+  if (perimeter.exact_blocked_ends && !perimeter.exact_enforced_ends && !ignore_full_paint) {
+    // Red marks must not suppress legacy green oversampling when its boundary is uncertain.
+    for (size_t i = 0; i < loop_xy.size(); ++i) {
+      const double length = loop_arc[i + 1] - loop_arc[i];
+      if (global_model_info.is_enforced(point_at(loop_arc[i]), float(length)))
+        for (double s = loop_arc[i] + SeamPlacer::enforcer_oversampling_distance;
+             s < loop_arc[i + 1]; s += SeamPlacer::enforcer_oversampling_distance)
+          marks.push_back(s);
+    }
   }
   for (double &s : marks)
     s = std::fmod(s, loop_length);
@@ -779,7 +808,7 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     if (!oversampled_points.empty()) {
       position = oversampled_points.front();
       oversampled_points.pop();
-      if (perimeter.exact_enforced_ends) {
+      if (exact_marks) {
         at = oversampled_arcs.front();
         oversampled_arcs.pop();
       }
@@ -793,16 +822,17 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     }
 
     if (!ignore_full_paint &&
-        (perimeter.exact_enforced_ends ? in_interval(at) : global_model_info.is_enforced(position, perimeter.flow_width))) {
+        (perimeter.exact_enforced_ends ? in_interval(at, intervals) : global_model_info.is_enforced(position, perimeter.flow_width))) {
       type = EnforcedBlockedSeamPoint::Enforced;
     }
 
-    if (global_model_info.is_blocked(position, perimeter.flow_width)) {
+    if (perimeter.exact_blocked_ends ? in_interval(at, blocked_intervals) :
+                                     global_model_info.is_blocked(position, perimeter.flow_width)) {
       type = EnforcedBlockedSeamPoint::Blocked;
     }
     some_point_enforced = some_point_enforced || type == EnforcedBlockedSeamPoint::Enforced;
 
-    if (orig_point && perimeter.exact_enforced_ends) {
+    if (orig_point && exact_marks) {
       // Marks strictly inside the edge from this vertex; one at a vertex is the vertex itself.
       const double from = loop_arc[orig_angle_index - 1], to = loop_arc[orig_angle_index];
       for (auto it = std::upper_bound(marks.begin(), marks.end(), from + enforced_end_tolerance);
@@ -1026,7 +1056,7 @@ void compute_global_occlusion(GlobalModelInfo &result, const PrintObject *po,
 
 // Appends the contour of painted triangles without T-joints (shared vertices): their edges used by one
 // triangle only. Paint lies to the left of an edge in the triangle's counterclockwise order.
-void append_enforcer_contour(GlobalModelInfo &result, const indexed_triangle_set &painted) {
+void append_painted_contour(PaintedContour &result, const indexed_triangle_set &painted) {
   const auto edge_key = [](int a, int b) { return (uint64_t(std::min(a, b)) << 32) | uint64_t(std::max(a, b)); };
   std::unordered_map<uint64_t, int> uses;
   for (const stl_triangle_vertex_indices &face : painted.indices)
@@ -1039,8 +1069,8 @@ void append_enforcer_contour(GlobalModelInfo &result, const indexed_triangle_set
     for (int i = 0; i < 3; ++i) {
       const Vec3d inward = normal.cross(v[(i + 1) % 3] - v[i]);
       if (uses[edge_key(face[i], face[(i + 1) % 3])] == 1 && inward.squaredNorm() > 0.0) {
-        result.enforcer_contour.emplace_back(v[i], v[(i + 1) % 3]);
-        result.enforcer_contour_inward.emplace_back(inward.normalized());
+        result.edges.emplace_back(v[i], v[(i + 1) % 3]);
+        result.inward.emplace_back(inward.normalized());
       }
     }
   }
@@ -1068,12 +1098,15 @@ void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
 
       indexed_triangle_set painted = mv->seam_facets.get_facets_strict(*mv, EnforcerBlockerType::ENFORCER);
       its_transform(painted, model_transformation, true);
-      append_enforcer_contour(result, painted);
+      append_painted_contour(result.enforcer_contour, painted);
 
       indexed_triangle_set blockers = mv->seam_facets.get_facets(*mv, EnforcerBlockerType::BLOCKER);
       // ORCA fix (not related to Precise Seam): fix winding for mirrored transforms
       its_transform(blockers, model_transformation, true);
       its_merge(result.blockers, blockers);
+      painted = mv->seam_facets.get_facets_strict(*mv, EnforcerBlockerType::BLOCKER);
+      its_transform(painted, model_transformation, true);
+      append_painted_contour(result.blocker_contour, painted);
     }
   }
 
@@ -1096,7 +1129,8 @@ void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
                                                                                       result.enforcers.indices);
   result.blockers_tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(result.blockers.vertices,
                                                                                      result.blockers.indices);
-  result.enforcer_contour_tree = AABBTreeLines::build_aabb_tree_over_indexed_lines(result.enforcer_contour);
+  result.enforcer_contour.tree = AABBTreeLines::build_aabb_tree_over_indexed_lines(result.enforcer_contour.edges);
+  result.blocker_contour.tree = AABBTreeLines::build_aabb_tree_over_indexed_lines(result.blocker_contour.edges);
 
   BOOST_LOG_TRIVIAL(debug)
       << "SeamPlacer: build AABB trees for raycasting enforcers/blockers: end";
@@ -1323,6 +1357,16 @@ void pick_random_seam_point(const std::vector<SeamCandidate> &perimeter_points, 
   };
   std::vector<Viable> viables;
 
+  const auto edge_from = [&](size_t index) -> Vec3f {
+    const size_t next = index == end_index - 1 ? start_index : index + 1;
+    // Random samples the outgoing edge, not just the candidate; do not sample toward a closed red boundary.
+    if (perimeter_points[index].perimeter.exact_blocked_ends &&
+        perimeter_points[index].type != EnforcedBlockedSeamPoint::Blocked &&
+        perimeter_points[next].type == EnforcedBlockedSeamPoint::Blocked)
+      return Vec3f::Zero();
+    return perimeter_points[next].position - perimeter_points[index].position;
+  };
+
   const Vec3f pseudornd_seed = perimeter_points[viable_example_index].position;
   float rand = std::abs(sin(pseudornd_seed.dot(Vec3f(12.9898f,78.233f, 133.3333f))) * 43758.5453f);
   rand = rand - (int) rand;
@@ -1330,8 +1374,7 @@ void pick_random_seam_point(const std::vector<SeamCandidate> &perimeter_points, 
   for (size_t index = start_index; index < end_index; ++index) {
     if (comparator.are_similar(perimeter_points[index], perimeter_points[viable_example_index])) {
       // index ok, push info into viables
-      Vec3f edge_to_next { perimeter_points[index == end_index - 1 ? start_index : index + 1].position
-                         - perimeter_points[index].position };
+      Vec3f edge_to_next = edge_from(index);
       float dist_to_next = edge_to_next.norm();
       viables.push_back( { index, dist_to_next, edge_to_next });
     } else if (comparator.is_first_not_much_worse(perimeter_points[viable_example_index],
@@ -1343,8 +1386,7 @@ void pick_random_seam_point(const std::vector<SeamCandidate> &perimeter_points, 
       viable_example_index = index;
       viables.clear();
 
-      Vec3f edge_to_next = (perimeter_points[index == end_index - 1 ? start_index : index + 1].position
-                            - perimeter_points[index].position);
+      Vec3f edge_to_next = edge_from(index);
       float dist_to_next = edge_to_next.norm();
       viables.push_back( { index, dist_to_next, edge_to_next });
     }
@@ -1365,7 +1407,8 @@ void pick_random_seam_point(const std::vector<SeamCandidate> &perimeter_points, 
   Perimeter &perimeter = perimeter_points[start_index].perimeter;
   perimeter.seam_index = viables[point_idx].index;
   perimeter.final_seam_position = perimeter_points[perimeter.seam_index].position
-                                  + viables[point_idx].edge.normalized() * picked_len;
+                                  + (viables[point_idx].edge_length > 0.f ?
+                                     Vec3f(viables[point_idx].edge.normalized() * picked_len) : Vec3f::Zero());
   perimeter.finalized = true;
 }
 

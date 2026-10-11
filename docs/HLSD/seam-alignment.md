@@ -218,6 +218,29 @@ split (`get_facets_strict`), so that edges inside the painted area pair up. Each
 the direction from it into the paint. The contour is built once per object and stored in an AABB
 tree.
 
+Green and red paint use separate instances of the same contour and interval reconstruction.
+Red ranges classify candidates as Blocked, including the boundary itself (1 µm membership
+tolerance), overriding green paint at an overlap. Inserted samples include both red ends, a
+range midpoint, a gap midpoint and permitted guard samples up to 2 µm outside the red ends.
+The guard distance is reduced to one quarter of a shorter gap; gaps at or below the membership
+tolerance can remain closed. Candidate marks closer than 1 µm merge.
+These adjacent permitted samples limit fitted and optimized movement to the geometric red
+edge, with the small outward guard, rather than to a distant original gray vertex. No new
+penalty or change to candidate ranking is introduced. Existing Precise Seam modifier priority
+still applies after paint classification.
+
+Random placement samples an outgoing edge of its selected candidate. On loops with exact
+red ranges, a permitted candidate followed by a Blocked candidate contributes no outgoing
+edge length, so Random cannot sample toward the closed red boundary. A zero-length selected
+edge keeps the candidate position.
+
+If red boundary crossings cannot be paired, red paint retains its previous line-width
+proximity classification. This includes paint not crossing the layer, ambiguous contours and
+a completely red surface without boundary crossings. In the all-blocked case the existing
+best-effort placement continues to produce a seam; red paint does not suppress extrusion.
+An exact red reconstruction does not suppress legacy green oversampling when green
+boundaries remain uncertain.
+
 On a layer, the contour edges crossing the slicing plane give the exact ends of the painted band.
 Each crossing within the line width of the loop is moved to its closest loop point; the direction
 into the paint, against the loop direction there (the mean of both edges at a vertex), tells whether

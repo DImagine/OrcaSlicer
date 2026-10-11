@@ -49,6 +49,8 @@ struct Perimeter {
   // Enforced candidates span the painted ranges exactly, their ends included, instead of reaching flow_width
   // around the paint.
   bool exact_enforced_ends = false;
+  // Red paint is reconstructed on the contour; its edge samples remain Blocked.
+  bool exact_blocked_ends = false;
 
   // During alignment, a final position may be stored here. In that case, finalized is set to true.
   // Note that final seam position is not limited to points of the perimeter loop. In theory it can be any position

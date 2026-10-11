@@ -566,7 +566,7 @@ TEST_CASE("Painted seams stay at a corner of the painted side", "[SeamPlacer]")
 
 namespace {
 // Paints the front face (lowest y) of the fixture's box only.
-void paint_front_face(PipelineFixture &fixture)
+void paint_front_face(PipelineFixture &fixture, EnforcerBlockerType type = EnforcerBlockerType::ENFORCER)
 {
     auto &volume = *fixture.model.objects.front()->volumes.front();
     const auto &mesh = volume.mesh();
@@ -577,7 +577,7 @@ void paint_front_face(PipelineFixture &fixture)
         for (int j = 0; j < 3; ++j)
             on_front = on_front && std::abs(double(mesh.its.vertices[mesh.its.indices[i][j]].y()) - front) < 1e-6;
         if (on_front)
-            selector.set_facet(int(i), EnforcerBlockerType::ENFORCER);
+            selector.set_facet(int(i), type);
     }
     volume.seam_facets.set(selector);
     fixture.print.apply(fixture.model, fixture.config);
@@ -639,6 +639,107 @@ TEST_CASE("Aligned painted seams follow the middle of the painted band", "[SeamP
         CAPTURE(seam.x(), seam.y());
         CHECK((seam - middle).norm() < 1e-3);
     }
+}
+
+TEST_CASE("Red paint blocks its exact range without blocking the nearby gray contour", "[SeamPlacer][Regression]")
+{
+    const bool reverse = GENERATE(false, true);
+    const bool wrap = GENERATE(false, true);
+    PipelineFixture fixture;
+    paint_front_face(fixture, EnforcerBlockerType::BLOCKER);
+    PrintObject &object = fixture.prepare();
+    auto outline = fixture.points_in_layer(object, {{-5, 0.2}, {-0.1, 0.2}, {10, 0.2}, {20.1, 0.2},
+                                                  {25, 0.2}, {25, 10}, {-5, 10}});
+    if (wrap) std::rotate(outline.begin(), outline.begin() + 2, outline.end()); // Red range crosses the loop origin.
+    if (reverse) std::reverse(outline.begin(), outline.end());
+    append_loop(clear_first_layer(object), std::move(outline));
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+    const auto &data = placer.m_seam_per_object.at(&object).layers.front();
+    REQUIRE(data.perimeters.size() == 1);
+    CHECK(data.perimeters.front().exact_blocked_ends);
+    const auto front = fixture.points_in_layer(object, {{0, 0.2}, {20, 0.2}, {-0.1, 0.2}, {20.1, 0.2}});
+    const double lower = unscale<double>(front[0].x()), upper = unscale<double>(front[1].x());
+    std::vector<bool> gray_near_edge(2, false);
+    double blocked_min = std::numeric_limits<double>::max(), blocked_max = -blocked_min;
+    for (size_t i = 0; i < data.points.size(); ++i) {
+        const auto &candidate = data.points[i];
+        const double x = candidate.position.x();
+        if (candidate.type == SeamType::Blocked) {
+            blocked_min = std::min(blocked_min, x);
+            blocked_max = std::max(blocked_max, x);
+            CHECK(x >= lower - 1e-3);
+            CHECK(x <= upper + 1e-3);
+        }
+        for (const size_t index : {size_t(2), size_t(3)})
+            if ((candidate.position.head<2>().cast<double>() - unscale(front[index])).norm() < 1e-4) {
+                gray_near_edge[index - 2] = true; // A closed extrusion can repeat its start vertex.
+                CHECK(candidate.type == SeamType::Neutral); // Old radius test blocked both of these vertices.
+                const auto target = Vec3f(float(0.5 * (lower + upper)), candidate.position.y(), candidate.position.z());
+                const auto projected = SeamPlacerImpl::place_on_loop(data.points, i, target);
+                // The normal projection may reach either end of the same permitted gray arc.
+                const double edge_distance = projected.x() < lower ? lower - projected.x() : projected.x() - upper;
+                CHECK(edge_distance > 0.0);
+                CHECK(edge_distance < 3e-3); // The stop follows the actual red edge, not the old gray vertex.
+            }
+    }
+    CHECK(gray_near_edge[0]);
+    CHECK(gray_near_edge[1]);
+    CHECK_THAT(blocked_min, Catch::Matchers::WithinAbs(lower, 1e-3));
+    CHECK_THAT(blocked_max, Catch::Matchers::WithinAbs(upper, 1e-3));
+}
+
+TEST_CASE("Aligned seams can approach a red edge without entering its painted range", "[SeamPlacer][Regression]")
+{
+    const std::string mode = GENERATE(std::string("aligned"), std::string("aligned_back"), std::string("back"),
+                                      std::string("nearest"), std::string("random"));
+    PipelineFixture fixture(false, 2.0f);
+    fixture.config.set_deserialize_strict("seam_position", mode);
+    paint_front_face(fixture, EnforcerBlockerType::BLOCKER);
+    PrintObject &object = fixture.prepare();
+    set_loop_on_every_layer(object, [&](size_t) {
+        return fixture.points_in_layer(object, {{-5, 0.2}, {-0.1, 0.2}, {10, 0.2}, {20.1, 0.2},
+                                                {25, 0.2}, {25, 10}, {-5, 10}});
+    });
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+    const auto front = fixture.points_in_layer(object, {{0, 0.2}, {20, 0.2}});
+    const double lower = unscale<double>(front[0].x()), upper = unscale<double>(front[1].x());
+    const double y = unscale<double>(front[0].y());
+    for (const auto &layer : placer.m_seam_per_object.at(&object).layers) {
+        const auto &perimeter = layer.perimeters.front();
+        const size_t selected = perimeter.seam_index;
+        CHECK(layer.points[selected].type != SeamType::Blocked);
+        const auto target = Vec3f(float(0.5 * (lower + upper)), float(y), layer.points[selected].position.z());
+        const auto projected = SeamPlacerImpl::place_on_loop(layer.points, selected, target);
+        const bool inside_red = projected.x() >= lower && projected.x() <= upper && std::abs(projected.y() - y) < 1e-3;
+        CHECK_FALSE(inside_red);
+    }
+    for (const Vec2d &seam : placed_seams(placer, object)) {
+        const bool inside_red = seam.x() >= lower && seam.x() <= upper && std::abs(seam.y() - y) < 1e-3;
+        CHECK_FALSE(inside_red);
+    }
+}
+
+TEST_CASE("Entire red surface retains the existing all-blocked seam fallback", "[SeamPlacer][Regression]")
+{
+    PipelineFixture fixture;
+    auto &volume = *fixture.model.objects.front()->volumes.front();
+    TriangleSelector selector(volume.mesh());
+    for (size_t i = 0; i < volume.mesh().its.indices.size(); ++i)
+        selector.set_facet(int(i), EnforcerBlockerType::BLOCKER); // No legal gray arc exists.
+    volume.seam_facets.set(selector);
+    fixture.print.apply(fixture.model, fixture.config);
+    PrintObject &object = fixture.prepare();
+    set_loop_on_every_layer(object, [&](size_t) {
+        return fixture.points_in_layer(object, {{0.2, 0.2}, {19.8, 0.2}, {19.8, 19.8}, {0.2, 19.8}});
+    });
+    SeamPlacer placer;
+    placer.init(fixture.print, [] {});
+    const auto &data = placer.m_seam_per_object.at(&object).layers.front();
+    CHECK_FALSE(data.perimeters.front().exact_blocked_ends);
+    for (const auto &candidate : data.points) CHECK(candidate.type == SeamType::Blocked);
+    CHECK(placed_seams(placer, object).front().allFinite());
 }
 
 TEST_CASE("Seams placed on a regular polygon with an even vertex count lie on the ray from its center", "[SeamPlacer]")
