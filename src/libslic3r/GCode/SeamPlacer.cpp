@@ -2102,8 +2102,19 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
   const double vertical_weight = projection_options.vertical_weight;
   const bool geometric_probe = projection_options.geometric_probe;
   const double projection_span = projection_options.projection_span;
+  SeamChainAngleOptions angle_options;
+  const double angle_curve = setting("ORCA_SEAM_CHAIN_ANGLE_CURVE", double(angle_options.curve));
+  if (angle_curve >= 0. && angle_curve <= 3. && std::floor(angle_curve) == angle_curve)
+    angle_options.curve = static_cast<SeamChainAngleCurve>(int(angle_curve));
+  const double minimum_angle = setting("ORCA_SEAM_CHAIN_ANGLE_MIN", angle_options.minimum_degrees);
+  const double full_angle = setting("ORCA_SEAM_CHAIN_ANGLE_FULL", angle_options.full_degrees);
+  // An invalid soft interval retains the defaults and cannot alter the independent hard snap.
+  if (minimum_angle < full_angle && full_angle <= double(sharp_angle_snapping_threshold) * 180. / PI) {
+    angle_options.minimum_degrees = minimum_angle;
+    angle_options.full_degrees = full_angle;
+  }
   std::unique_ptr<SeamProjectionSurface> projection_surface;
-  std::ofstream dump_points, dump_vertices, dump_stage1, dump_projection, dump_passes, dump_domain;
+  std::ofstream dump_points, dump_vertices, dump_stage1, dump_projection, dump_passes, dump_domain, dump_angles;
   if (dump) {
     // Diagnostic files are opt-in and never share application configuration or output paths.
     dump_points.open(std::string(dump) + "-points.csv", std::ios::app);
@@ -2112,12 +2123,14 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
     dump_projection.open(std::string(dump) + "-projection.csv", std::ios::app);
     dump_passes.open(std::string(dump) + "-passes.csv", std::ios::app);
     dump_domain.open(std::string(dump) + "-domain.csv", std::ios::app);
+    dump_angles.open(std::string(dump) + "-angles.csv", std::ios::app);
     dump_points << std::setprecision(17);
     dump_vertices << std::setprecision(17);
     dump_stage1 << std::setprecision(17);
     dump_projection << std::setprecision(17);
     dump_passes << std::setprecision(17);
     dump_domain << std::setprecision(17);
+    dump_angles << std::setprecision(17);
   }
   size_t chain_id = 0;
   for (const auto &[string, segments] : optimization_strings) {
@@ -2202,7 +2215,10 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
         }
       }
       const double angle_weight = 1. / (0.1 + compute_angle_penalty(candidates[order[anchor]].local_ccw_angle));
-      point.anchor_weight = painted_preference ? angle_weight + 3. : angle_weight * t;
+      const double anchor_angle = double(candidates[order[anchor]].local_ccw_angle) * 180. / PI;
+      point.anchor_weight = seam_chain_anchor_weight(angle_weight, t, anchor_angle, painted_preference, angle_options);
+      if (dump_angles) dump_angles << chain_id << ',' << chain.size() << ',' << layer_index + 1 << ','
+        << anchor_angle << ',' << angle_weight << ',' << t << ',' << painted_preference << ',' << int(angle_options.curve) << '\n';
       if (legacy_paint) {
         // Unknown paint is fixed; proven absent paint has no hard interval, including the old proximity fringe.
         point.lower_arc = -std::numeric_limits<double>::infinity();
@@ -2317,6 +2333,36 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
       perimeter.optimized_unsupported_dist = float((1. - fraction) * a.unsupported_dist + fraction * b.unsupported_dist);
       // Angular penalty was interpolated for optimization; inner-wall geometry needs the actual local edge angle.
       perimeter.optimized_angle = fraction < 1e-5 ? a.local_ccw_angle : fraction > 1. - 1e-5 ? b.local_ccw_angle : 0.f;
+    }
+  }
+
+  if (dump) {
+    // Include short, unaligned loops so diagnostics distinguish original selection from optimized strings.
+    std::ofstream perimeters(std::string(dump) + "-perimeters.csv", std::ios::app);
+    std::ofstream candidates_dump(std::string(dump) + "-all-candidates.csv", std::ios::app);
+    perimeters << std::setprecision(17);
+    candidates_dump << std::setprecision(17);
+    for (size_t layer_index = 0; layer_index < layers.size(); ++layer_index) {
+      const auto &points = layers[layer_index].points;
+      for (size_t first = 0; first < points.size(); first = points[first].perimeter.end_index) {
+        const auto &perimeter = points[first].perimeter;
+        const auto &selected = points[perimeter.seam_index];
+        const Vec3f position = perimeter.finalized ? perimeter.final_seam_position : selected.position;
+        perimeters << layer_index + 1 << ',' << first << ',' << perimeter.end_index << ',' << perimeter.seam_index
+          << ',' << perimeter.finalized << ',' << bool(perimeter.precise_seam_point) << ',' << int(selected.type)
+          << ',' << selected.central_enforcer << ',' << double(selected.local_ccw_angle) * 180. / PI
+          << ',' << selected.overhang << ',' << selected.visibility << ',' << perimeter.flow_width
+          << ',' << selected.position.x() << ',' << selected.position.y() << ',' << selected.position.z()
+          << ',' << position.x() << ',' << position.y() << ',' << position.z()
+          << ',' << perimeter.exact_enforced_ends << ',' << perimeter.enforcer_proximity_only << '\n';
+        for (size_t j = first; j < perimeter.end_index; ++j) {
+          const auto &candidate = points[j];
+          candidates_dump << layer_index + 1 << ',' << first << ',' << j << ',' << candidate.position.x()
+            << ',' << candidate.position.y() << ',' << candidate.position.z() << ',' << int(candidate.type)
+            << ',' << candidate.central_enforcer << ',' << double(candidate.local_ccw_angle) * 180. / PI
+            << ',' << candidate.overhang << ',' << candidate.visibility << ',' << candidate.embedded_distance << '\n';
+        }
+      }
     }
   }
 

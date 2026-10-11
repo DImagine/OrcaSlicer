@@ -27,8 +27,21 @@ followed by projection.
 
 The objective combines finite penalties derived from the original angle, visibility, overhang and
 paint-center preferences with 3D polyline length. The experimental length multiplier defaults to
-0.3 after conservative sphere trials; `ORCA_SEAM_CHAIN_LENGTH_WEIGHT=0` bypasses the entire stage. This scalar cost is not an exact
+0.15; `ORCA_SEAM_CHAIN_LENGTH_WEIGHT=0` bypasses the entire stage. This scalar cost is not an exact
 reformulation of the original lexicographic candidate selection.
+
+Only the post-fit anchor penalty uses the configurable `SeamChainAngleOptions` response.
+The default retains the original post-fit weights: ordinary points use the signed-angle
+preference times the original cubic blend factor, and painted points use that preference
+plus a separate center weight of 3. Experimental responses have zero angular contribution
+through 15 degrees and full soft weight at 30 degrees; they multiply the signed-angle
+preference equally for ordinary and painted points, preserving the separate painted center weight.
+This changes neither initial candidate scores, string construction, spline fitting nor
+the original 55-degree hard snap. Sample-quality and overhang penalties also remain intact,
+so zero angular anchor weight does not eliminate every old angle preference from the objective.
+`ORCA_SEAM_CHAIN_ANGLE_CURVE` selects legacy (0), smoothstep (1), linear (2) or cubic (3).
+`ORCA_SEAM_CHAIN_ANGLE_MIN` and `ORCA_SEAM_CHAIN_ANGLE_FULL` set the soft interval in degrees;
+invalid intervals retain defaults. Legacy mode reproduces the old post-fit weights exactly.
 
 A separate experimental pass starts from the accepted length-only result. The nearest supporting
 face of the transformed model supplies each frozen normal. Faces more than 45 degrees from vertical
@@ -75,7 +88,7 @@ faces on the same smooth side. A failed second pass preserves the complete
 length-only result. The geometric mode couples positions but does not itself prove spatial
 smoothness on a faceted surface; printed-loop validation remains necessary.
 
-`ORCA_SEAM_CHAIN_VERTICAL_WEIGHT` controls the optional cost (default 0.3),
+`ORCA_SEAM_CHAIN_VERTICAL_WEIGHT` controls the optional cost (default 1.0),
 `ORCA_SEAM_CHAIN_GEOMETRIC_PROBE` controls the extra search mode (default 1), and
 `ORCA_SEAM_CHAIN_PROJECTION_SPAN` controls the trend-analysis window (default 4 mm).
 `ORCA_SEAM_CHAIN_DIRECTION_LAYERS=3` selects the three-layer estimate and cost (default);

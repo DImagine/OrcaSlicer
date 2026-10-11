@@ -36,8 +36,21 @@ struct SeamChainPoint {
 
 enum class SeamChainStatus { Disabled, Invalid, NoFreedom, Unchanged, Improved, Budget, Failed };
 
+// This response belongs only to post-fit optimization, never to original candidate selection or fitting.
+enum class SeamChainAngleCurve { Legacy, Smoothstep, Linear, Cubic };
+struct SeamChainAngleOptions {
+    SeamChainAngleCurve curve = SeamChainAngleCurve::Legacy;
+    double minimum_degrees = 15.;
+    double full_degrees = 30.;
+    double painted_center_weight = 3.;
+};
+
+// Preserve signed angle preference in base_weight; apply one magnitude response to both paint types.
+double seam_chain_anchor_weight(double base_weight, double legacy_factor, double angle_degrees,
+                               bool painted, const SeamChainAngleOptions &options = {});
+
 struct SeamChainOptions {
-    double length_weight = 0.3;
+    double length_weight = 0.15;
     double vertical_weight = 0.;
     double projection_span = 4.;
     // Zero uses an arc-length window; three uses the immediate neighboring layers.
@@ -57,7 +70,7 @@ struct SeamChainOptions {
     size_t max_evaluations = 5000;
     static SeamChainOptions projected_defaults() {
         SeamChainOptions options;
-        options.vertical_weight = options.length_weight;
+        options.vertical_weight = 1.; // Keep the accepted vertical multiplier independent of the length weight.
         options.direction_layers = 3;
         options.geometric_probe = options.projection_gate = options.hold_free_center = true;
         return options;

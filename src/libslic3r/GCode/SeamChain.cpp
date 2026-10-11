@@ -13,6 +13,21 @@
 #include <vector>
 
 namespace Slic3r::SeamPlacerImpl {
+
+double seam_chain_anchor_weight(double base_weight, double legacy_factor, double angle_degrees,
+                               bool painted, const SeamChainAngleOptions &options)
+{
+    // Legacy mode reproduces the adapter's old arithmetic, including its different painted factor.
+    if (options.curve == SeamChainAngleCurve::Legacy)
+        return painted ? base_weight + options.painted_center_weight : base_weight * legacy_factor;
+    const double x = std::clamp((std::abs(angle_degrees) - options.minimum_degrees) /
+                               (options.full_degrees - options.minimum_degrees), 0., 1.);
+    const double response = options.curve == SeamChainAngleCurve::Linear ? x :
+                            options.curve == SeamChainAngleCurve::Cubic ? x * x * x : x * x * (3. - 2. * x);
+    // Full soft weight does not fix a point: the original 55-degree mask is computed separately.
+    return base_weight * response + (painted ? options.painted_center_weight : 0.);
+}
+
 namespace {
 using Matrix = Eigen::MatrixXd;
 using Vector = Eigen::VectorXd;

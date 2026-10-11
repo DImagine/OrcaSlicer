@@ -10,6 +10,36 @@
 
 using namespace Slic3r;
 
+TEST_CASE("Post-fit angle retention has the same response in painted and ordinary zones", "[SeamPlacer][SeamChain]")
+{
+    using namespace SeamPlacerImpl;
+    SeamChainAngleOptions options;
+    options.curve = GENERATE(SeamChainAngleCurve::Smoothstep, SeamChainAngleCurve::Linear, SeamChainAngleCurve::Cubic);
+    double previous = 0.;
+    for (int angle = 0; angle <= 90; ++angle) {
+        // The painted-center preference is independent of the shared angular response.
+        const double ordinary = seam_chain_anchor_weight(2., .1, double(angle), false, options);
+        const double painted = seam_chain_anchor_weight(2., .1, double(angle), true, options);
+        CHECK(std::abs(painted - ordinary - options.painted_center_weight) < 1e-12);
+        CHECK(std::abs(ordinary - seam_chain_anchor_weight(2., .1, -double(angle), false, options)) < 1e-12);
+        CHECK(ordinary >= previous);
+        CHECK(ordinary <= 2.);
+        if (angle <= options.minimum_degrees) CHECK(std::abs(ordinary) < 1e-12);
+        if (angle >= options.full_degrees) CHECK(std::abs(ordinary - 2.) < 1e-12);
+        previous = ordinary;
+    }
+}
+
+TEST_CASE("Legacy post-fit angle weights preserve the original painted and ordinary arithmetic", "[SeamPlacer][SeamChain][Regression]")
+{
+    using namespace SeamPlacerImpl;
+    SeamChainAngleOptions options;
+    options.curve = SeamChainAngleCurve::Legacy;
+    const double factor = GENERATE(0., .1, .5, 1.);
+    CHECK(std::abs(seam_chain_anchor_weight(2., factor, 20., false, options) - 2. * factor) < 1e-12);
+    CHECK(std::abs(seam_chain_anchor_weight(2., factor, 20., true, options) - 5.) < 1e-12);
+}
+
 TEST_CASE("Projected seam search accepts a bounded length tradeoff instead of rolling it back", "[SeamPlacer][SeamChain][Regression]")
 {
     using namespace SeamPlacerImpl;
