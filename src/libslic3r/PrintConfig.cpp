@@ -13153,6 +13153,24 @@ CLIMiscConfigDef::CLIMiscConfigDef()
                      "and per object.");
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Exchange paths are CLI runtime input, never printer/project settings.
+    def = this->add("export_seam_loops", coString);
+    def->label = L("Export seam loops");
+    def->tooltip = L("Export the external perimeter loops of one explicit plate as AI seam JSON.");
+    def->cli_params = "file.json";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("import_seam_points", coString);
+    def->label = L("Import seam points");
+    def->tooltip = L("Use a complete AI seam response for one explicit plate during G-code generation.");
+    def->cli_params = "file.json";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("share_seam_paths", coBool);
+    def->label = L("Share seam file paths");
+    def->tooltip = L("Include local executable, resources, project and exchange paths in AI seam exports.");
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("debug", coInt);
     def->label = L("Debug level");
     def->tooltip = L("Sets debug logging level. 0:fatal, 1:error, 2:warning, 3:info, 4:debug, 5:trace\n");

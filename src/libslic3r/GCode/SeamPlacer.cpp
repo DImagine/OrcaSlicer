@@ -1,4 +1,5 @@
 #include "SeamPlacer.hpp"
+#include "AISeamPlacement.hpp"
 
 #include "libslic3r/Point.hpp"
 #include "libslic3r/AABBTreeIndirect.hpp"
@@ -440,7 +441,8 @@ struct GlobalModelInfo {
 
 //Extract perimeter polygons of the given layer
 Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerRegion*> &corresponding_regions_out,
-                                   bool has_precise_seam_modifiers) {
+                                   bool has_precise_seam_modifiers,
+                                   std::vector<const ExtrusionLoop *> *source_loops = nullptr) {
   Polygons polygons;
   for (const LayerRegion *layer_region : layer->regions()) {
     for (const ExtrusionEntity *ex_entity : layer_region->perimeters.entities) {
@@ -460,6 +462,7 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
             perimeter->collect_points(p);
             polygons.emplace_back(std::move(p));
             corresponding_regions_out.push_back(layer_region);
+            if (source_loops) source_loops->push_back(perimeter->is_loop() ? static_cast<const ExtrusionLoop *>(perimeter) : nullptr);
           }
         }
         if (polygons.empty()) {
@@ -467,12 +470,14 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
           ex_entity->collect_points(p);
           polygons.emplace_back(std::move(p));
           corresponding_regions_out.push_back(layer_region);
+          if (source_loops) source_loops->push_back(nullptr);
         }
       } else {
         Points p;
         ex_entity->collect_points(p);
         polygons.emplace_back(std::move(p));
         corresponding_regions_out.push_back(layer_region);
+        if (source_loops) source_loops->push_back(ex_entity->is_loop() ? static_cast<const ExtrusionLoop *>(ex_entity) : nullptr);
       }
     }
   }
@@ -493,6 +498,7 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
     // it is easier than checking everywhere if the layer is not emtpy, no seam will be placed to this layer anyway
     polygons.emplace_back(Points{ { 0, 0 } });
     corresponding_regions_out.push_back(nullptr);
+    if (source_loops) source_loops->push_back(nullptr);
   }
 
   return polygons;
@@ -504,7 +510,9 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
 // oversamples enforcer edges, applies weak modifiers, marks one enforced point as central for alignment.
 void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const LayerRegion *region,
                                const GlobalModelInfo &global_model_info, PrintObjectSeamData::LayerSeams &result,
-                               PreciseSeam::PreciseSeamWarnings* warnings = nullptr) {
+                               PreciseSeam::PreciseSeamWarnings* warnings = nullptr,
+                               AISeamPlacement::Json *constraints = nullptr,
+                               const ExtrusionLoop *source = nullptr) {
   if (orig_polygon.size() == 0) {
     return;
   }
@@ -519,16 +527,58 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   const auto& weak_volumes = global_model_info.precise_seam_weak_volumes;
 
   std::optional<Point> seam_point;
+  PreciseSeam::AppliedStrongModifier applied;
   std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
   if (layer != nullptr && (!strong_volumes.empty() || !weak_volumes.empty())) {
     // Share validation, bounds and clipping line across all modifiers while the polygon is unchanged.
     // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
     const PreciseSeam::PreparedPerimeter prepared(polygon);
     seam_point = PreciseSeam::insert_strong_seam_point(
-        strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
+        strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings,
+        constraints ? &applied : nullptr);
     if (!seam_point.has_value())
       weak_segments = PreciseSeam::collect_weak_modifier_segments(
           weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
+  }
+
+  if (constraints && source) {
+    using AISeamPlacement::Json;
+    const auto modifier_info = [layer](const ModelVolume *modifier) {
+      const auto &volumes = layer->object()->model_object()->volumes;
+      const size_t index = std::find(volumes.begin(), volumes.end(), modifier) - volumes.begin();
+      // Names are display labels and may themselves contain imported local paths.
+      const size_t slash = modifier->name.find_last_of("/\\");
+      return Json{{"modifier_key", "volume/" + std::to_string(index)},
+        {"modifier_name", modifier->name.substr(slash == std::string::npos ? 0 : slash + 1)}};
+    };
+    Json strong = {{"status", "none"}};
+    if (seam_point && applied.modifier) {
+      strong = modifier_info(applied.modifier);
+      strong["status"] = "applied";
+      strong["mode"] = applied.modifier->type() == ModelVolumeType::PRECISE_SEAM_CENTER ? "center" :
+          applied.modifier->type() == ModelVolumeType::PRECISE_SEAM_LEFT ? "left" : "right";
+      strong["target_point"] = {seam_point->x(), seam_point->y()};
+      const auto projection = AISeamPlacement::project(*source, unscale(*seam_point));
+      strong["target_on_overhang_path"] = is_bridge(source->paths[projection.path_idx].role());
+      strong["multiple_intersections"] = applied.multiple_intersections;
+    }
+    Json weak = {{"status", seam_point ? "not_evaluated_strong_applied" : weak_segments.empty() ? "none" : "evaluated"},
+                 {"zones", Json::array()}};
+    for (const auto &segment : weak_segments) {
+      Json zone = modifier_info(segment.modifier);
+      zone["type"] = int(segment.type);
+      zone["whole_perimeter"] = segment.whole_perimeter;
+      if (!segment.whole_perimeter) {
+        const auto left = AISeamPlacement::project(*source, unscale(segment.left_point));
+        const auto right = AISeamPlacement::project(*source, unscale(segment.right_point));
+        zone["left"] = {{"point", {segment.left_point.x(), segment.left_point.y()}}, {"s_mm", left.s_mm}};
+        zone["right"] = {{"point", {segment.right_point.x(), segment.right_point.y()}}, {"s_mm", right.s_mm}};
+        zone["boundary_direction"] = "ccw";
+        zone["printing_direction"] = was_clockwise ? "cw" : "ccw";
+      }
+      weak["zones"].push_back(std::move(zone));
+    }
+    *constraints = {{"strong", strong}, {"weak", weak}};
   }
 
   // Store the inserted point position for marking as central_enforcer later.
@@ -1100,13 +1150,13 @@ void pick_random_seam_point(const std::vector<SeamCandidate> &perimeter_points, 
 // Gather SeamCandidates of each layer into vector and build KDtree over them
 // Store results in the SeamPlacer variables m_seam_per_object
 void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerImpl::GlobalModelInfo &global_model_info,
-                                        PreciseSeam::PreciseSeamWarnings* warnings) {
+                                        PreciseSeam::PreciseSeamWarnings* warnings, bool collect_sources) {
   using namespace SeamPlacerImpl;
   PrintObjectSeamData &seam_data = m_seam_per_object.emplace(po, PrintObjectSeamData { }).first->second;
   seam_data.layers.resize(po->layer_count());
 
   tbb::parallel_for(tbb::blocked_range<size_t>(0, po->layers().size()),
-                    [po, &global_model_info, &seam_data, warnings]
+                    [po, &global_model_info, &seam_data, warnings, collect_sources]
                     (tbb::blocked_range<size_t> r) {
                       for (size_t layer_idx = r.begin(); layer_idx < r.end(); ++layer_idx) {
                         PrintObjectSeamData::LayerSeams &layer_seams = seam_data.layers[layer_idx];
@@ -1116,11 +1166,15 @@ void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerI
                         //NOTE corresponding region ptr may be null, if the layer has zero perimeters
                         const bool has_precise_seam_modifiers = !global_model_info.precise_seam_strong_volumes.empty() ||
                                                                !global_model_info.precise_seam_weak_volumes.empty();
-                        Polygons polygons = extract_perimeter_polygons(layer, regions, has_precise_seam_modifiers);
+                        std::vector<const ExtrusionLoop *> sources;
+                        Polygons polygons = extract_perimeter_polygons(layer, regions, has_precise_seam_modifiers,
+                                                                      collect_sources ? &sources : nullptr);
                         for (size_t poly_index = 0; poly_index < polygons.size(); ++poly_index) {
                           process_perimeter_polygon(polygons[poly_index], unscaled_z,
                                                     regions[poly_index], global_model_info, layer_seams,
                                                     warnings);
+                          if (collect_sources && !polygons[poly_index].empty())
+                            layer_seams.perimeters.back().source_loop = sources[poly_index];
                         }
                         auto functor = SeamCandidateCoordinateFunctor { layer_seams.points };
                         seam_data.layers[layer_idx].points_tree =
@@ -1180,7 +1234,7 @@ void SeamPlacer::calculate_overhangs_and_layer_embedding(const PrintObject *po) 
                                                              * po->layers()[layer_idx]->height;
                             perimeter_point.overhang =
                                 perimeter_point.overhang < 0.0f ? 0.0f : perimeter_point.overhang;
-                            perimeter_point.unsupported_dist = _dist + 0.4f * perimeter_point.perimeter.flow_width;
+                            perimeter_point.unsupported_dist = unsupported_distance(_dist, perimeter_point.perimeter.flow_width);
                           }
 
                           if (should_compute_layer_embedding) { // search for embedded perimeter points (points hidden inside the print ,e.g. multimaterial join, best position for seam)
@@ -1329,7 +1383,8 @@ std::vector<std::pair<size_t, size_t>> SeamPlacer::find_seam_string(const PrintO
 // Does not change the positions of the SeamCandidates themselves, instead stores
 // the new aligned position into the shared Perimeter structure of each perimeter
 // Note that this position does not necesarilly lay on the perimeter.
-void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::SeamComparator &comparator) {
+void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::SeamComparator &comparator,
+                                  AISeamPlacement::Session *exchange) {
   using namespace SeamPlacerImpl;
 
   // Prepares Debug files for writing.
@@ -1487,6 +1542,20 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
         perimeter.finalized = true;
       }
 
+      if (exchange && exchange->exporting()) {
+        AISeamPlacement::Json members = AISeamPlacement::Json::array();
+        bool own = true;
+        for (const auto &pair : seam_string) {
+          const auto &perimeter = layers[pair.first].points[pair.second].perimeter;
+          const auto id = exchange->source_id(perimeter.source_loop);
+          if (!id) { own = false; break; }
+          members.push_back({{"source_loop_id", *id},
+              {"aligned_position_mm", {perimeter.final_seam_position.x(), perimeter.final_seam_position.y()}}});
+        }
+        // A glued or foreign candidate is never assigned a guessed source ID.
+        if (own) exchange->add_alignment_group({{"basis", "standard_alignment"}, {"members", members}});
+      }
+
 #ifdef DEBUG_FILES
       auto randf = []() {
         return float(rand()) / float(RAND_MAX);
@@ -1519,7 +1588,8 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
 
 }
 
-void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_canceled_func) {
+void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_canceled_func,
+                      AISeamPlacement::Session *exchange) {
   using namespace SeamPlacerImpl;
   m_seam_per_object.clear();
   m_precise_seam_warning.clear();
@@ -1561,7 +1631,30 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
 
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: gather_seam_candidates: start";
-      gather_seam_candidates(po, global_model_info, &precise_seam_warnings);
+      gather_seam_candidates(po, global_model_info, &precise_seam_warnings, exchange && exchange->exporting());
+      if (exchange && exchange->exporting()) {
+        // Classify each real source loop, including those the standard extractor glued or omitted.
+        PreciseSeam::PreciseSeamWarnings export_warnings;
+        for (const auto &source : exchange->sources()) {
+          if (source.object != po) continue;
+          throw_if_canceled_func();
+          Polygon polygon = source.loop->polygon();
+          polygon.points.erase(std::unique(polygon.points.begin(), polygon.points.end()), polygon.points.end());
+          while (polygon.size() > 1 && polygon.points.front() == polygon.points.back()) polygon.points.pop_back();
+          PrintObjectSeamData::LayerSeams samples;
+          AISeamPlacement::Json constraints;
+          process_perimeter_polygon(polygon, float(source.layer->slice_z), source.region, global_model_info,
+                                    samples, &export_warnings, &constraints, source.loop);
+          AISeamPlacement::Json markup = AISeamPlacement::Json::array();
+          for (const auto &sample : samples.points) {
+            const auto projection = AISeamPlacement::project(*source.loop, sample.position.head<2>().cast<double>());
+            markup.push_back({{"s_mm", projection.s_mm}, {"x_mm", sample.position.x()},
+              {"y_mm", sample.position.y()}, {"type", int(sample.type)}, {"central", sample.central_enforcer}});
+          }
+          exchange->annotate(source.loop, {{"markup_samples", markup}, {"precise_seam", constraints},
+              {"standard_candidates", "unavailable"}});
+        }
+      }
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: gather_seam_candidates: end";
       throw_if_canceled_func();
@@ -1604,7 +1697,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
     if (configured_seam_preference == spAligned || configured_seam_preference == spRear || configured_seam_preference == spAlignedBack) {
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: align_seam_points : start";
-      align_seam_points(po, comparator);
+      align_seam_points(po, comparator, exchange);
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: align_seam_points : end";
     }
@@ -1726,7 +1819,8 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
 }
 
 void SeamPlacer::place_seam(const Layer *layer, ExtrusionLoop &loop,
-                            const Point &last_pos, float& overhang) const {
+                            const Point &last_pos, float& overhang,
+                            const AISeamPlacement::Projection *approved) const {
   using namespace SeamPlacerImpl;
   const PrintObject *po = layer->object();
   // Must not be called with supprot layer.
@@ -1735,6 +1829,13 @@ void SeamPlacer::place_seam(const Layer *layer, ExtrusionLoop &loop,
   assert(layer->id() >= po->slicing_parameters().raft_layers());
   const size_t layer_index = layer->id() - po->slicing_parameters().raft_layers();
   const double unscaled_z = layer->slice_z;
+
+  if (approved != nullptr) {
+    // Effective finalized position is per occurrence; leave shared candidates and inner walls alone.
+    overhang = approved->unsupported_distance;
+    AISeamPlacement::split_exact(loop, *approved);
+    return;
+  }
 
   auto get_next_loop_point = [loop](ExtrusionLoop::ClosestPathPoint current) {
     current.segment_idx += 1;

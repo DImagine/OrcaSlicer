@@ -162,13 +162,18 @@ void init_precise_seam_data(
 
 // Inserts the seam point of the first strong modifier with a usable segment on this perimeter and returns
 // it, or nullopt. `prepared` must describe `polygon` before any change.
+struct AppliedStrongModifier {
+    const ModelVolume *modifier = nullptr;
+    bool multiple_intersections = false;
+};
 std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
     const PreparedPerimeter &prepared,
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
-    PreciseSeamWarnings* warnings = nullptr);
+    PreciseSeamWarnings* warnings = nullptr,
+    AppliedStrongModifier *applied = nullptr);
 
 // Collects weak zones, inserts their boundaries into `polygon` and subdivides enforced edges. Pass
 // modifiers lowest priority first; `prepared` must describe the unchanged `polygon`.

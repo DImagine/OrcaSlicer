@@ -1,0 +1,192 @@
+{
+  "format": "orca-ai-seams-export",
+  "version": 1,
+  "prompt": "Synthetic format example; real exports embed the consent and optimization prompt.",
+  "summary": {
+    "source_loop_count": 1,
+    "occurrence_count": 1,
+    "alignment_groups": "unavailable_or_not_applicable",
+    "objects": [
+      {
+        "object_key": "0",
+        "name": "Contract example square"
+      }
+    ]
+  },
+  "export_id": "example-square",
+  "export_digest": "68b7633a3e200644b72b75fd00dda1204f5bac3c9562d8e1e5f8ee7ca1d13f89",
+  "object_digests": {
+    "0": "bf8ca37e9d2a2857476368473816da173dd2f26bb8078845e9cfe308531ff4ae"
+  },
+  "digest_algorithm": "sha256-canonical-json-v1",
+  "slicer_version": "contract-example",
+  "plate": 1,
+  "coordinate_system": "object_local",
+  "coord_unit_mm": 1e-06,
+  "markup_types": {
+    "blocked_red": 0,
+    "neutral": 1,
+    "enforced_green": 2
+  },
+  "alignment_groups": [],
+  "objects": [
+    {
+      "object_key": "0",
+      "model_index": 0,
+      "transform": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "center_offset": [
+        0,
+        0
+      ],
+      "instances": [
+        {
+          "instance_key": "0",
+          "shift": [
+            0,
+            0
+          ],
+          "model_transform": [
+            [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              1.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ]
+        }
+      ],
+      "layers": [
+        {
+          "layer_index": 0,
+          "slice_z_mm": 0.1,
+          "print_z_mm": 0.2,
+          "loops": [
+            {
+              "kind": "contour",
+              "loop_role": 0,
+              "inset_idx": 0,
+              "paths": [
+                {
+                  "role": 2,
+                  "z_contoured": false,
+                  "points": [
+                    [
+                      0,
+                      0,
+                      0
+                    ],
+                    [
+                      1000000,
+                      0,
+                      0
+                    ],
+                    [
+                      1000000,
+                      1000000,
+                      0
+                    ],
+                    [
+                      0,
+                      1000000,
+                      0
+                    ],
+                    [
+                      0,
+                      0,
+                      0
+                    ]
+                  ]
+                }
+              ],
+              "overhang_ranges": [],
+              "source_loop_id": "m0/o0/l0/r0/0/0",
+              "markup_samples": [
+                {
+                  "s_mm": 0.0,
+                  "x_mm": 0.0,
+                  "y_mm": 0.0,
+                  "type": 1,
+                  "central": false
+                }
+              ],
+              "precise_seam": {
+                "strong": {
+                  "status": "none"
+                },
+                "weak": {
+                  "status": "none",
+                  "zones": []
+                }
+              },
+              "standard_candidates": "unavailable",
+              "occurrences": [
+                {
+                  "occurrence_id": "m0/o0/l0/r0/0/0/i0",
+                  "instance_key": "0",
+                  "source_seam": [
+                    0,
+                    0
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "name": "Contract example square"
+    }
+  ],
+  "playbook": {
+    "format": "orca-ai-seams-playbook",
+    "version": 1,
+    "text": "# Seam decisions\nKeep seams on the rear side. Recheck overhang assumptions after nozzle or layer-height changes.\n"
+  },
+  "plate_origin_mm": [
+    0.0,
+    0.0,
+    0.0
+  ]
+}

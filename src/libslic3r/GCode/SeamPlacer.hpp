@@ -17,6 +17,7 @@
 #include "libslic3r/KDTreeIndirect.hpp"
 
 namespace Slic3r {
+namespace AISeamPlacement { class Session; struct Projection; }
 
 class PrintObject;
 namespace PreciseSeam { struct PreciseSeamWarnings; }
@@ -30,6 +31,11 @@ class Grid;
 
 namespace SeamPlacerImpl {
 
+inline float unsupported_distance(double signed_distance, float flow_width)
+{
+  // Keep standard scarf metadata and imported-point preflight on the same formula.
+  return float(signed_distance + 0.4f * flow_width);
+}
 
 struct GlobalModelInfo;
 struct SeamComparator;
@@ -56,6 +62,7 @@ struct Perimeter {
   // Stores precise seam coordinates found by Precise Seam modifiers
   std::optional<Vec3f> precise_seam_point;
   size_t precise_seam_index{};
+  const ExtrusionLoop *source_loop = nullptr; // Optional provenance for export alignment hints.
 };
 
 //Struct over which all processing of perimeters is done. For each perimeter point, its respective candidate is created,
@@ -150,22 +157,25 @@ public:
   //The following data structures hold all perimeter points for all PrintObject.
   std::unordered_map<const PrintObject*, PrintObjectSeamData> m_seam_per_object;
 
-  void init(const Print &print, std::function<void(void)> throw_if_canceled_func);
+  void init(const Print &print, std::function<void(void)> throw_if_canceled_func,
+            AISeamPlacement::Session *exchange = nullptr);
 
   // Precise Seam user warning prepared by the last init(), empty if there is none. init() does not
   // change the Print: the caller issues the warning where a print step is active (G-code export).
   const std::string &precise_seam_warning() const { return m_precise_seam_warning; }
 
-  void place_seam(const Layer *layer, ExtrusionLoop &loop, const Point &last_pos, float& overhang) const;
+  void place_seam(const Layer *layer, ExtrusionLoop &loop, const Point &last_pos, float& overhang,
+                  const AISeamPlacement::Projection *approved = nullptr) const;
 private:
   std::string m_precise_seam_warning;
 
   void gather_seam_candidates(const PrintObject *po, const SeamPlacerImpl::GlobalModelInfo &global_model_info,
-                              PreciseSeam::PreciseSeamWarnings* warnings = nullptr);
+                              PreciseSeam::PreciseSeamWarnings* warnings = nullptr, bool collect_sources = false);
   void calculate_candidates_visibility(const PrintObject *po,
                                        const SeamPlacerImpl::GlobalModelInfo &global_model_info);
   void calculate_overhangs_and_layer_embedding(const PrintObject *po);
-  void align_seam_points(const PrintObject *po, const SeamPlacerImpl::SeamComparator &comparator);
+  void align_seam_points(const PrintObject *po, const SeamPlacerImpl::SeamComparator &comparator,
+                         AISeamPlacement::Session *exchange = nullptr);
   std::vector<std::pair<size_t, size_t>> find_seam_string(const PrintObject *po,
                                                           std::pair<size_t, size_t> start_seam,
                                                           const SeamPlacerImpl::SeamComparator &comparator) const;

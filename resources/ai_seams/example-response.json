@@ -1,0 +1,20 @@
+{
+  "format": "orca-ai-seams-response",
+  "version": 1,
+  "export_id": "example-square",
+  "export_digest": "68b7633a3e200644b72b75fd00dda1204f5bac3c9562d8e1e5f8ee7ca1d13f89",
+  "seams": [
+    {
+      "occurrence_id": "m0/o0/l0/r0/0/0/i0",
+      "x_mm": 0.5,
+      "y_mm": 0.0
+    }
+  ],
+  "playbook": {
+    "format": "orca-ai-seams-playbook",
+    "version": 1,
+    "text": "# Seam decisions\nKeep seams on the rear side. Recheck overhang assumptions after nozzle or layer-height changes.\n"
+  },
+  "coord_unit_mm": 1e-06,
+  "plate": 1
+}

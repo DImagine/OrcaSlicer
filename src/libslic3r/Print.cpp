@@ -97,6 +97,9 @@
 #include <boost/log/trivial.hpp>
 #include <boost/regex.hpp>
 #include <boost/nowide/fstream.hpp>
+#include <boost/nowide/cstdio.hpp>
+#include <boost/system/error_code.hpp>
+#include <stdexcept>
 
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
@@ -237,6 +240,8 @@ void Print::clear()
 	std::scoped_lock<std::mutex> lock(this->state_mutex());
     // The following call should stop background processing if it is running.
     this->invalidate_all_steps();
+    ai_seam_options = {};
+    ai_seam_status.clear();
 	for (PrintObject *object : m_objects)
 		delete object;
 	m_objects.clear();
@@ -3954,6 +3959,65 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 // The export_gcode may die for various reasons (fails to process filename_format,
 // write error into the G-code, cannot execute post-processing scripts).
 // It is up to the caller to show an error message.
+void Print::set_ai_seam_response(const std::string &path)
+{
+    // Validate syntax immediately; geometry is checked against the ready perimeter registry.
+    if (!path.empty()) {
+        if (m_config.spiral_mode.value) throw std::runtime_error("AI seam placement is unavailable in spiral vase mode");
+        AISeamPlacement::read_response(path);
+        if (is_step_done(psSlicingFinished)) {
+            AISeamPlacement::Options options = ai_seam_options;
+            options.export_path.clear();
+            options.response_path = path;
+            AISeamPlacement::Session preflight(*this, options);
+        }
+    }
+    ai_seam_options.response_path = path;
+    ai_seam_status.clear();
+    std::scoped_lock<std::mutex> lock(state_mutex());
+    invalidate_step(psGCodeExport);
+}
+
+void Print::export_ai_seams(const AISeamPlacement::Options &options)
+{
+    if (options.export_path.empty()) throw std::invalid_argument("AI seam export needs an output path");
+    if (!is_step_done(psSlicingFinished)) throw std::runtime_error("Finish slicing the current plate before exporting seams");
+    if (!ai_seam_options.response_path.empty()) {
+        boost::system::error_code error;
+        if (boost::filesystem::equivalent(options.export_path, ai_seam_options.response_path, error))
+            throw std::runtime_error("The seam export cannot overwrite the connected response file");
+    }
+    AISeamPlacement::Options effective = options;
+    if (effective.playbook.is_null() && !ai_seam_options.response_path.empty()) {
+        const auto response = AISeamPlacement::read_response(ai_seam_options.response_path);
+        if (response.contains("playbook")) effective.playbook = response["playbook"];
+    }
+    const auto previous_options = ai_seam_options;
+    const auto previous_status = ai_seam_status;
+    const auto previous_statistics = m_print_statistics;
+    const auto previous_extruder_statistics = m_statistics_by_extruder_count;
+    const std::string temporary = (boost::filesystem::temp_directory_path() /
+        boost::filesystem::unique_path("orca-seams-%%%%-%%%%-%%%%.gcode")).string();
+    const auto restore = [&]() {
+        ai_seam_options = previous_options;
+        ai_seam_status = previous_status;
+        m_print_statistics = previous_statistics;
+        m_statistics_by_extruder_count = previous_extruder_statistics;
+        boost::nowide::remove(temporary.c_str());
+        boost::nowide::remove((temporary + ".tmp").c_str());
+    };
+    ai_seam_options = effective;
+    ai_seam_options.response_path.clear();
+    try {
+        GCodeProcessorResult temporary_result;
+        export_gcode(temporary, &temporary_result);
+    } catch (...) {
+        restore();
+        throw;
+    }
+    restore();
+}
+
 std::string Print::export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
     // output everything to a G-code file

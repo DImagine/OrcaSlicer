@@ -698,8 +698,9 @@ std::optional<Point> insert_strong_seam_point(
     const PreparedPerimeter &prepared,
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
-    PreciseSeamWarnings* warnings)
+    PreciseSeamWarnings* warnings, AppliedStrongModifier *applied)
 {
+    if (applied) *applied = {};
     assert(&prepared.polygon == &polygon);
     if (strong_volumes.empty() || layer == nullptr || !prepared.valid)
         return std::nullopt;
@@ -743,6 +744,7 @@ std::optional<Point> insert_strong_seam_point(
         // Preserve the insertion order: refining before first would shift the seam index.
         refine_at_vertex(seam_index, +1, polygon);
         refine_at_vertex(seam_index, -1, polygon);
+        if (applied) *applied = {modifier, extracted.segments.size() > 1};
         return seam_point; // No later strong modifier or weak processing for this perimeter.
     }
     return std::nullopt;

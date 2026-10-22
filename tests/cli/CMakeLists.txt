@@ -11,6 +11,12 @@ endif ()
 
 add_test(NAME cli_strict_mode
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_strict.sh $<TARGET_FILE:OrcaSlicer> ${ORCA_CLI_TEST_PYTHON})
+add_test(NAME cli_ai_seam_arguments
+    COMMAND ${ORCA_CLI_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test_ai_seam_placement.py $<TARGET_FILE:OrcaSlicer>)
+set_tests_properties(cli_ai_seam_arguments PROPERTIES
+    LABELS "CLI;RequiresApp;AISeamPlacement"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 150)
 add_test(NAME cli_empty_project_config
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_empty_project_config.sh $<TARGET_FILE:OrcaSlicer> ${ORCA_CLI_TEST_PYTHON} ${CMAKE_SOURCE_DIR})
 set_tests_properties(cli_empty_project_config PROPERTIES

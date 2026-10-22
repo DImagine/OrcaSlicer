@@ -1692,6 +1692,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // 1) Synchronize model objects.
     bool print_regions_reshuffled = false;
     if (model.id() != m_model.id()) {
+        // A response belongs to this project/plate session, never to a subsequently opened model.
+        ai_seam_options = {};
+        ai_seam_status.clear();
         // Kill everything, initialize from scratch.
         // Stop background processing.
         this->call_cancel_callback();

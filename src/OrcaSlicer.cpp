@@ -248,6 +248,7 @@ typedef struct  _sliced_plate_info{
     size_t sliced_time_with_cache {0};
     size_t triangle_count{0};
     std::string warning_message;
+    std::string ai_seam_status; // Runtime diagnostic only, never a 3MF setting.
 }sliced_plate_info_t;
 
 typedef struct _sliced_info {
@@ -548,6 +549,8 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
             plate_json["sliced_time_with_cache"] = sliced_info.sliced_plates[index].sliced_time_with_cache;
             plate_json["triangle_count"] = sliced_info.sliced_plates[index].triangle_count;
             plate_json["warning_message"] = sliced_info.sliced_plates[index].warning_message;
+            if (!sliced_info.sliced_plates[index].ai_seam_status.empty())
+                plate_json["ai_seam_status"] = sliced_info.sliced_plates[index].ai_seam_status;
             j["sliced_plates"].push_back(plate_json);
         }
         for (auto& iter: key_values)
@@ -1342,6 +1345,18 @@ int CLI::run(int argc, char **argv)
     sliced_info_t sliced_info;
     // Read up front so result.json reports it for early failures too.
     sliced_info.strict_mode = m_config.opt_bool("strict");
+    const std::string seam_export_path = m_config.opt_string("export_seam_loops");
+    const std::string seam_response_path = m_config.opt_string("import_seam_points");
+    const bool seam_exchange = !seam_export_path.empty() || !seam_response_path.empty();
+    if (seam_exchange &&
+        (std::find(m_actions.begin(), m_actions.end(), "slice") == m_actions.end() ||
+         m_config.option<ConfigOptionInt>("slice")->value <= 0 ||
+         std::find(m_actions.begin(), m_actions.end(), "load_slicedata") != m_actions.end())) {
+        const std::string message = "AI seam exchange requires --slice N for one explicit plate and cannot use --load-slicedata.";
+        boost::nowide::cerr << message << std::endl;
+        record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, message, sliced_info);
+        flush_and_exit(CLI_INVALID_PARAMS);
+    }
     // --no-check skips the check behind the only NON_CRITICAL warning --strict acts on
     // (support needed but disabled), from the point it appears among the actions. The pair
     // would make --strict a no-op or depend on argument order, so refuse it.
@@ -7110,7 +7125,37 @@ int CLI::run(int argc, char **argv)
                                     }
                                     BOOST_LOG_TRIVIAL(info) << "process finished, will export gcode temporarily to " << outfile << std::endl;
                                     temp_time = (long long)Slic3r::Utils::get_current_time_utc();
+                                    if (seam_exchange) {
+                                        // Strict geometry rejection happens inside G-code preflight, before publication.
+                                        print_fff->ai_seam_options.strict = sliced_info.strict_mode;
+                                        print_fff->set_ai_seam_response(seam_response_path);
+                                        if (!seam_export_path.empty()) {
+                                            AISeamPlacement::Options options;
+                                            options.export_path = seam_export_path;
+                                            if (m_config.opt_bool("share_seam_paths")) {
+                                                const auto executable = boost::dll::program_location();
+                                                options.environment = {{"executable", executable.string()},
+                                                    {"resources", boost::filesystem::absolute(resources_dir()).string()},
+                                                    {"export_file", boost::filesystem::absolute(seam_export_path).string()}};
+                                                if (!seam_response_path.empty())
+                                                    options.environment["response_file"] = boost::filesystem::absolute(seam_response_path).string();
+                                                if (!m_input_files.empty() && boost::iequals(boost::filesystem::path(m_input_files.front()).extension().string(), ".3mf"))
+                                                    options.environment["project"] = boost::filesystem::absolute(m_input_files.front()).string();
+#ifdef _WIN32
+                                                options.environment["library"] = (executable.parent_path() / "OrcaSlicer.dll").string();
+#endif
+                                            }
+                                            print_fff->export_ai_seams(options);
+                                        }
+                                    }
                                     outfile = print_fff->export_gcode(outfile, gcode_result, nullptr);
+                                    if (seam_exchange && !print_fff->ai_seam_status.empty()) {
+                                        sliced_plate_info.ai_seam_status = print_fff->ai_seam_status;
+                                        boost::nowide::cout << "AI seam status: " << print_fff->ai_seam_status << std::endl;
+                                        if (print_fff->ai_seam_status != "applied")
+                                            cli_record_warning(sliced_info, "ai_seam_geometry_mismatch",
+                                                {{"plate", index + 1}, {"status", print_fff->ai_seam_status}});
+                                    }
                                     time_using_cache = time_using_cache + ((long long)Slic3r::Utils::get_current_time_utc() - temp_time);
                                     BOOST_LOG_TRIVIAL(info) << "export_gcode finished: time_using_cache update to " << time_using_cache << " secs.";
                                     if (gcode_result && gcode_result->gcode_check_result.error_code) {
@@ -7201,7 +7246,8 @@ int CLI::run(int argc, char **argv)
                                 BOOST_LOG_TRIVIAL(error) << "found slicing or export error for partplate "<<index+1 << std::endl;
                                 boost::nowide::cerr << ex.what() << std::endl;
                                 //continue;
-                                record_exit_reson(outfile_dir, CLI_SLICING_ERROR, index+1, cli_errors[CLI_SLICING_ERROR], sliced_info);
+                                record_exit_reson(outfile_dir, CLI_SLICING_ERROR, index+1,
+                                    seam_exchange ? std::string(ex.what()) : cli_errors[CLI_SLICING_ERROR], sliced_info);
                                 flush_and_exit(CLI_SLICING_ERROR);
                             }
                         }

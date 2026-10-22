@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:orcaslicer:ai-seams:response:1",
+  "title": "OrcaSlicer AI seam response v1",
+  "type": "object",
+  "required": [
+    "format",
+    "version",
+    "export_id",
+    "export_digest",
+    "seams"
+  ],
+  "properties": {
+    "format": {
+      "const": "orca-ai-seams-response"
+    },
+    "version": {
+      "const": 1
+    },
+    "export_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "export_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "object_digests": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "seams": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "occurrence_id",
+          "x_mm",
+          "y_mm"
+        ],
+        "properties": {
+          "occurrence_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "x_mm": {
+            "type": "number"
+          },
+          "y_mm": {
+            "type": "number"
+          },
+          "exception": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "playbook": {
+      "$ref": "#/$defs/playbook"
+    },
+    "coord_unit_mm": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "plate": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "$comment": "Additionally require unique occurrence IDs, finite XY, the current geometry digest, full bijection and distance <= 0.000001 + 2*coord_unit_mm.",
+  "$defs": {
+    "playbook": {
+      "type": "object",
+      "required": [
+        "format",
+        "version",
+        "text"
+      ],
+      "properties": {
+        "format": {
+          "const": "orca-ai-seams-playbook"
+        },
+        "version": {
+          "const": 1
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

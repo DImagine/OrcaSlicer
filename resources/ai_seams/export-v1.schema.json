@@ -1,0 +1,475 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:orcaslicer:ai-seams:export:1",
+  "title": "OrcaSlicer AI seam export v1",
+  "type": "object",
+  "required": [
+    "format",
+    "version",
+    "prompt",
+    "summary",
+    "export_id",
+    "export_digest",
+    "object_digests",
+    "digest_algorithm",
+    "slicer_version",
+    "plate",
+    "coordinate_system",
+    "coord_unit_mm",
+    "markup_types",
+    "alignment_groups",
+    "objects",
+    "plate_origin_mm"
+  ],
+  "properties": {
+    "format": {
+      "const": "orca-ai-seams-export"
+    },
+    "version": {
+      "const": 1
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "source_loop_count",
+        "occurrence_count",
+        "alignment_groups",
+        "objects"
+      ],
+      "properties": {
+        "source_loop_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "occurrence_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "alignment_groups": {
+          "enum": [
+            "available",
+            "unavailable_or_not_applicable"
+          ]
+        },
+        "objects": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "export_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "export_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "object_digests": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/digest"
+      }
+    },
+    "digest_algorithm": {
+      "const": "sha256-canonical-json-v1"
+    },
+    "slicer_version": {
+      "type": "string"
+    },
+    "plate": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "coordinate_system": {
+      "const": "object_local"
+    },
+    "coord_unit_mm": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "markup_types": {
+      "type": "object",
+      "properties": {
+        "blocked_red": {
+          "const": 0
+        },
+        "neutral": {
+          "const": 1
+        },
+        "enforced_green": {
+          "const": 2
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "alignment_groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "basis",
+          "members"
+        ],
+        "properties": {
+          "basis": {
+            "const": "standard_alignment"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "source_loop_id",
+                "aligned_position_mm"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "objects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "object_key",
+          "model_index",
+          "name",
+          "transform",
+          "center_offset",
+          "instances",
+          "layers"
+        ],
+        "properties": {
+          "object_key": {
+            "type": "string"
+          },
+          "model_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "transform": {
+            "$ref": "#/$defs/matrix"
+          },
+          "center_offset": {
+            "$ref": "#/$defs/xy"
+          },
+          "instances": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "instance_key",
+                "shift",
+                "model_transform"
+              ],
+              "properties": {
+                "instance_key": {
+                  "type": "string"
+                },
+                "shift": {
+                  "$ref": "#/$defs/xy"
+                },
+                "model_transform": {
+                  "$ref": "#/$defs/matrix"
+                }
+              }
+            }
+          },
+          "layers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "layer_index",
+                "slice_z_mm",
+                "print_z_mm",
+                "loops"
+              ],
+              "properties": {
+                "layer_index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "slice_z_mm": {
+                  "type": "number"
+                },
+                "print_z_mm": {
+                  "type": "number"
+                },
+                "loops": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/loop"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "playbook": {
+      "$ref": "#/$defs/playbook"
+    },
+    "plate_origin_mm": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "number"
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "xy": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "xyz": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "matrix": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "array",
+        "minItems": 4,
+        "maxItems": 4,
+        "items": {
+          "type": "number"
+        }
+      }
+    },
+    "loop": {
+      "type": "object",
+      "required": [
+        "source_loop_id",
+        "kind",
+        "loop_role",
+        "inset_idx",
+        "paths",
+        "overhang_ranges",
+        "markup_samples",
+        "precise_seam",
+        "standard_candidates",
+        "occurrences"
+      ],
+      "properties": {
+        "source_loop_id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "contour",
+            "hole"
+          ]
+        },
+        "loop_role": {
+          "type": "integer"
+        },
+        "inset_idx": {
+          "type": "integer"
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "role",
+              "z_contoured",
+              "points"
+            ],
+            "properties": {
+              "role": {
+                "type": "integer"
+              },
+              "z_contoured": {
+                "type": "boolean"
+              },
+              "points": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/xyz"
+                }
+              }
+            }
+          }
+        },
+        "overhang_ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path_idx",
+              "start_s_mm",
+              "end_s_mm"
+            ]
+          }
+        },
+        "markup_samples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "s_mm",
+              "x_mm",
+              "y_mm",
+              "type",
+              "central"
+            ],
+            "properties": {
+              "s_mm": {
+                "type": "number"
+              },
+              "x_mm": {
+                "type": "number"
+              },
+              "y_mm": {
+                "type": "number"
+              },
+              "type": {
+                "enum": [
+                  0,
+                  1,
+                  2
+                ]
+              },
+              "central": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "precise_seam": {
+          "type": "object",
+          "required": [
+            "strong",
+            "weak"
+          ],
+          "properties": {
+            "strong": {
+              "type": "object",
+              "required": [
+                "status"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "applied",
+                    "none"
+                  ]
+                },
+                "target_point": {
+                  "$ref": "#/$defs/xy"
+                }
+              }
+            },
+            "weak": {
+              "type": "object",
+              "required": [
+                "status",
+                "zones"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "evaluated",
+                    "not_evaluated_strong_applied",
+                    "none"
+                  ]
+                },
+                "zones": {
+                  "type": "array"
+                }
+              }
+            }
+          }
+        },
+        "standard_candidates": {
+          "const": "unavailable"
+        },
+        "occurrences": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "occurrence_id",
+              "instance_key",
+              "source_seam"
+            ],
+            "properties": {
+              "occurrence_id": {
+                "type": "string"
+              },
+              "instance_key": {
+                "type": "string"
+              },
+              "source_seam": {
+                "$ref": "#/$defs/xy"
+              },
+              "source_seam_matches_target": {
+                "type": "boolean"
+              },
+              "source_seam_target_distance_mm": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "playbook": {
+      "type": "object",
+      "required": [
+        "format",
+        "version",
+        "text"
+      ],
+      "properties": {
+        "format": {
+          "const": "orca-ai-seams-playbook"
+        },
+        "version": {
+          "const": 1
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$comment": "Raw paths preserve original XYZ integer coordinates and structural path/segment order. Numeric metadata and markup samples are not substitutes for raw geometry. Digest serialization is documented in docs/HLSD/ai-seam-placement.md."
+}

@@ -2821,6 +2821,8 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
 
     // BBS
     m_curr_print = print;
+    m_ai_seams.reset(); // A reusable generator must not retain a previous plate's exchange registry.
+    m_ai_seam_instance_idx = 0;
     m_skirt_group_done.clear();
     m_pending_start_gcode_position.reset();
     m_exclusion_volume_travel_avoidance.init(print->config(), print->get_plate_origin());
@@ -2829,14 +2831,14 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     CNumericLocalesSetter locales_setter;
 
     // Does the file exist? If so, we hope that it is still valid.
-    if (print->is_step_done(psGCodeExport) && boost::filesystem::exists(boost::filesystem::path(path)))
+    if (!print->ai_seam_options.enabled() && print->is_step_done(psGCodeExport) && boost::filesystem::exists(boost::filesystem::path(path)))
         return;
 
     BOOST_LOG_TRIVIAL(info) << boost::format("Will export G-code to %1% soon")%path;
 
     GCodeProcessor::s_IsBBLPrinter = print->is_BBL_printer();
     m_writer.set_is_bbl_machine(print->is_BBL_printer());
-    print->set_started(psGCodeExport);
+    if (print->ai_seam_options.export_path.empty()) print->set_started(psGCodeExport);
 
     {
         LifecycleEventContext ctx;
@@ -2907,6 +2909,8 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
 
     try {
         this->_do_export(*print, file, thumbnail_cb);
+        // Check every occurrence before the temporary G-code can be published.
+        if (m_ai_seams) m_ai_seams->finish();
         file.flush();
         if (file.is_error()) {
             file.close();
@@ -3048,6 +3052,12 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     //BBS: add some log for error output
     BOOST_LOG_TRIVIAL(debug) << boost::format("Finished processing gcode to %1% ") % path_tmp;
 
+    try {
+        if (m_ai_seams) m_ai_seams->finish(true);
+    } catch (...) {
+        boost::nowide::remove(path_tmp.c_str());
+        throw;
+    }
     std::error_code ret = rename_file(path_tmp, path);
     if (ret) {
         {
@@ -3069,7 +3079,8 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     }
 
     BOOST_LOG_TRIVIAL(info) << "Exporting G-code finished" << log_memory_info();
-    print->set_done(psGCodeExport);
+    if (m_ai_seams && m_ai_seams->applying()) print->ai_seam_status = "applied";
+    if (print->ai_seam_options.export_path.empty()) print->set_done(psGCodeExport);
 
     {
         LifecycleEventContext ctx;
@@ -4466,7 +4477,14 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 
     // Collect custom seam data from all objects.
     std::function<void(void)> throw_if_canceled_func = [&print]() { print.throw_if_canceled(); };
-    m_seam_placer.init(print, throw_if_canceled_func);
+    if (print.ai_seam_options.enabled()) {
+        m_ai_seams = std::make_unique<AISeamPlacement::Session>(print, print.ai_seam_options);
+        print.ai_seam_status = m_ai_seams->warning().empty() ?
+            (m_ai_seams->exporting() ? "exporting" : "pending") : m_ai_seams->warning();
+        if (!m_ai_seams->warning().empty())
+            print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, m_ai_seams->warning());
+    }
+    m_seam_placer.init(print, throw_if_canceled_func, m_ai_seams.get());
     // Precise Seam: init() only prepares its warning; issue it here, inside the active export step.
     if (!m_seam_placer.precise_seam_warning().empty())
         print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
@@ -6967,6 +6985,7 @@ LayerResult GCode::process_layer(
     // existing support-extruder assignment; unused (and thus output-neutral) when the subsystem is off.
     std::map<std::pair<const SupportLayer *, ExtrusionRole>, unsigned int> support_filaments;
     std::vector<std::unique_ptr<ExtrusionEntityCollection>> split_perimeter_storage;
+    if (m_ai_seams) m_ai_seams->clear_clones(); // Clone aliases have exactly this emission pass's lifetime.
     bool is_anything_overridden = const_cast<LayerTools&>(layer_tools).wiping_extrusions().is_anything_overridden();
     for (const LayerToPrint &layer_to_print : layers) {
         if (layer_to_print.support_layer != nullptr) {
@@ -7200,10 +7219,20 @@ LayerResult GCode::process_layer(
                             auto inner_perimeters = std::make_unique<ExtrusionEntityCollection>();
                             for (const ExtrusionEntity *entity : extrusions->entities) {
                                 const ExtrusionRole role = entity->role();
-                                if (role == erExternalPerimeter || role == erOverhangPerimeter)
+                                if (role == erExternalPerimeter || role == erOverhangPerimeter) {
                                     outer_perimeters->append(*entity);
-                                else if (role == erPerimeter)
+                                    if (m_ai_seams && entity->is_loop())
+                                        m_ai_seams->register_clone(
+                                            *static_cast<const ExtrusionLoop *>(outer_perimeters->entities.back()),
+                                            *static_cast<const ExtrusionLoop *>(entity));
+                                } else if (role == erPerimeter) {
                                     inner_perimeters->append(*entity);
+                                    // Classification also accepts inset-zero loops with this role.
+                                    if (m_ai_seams && entity->is_loop())
+                                        m_ai_seams->register_clone(
+                                            *static_cast<const ExtrusionLoop *>(inner_perimeters->entities.back()),
+                                            *static_cast<const ExtrusionLoop *>(entity));
+                                }
                             }
 
                             if (!outer_perimeters->entities.empty()) {
@@ -7568,6 +7597,7 @@ LayerResult GCode::process_layer(
 
             for (const InstanceVisit &visit : instance_visits) {
                 InstanceToPrint &instance_to_print = instances_to_print[visit.instance_idx];
+                m_ai_seam_instance_idx = instance_to_print.instance_id;
                 const auto& inst = instance_to_print.print_object.instances()[instance_to_print.instance_id];
                 const LayerToPrint &layer_to_print = layers[instance_to_print.layer_id];
                 if (visit.first_visit && print_wipe_extrusions == (is_anything_overridden ? 1 : 0)) {
@@ -7814,6 +7844,7 @@ LayerResult GCode::process_layer(
             gcode += this->set_extruder(extruder_id, default_sub_z);
 
             for (InstanceToPrint &instance_to_print : mixed_instances_it->second.first) {
+                m_ai_seam_instance_idx = instance_to_print.instance_id;
                 const bool use_per_volume = grp.is_gradient
                     && !grp.per_volume_gradient.empty()
                     && std::any_of(grp.per_volume_gradient.begin(), grp.per_volume_gradient.end(),
@@ -8511,7 +8542,9 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     float seam_overhang = std::numeric_limits<float>::lowest();
     if (!m_config.spiral_mode && description == "perimeter") {
         assert(m_layer != nullptr);
-        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang);
+        const auto approved = m_ai_seams ? m_ai_seams->final_position(loop_ref, m_ai_seam_instance_idx) : std::nullopt;
+        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang, approved ? &*approved : nullptr);
+        if (m_ai_seams) m_ai_seams->record(loop_ref, m_ai_seam_instance_idx, loop.first_point());
     } else
         loop.split_at(last_pos, false);
 

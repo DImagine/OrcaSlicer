@@ -26,6 +26,7 @@
 #include "GCode/WipeTower.hpp"
 #include "GCode/WipeTower2.hpp"
 #include "GCode/ThumbnailData.hpp"
+#include "GCode/AISeamPlacement.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "BeltBrim.hpp"
@@ -1084,6 +1085,19 @@ public:
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
     std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+
+    // Session-only seam exchange; deliberately outside serializable print/profile configuration.
+    AISeamPlacement::Options ai_seam_options;
+    std::string ai_seam_status;
+    void set_ai_seam_response(const std::string &path);
+    // Caller must stop background processing first; uses the current sliced geometry, not a reslice.
+    void export_ai_seams(const AISeamPlacement::Options &options);
+    void active_step_add_warning(PrintStateBase::WarningLevel level, const std::string &message,
+        PrintStateBase::SlicingNotificationType id = PrintStateBase::SlicingDefaultNotification)
+    {
+        // An isolated baseline recorder must not replace warnings belonging to the working preview.
+        if (ai_seam_options.export_path.empty()) Inherited::active_step_add_warning(level, message, id);
+    }
     //return 0 means successful
     int                 export_cached_data(const std::string& dir_path, bool with_space=false) override;
     int                 load_cached_data(const std::string& directory) override;

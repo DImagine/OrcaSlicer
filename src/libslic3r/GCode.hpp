@@ -21,6 +21,7 @@
 #include "GCode/ToolOrdering.hpp"
 #include "GCode/WipeTower.hpp"
 #include "GCode/SeamPlacer.hpp"
+#include "GCode/AISeamPlacement.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "GCode/ThumbnailData.hpp"
 #include "libslic3r/ObjectID.hpp"
@@ -683,6 +684,8 @@ protected:
     std::set<ObjectInstanceID>      m_objsWithBrim; // indicates the object instances with brim
     // Cache for custom seam enforcers/blockers for each layer.
     SeamPlacer                          m_seam_placer;
+    std::unique_ptr<AISeamPlacement::Session> m_ai_seams;
+    size_t m_ai_seam_instance_idx = 0;
 
     // One stop of the island-level tour: consecutive islands of a single instance. An instance
     // can have several visits per layer when its islands are toured non-consecutively.
