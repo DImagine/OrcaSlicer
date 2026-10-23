@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -307,8 +308,14 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
 // Rounds towards positive infinity for a positive divisor.
 int64_t ceil_div(int64_t numerator, int64_t divisor) { return numerator >= 0 ? (numerator + divisor - 1) / divisor : -(-numerator / divisor); }
 
-// Calls `visit` for every layer of the set within [1, count]. Literals are bounded by rule_number_limit
-// and the visited values by count, so the arithmetic below cannot overflow.
+// Layer numbers a set can select; a print never comes close. With literals up to rule_number_limit,
+// every value below stays within +-(max_rule_layer + 3 * rule_number_limit): a formula starts at most
+// one step k above count or below 1, a range or parity loop ends at most one step above count.
+constexpr int64_t max_rule_layer = 1000000000;
+static_assert(max_rule_layer + 3 * rule_number_limit < std::numeric_limits<int32_t>::max(),
+              "rule arithmetic must fit far inside int64_t");
+
+// Calls `visit` for every layer of the set within [1, count], count <= max_rule_layer.
 template<class Visit>
 void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<size_t> &object_layers, Visit &&visit)
 {
@@ -369,11 +376,13 @@ LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const 
     selection.layers.assign(layer_count + 1, false);
     if (rules.off)
         return selection;
+    // Bounded before the arithmetic in for_each_layer(). Layers above the bound are never selected, by any
+    // rule or by the initial set, so the selection stays uniform; no print comes close to the bound.
+    const int64_t count = int64_t(std::min<size_t>(layer_count, size_t(max_rule_layer)));
     // Without any valid set the modifier keeps its behaviour on every layer.
     // Otherwise the mode of the first valid set picks the initial set: all layers for exclusion.
     if (!rules.restricts_layers() || rules.operations.front().exclude)
-        std::fill(selection.layers.begin() + 1, selection.layers.end(), true);
-    const int64_t count = int64_t(layer_count);
+        std::fill(selection.layers.begin() + 1, selection.layers.begin() + 1 + count, true);
     for (const RuleLayerOperation &operation : rules.operations) {
         bool any = false;
         for_each_layer(operation.set, count, object_layers, [&](int64_t layer) {
@@ -407,8 +416,8 @@ EffectiveOrder effective_order(const std::vector<RuledModifier> &modifiers)
             continue;
         const ModelVolumeType type = modifier.effective_type();
         (is_precise_seam_strong(type) ? order.strong : order.weak).push_back(i);
-        if (type != modifier.actual && !modifier.rules->nowarn)
-            order.type_changed.push_back(i);
+        if (type != modifier.actual)
+            (modifier.rules->nowarn ? order.suppressed : order.type_changed).push_back(i);
     }
     // pr1, pr2, ... first, then volumes without priority, then pr-1, pr-2, ...
     const auto rank = [&modifiers](size_t i) -> std::pair<int, int> {
@@ -430,12 +439,17 @@ EffectiveOrder effective_order(const std::vector<RuledModifier> &modifiers)
             for (size_t b = a + 1; b < tree.size(); ++b)
                 if (position[tree[b]] < position[tree[a]])
                     for (size_t i : {tree[a], tree[b]})
-                        if (modifiers[i].rules->priority && !modifiers[i].rules->nowarn)
+                        if (modifiers[i].rules->priority)
                             reordered[i] = true;
     }
     for (size_t i = 0; i < modifiers.size(); ++i)
-        if (reordered[i])
-            order.reordered.push_back(i);
+        if (reordered[i]) {
+            if (!modifiers[i].rules->nowarn)
+                order.reordered.push_back(i);
+            else if (std::find(order.suppressed.begin(), order.suppressed.end(), i) == order.suppressed.end())
+                order.suppressed.push_back(i);
+        }
+    std::sort(order.suppressed.begin(), order.suppressed.end());
     return order;
 }
 

@@ -2,6 +2,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/GCode/PreciseSeamRules.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -341,4 +342,29 @@ TEST_CASE("Off volumes take no part and nowarn silences tree mismatches", "[Prec
     CHECK(order.weak == Layers{2, 0});
     CHECK(order.type_changed.empty());
     CHECK(order.reordered.empty());
+    // The silenced volume is still known, for the log.
+    CHECK(order.suppressed == Layers{2});
+}
+
+TEST_CASE("Unit conversion keeps the rules field of every volume", "[PreciseSeam][Rules]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10, 10, 10))->name = "part";
+    ModelVolume *helper = object->add_volume(make_cube(2, 2, 2));
+    helper->set_type(ModelVolumeType::PRECISE_SEAM_CENTER);
+    helper->precise_seam_rules = "off";
+    ModelVolume *dormant = object->add_volume(make_cube(2, 2, 2));
+    dormant->precise_seam_rules = "excl,1-5";
+    dormant->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    object->add_instance();
+    // Converting only the part recreates every volume of the object.
+    ModelObjectPtrs converted;
+    object->convert_units(converted, ConversionType::CONV_FROM_INCH, {0});
+    REQUIRE(converted.size() == 1);
+    REQUIRE(converted.front()->volumes.size() == 3);
+    CHECK(converted.front()->volumes[1]->precise_seam_rules == "off");
+    CHECK(converted.front()->volumes[2]->precise_seam_rules == "excl,1-5");
+    // The model owns and deletes them; ModelObject has no public destructor.
+    model.objects.insert(model.objects.end(), converted.begin(), converted.end());
 }

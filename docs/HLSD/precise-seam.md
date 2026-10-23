@@ -124,8 +124,9 @@ print and is tested on its own.
   events take numbers but have no perimeters. When printing by object, the
   numbers are the object's own events from 1, the same for all its copies,
   because the copies share one seam cache; from the second object on they
-  differ from the slider. `topK` picks the top K numbered layers of the object
-  itself. The plan is built once before `SeamPlacer::init()` and the export
+  differ from the slider. A by-object print with a wipe tower is exported by
+  layer and is numbered by layer as well: the plan always follows the export
+  branch. `topK` picks the top K numbered layers of the object itself. The plan is built once before `SeamPlacer::init()` and the export
   prints that same plan, since collecting it raises warnings and errors.
 - **Effective order.** Volumes are grouped by their effective type. Within a
   group the order is `pr1, pr2, ...`, then the volumes without priority in
@@ -164,7 +165,11 @@ print and is tested on its own.
 8. **Warnings.** After all objects are processed, `SeamPlacer::init()` prepares
    one combined warning text if any problem was found, and one single-line
    message per layer rule diagnostic; G-code export issues them, each rule
-   message as its own warning so that the export dialog lists every one.
+   message as its own warning so that the export dialog lists every one. A rule
+   message names the element's source and position, escapes control characters
+   of the user's text, and counts equal texts (equal names) instead of dropping
+   them; the log adds the volume ID. `nowarn` hides the differences from the
+   object list in the user warnings only; the log still records them.
 
 ## Modifier slices
 

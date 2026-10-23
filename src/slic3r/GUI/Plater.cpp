@@ -11851,6 +11851,7 @@ bool Plater::priv::replace_volume_with_stl(int object_idx, int volume_idx, const
     ModelVolume* new_volume = old_model_object->volumes.back();
     new_volume->set_new_unique_id();
     new_volume->config.apply(old_volume->config);
+    new_volume->precise_seam_rules = old_volume->precise_seam_rules;
     new_volume->set_type(old_volume->type());
     new_volume->set_material_id(old_volume->material_id());
     new_volume->set_transformation(old_volume->get_transformation());
@@ -12385,6 +12386,7 @@ void Plater::priv::reload_from_disk()
                 
                 new_volume->set_new_unique_id();
                 new_volume->config.apply(old_volume->config);
+                new_volume->precise_seam_rules = old_volume->precise_seam_rules;
                 new_volume->set_type(old_volume->type());
                 new_volume->set_material_id(old_volume->material_id());
 
@@ -12469,6 +12471,7 @@ void Plater::priv::reload_from_disk()
                 ModelVolume* new_volume = old_model_object->volumes.back();
                 new_volume->set_new_unique_id();
                 new_volume->config.apply(old_volume->config);
+                new_volume->precise_seam_rules = old_volume->precise_seam_rules;
                 new_volume->set_type(old_volume->type());
                 new_volume->set_material_id(old_volume->material_id());
                 new_volume->set_transformation(old_volume->get_transformation());

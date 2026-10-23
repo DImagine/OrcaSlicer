@@ -115,6 +115,7 @@ struct EffectiveOrder {
     std::vector<size_t> weak;         // Priority order, highest first; applied in reverse.
     std::vector<size_t> type_changed; // Effective type differs from the object list (without nowarn).
     std::vector<size_t> reordered;    // Their prN changed the order within the group (without nowarn).
+    std::vector<size_t> suppressed;   // nowarn volumes that would be in one of the two lists above.
 };
 
 // Groups the volumes by effective type, then orders each group pr1, pr2, ..., without priority,

@@ -6311,6 +6311,7 @@ void ObjectList::edit_precise_seam_rules()
                                       "mode: incl (default), excl\n"
                                       "type: center, left, right, green, red, gray\n"
                                       "priority: pr1 (highest), pr-1 (lowest); off; nowarn\n"
+                                      "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
                                       "The name may hold more rules between -^ps= and =ps^-."),
                              _L("Precise Seam Layer Rules"), from_u8(volume->precise_seam_rules));
     if (dialog.ShowModal() != wxID_OK)

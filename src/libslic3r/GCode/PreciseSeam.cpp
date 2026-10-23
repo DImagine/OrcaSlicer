@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <boost/log/trivial.hpp>
+#include <limits>
 #include <optional>
 #include <cstddef>
 #include <string>
@@ -562,35 +563,48 @@ void init_precise_seam_data(
         ruled.push_back({volumes[i]->type(), &rules[i]});
     const EffectiveOrder order = effective_order(ruled);
 
+    // Diagnostics of one volume in source order (the name as a whole, its blocks, then the field) and
+    // element order; parsing and empty-set diagnostics of one element keep their order.
+    const auto source_rank = [](const RuleDiagnostic &d) {
+        return std::pair<size_t, size_t>(d.source.field ? std::numeric_limits<size_t>::max() : d.source.name_block, d.element);
+    };
+    const auto contains = [](const std::vector<size_t> &list, size_t i) { return std::find(list.begin(), list.end(), i) != list.end(); };
+
     // Layers of each volume, with its diagnostics in volume order. An empty row means every layer;
     // nullopt leaves the volume out: switched off, or its rules exclude every layer of this object.
     const std::vector<size_t> numbered = numbering.numbered_layers();
     std::vector<std::optional<std::vector<bool>>> layers(volumes.size());
     for (size_t i = 0; i < volumes.size(); ++i) {
-        for (const RuleDiagnostic &diagnostic : rules[i].diagnostics)
-            diagnostics_out.push_back({volumes[i], diagnostic});
-        if (rules[i].off)
-            continue;
-        if (!rules[i].restricts_layers()) {
+        std::vector<RuleDiagnostic> own = rules[i].diagnostics;
+        if (!rules[i].off && !rules[i].restricts_layers())
             layers[i].emplace();
-            continue;
+        else if (!rules[i].off) {
+            const LayerSelection selection = select_layers(rules[i], numbering.count, numbered);
+            own.insert(own.end(), selection.diagnostics.begin(), selection.diagnostics.end());
+            std::vector<bool> row(numbering.object_layers.size(), false);
+            bool              any = false;
+            for (size_t layer = 0; layer < row.size(); ++layer) {
+                row[layer] = selection.contains(numbering.object_layers[layer]);
+                any        = any || row[layer];
+            }
+            if (any)
+                layers[i] = std::move(row);
         }
-        const LayerSelection selection = select_layers(rules[i], numbering.count, numbered);
-        for (const RuleDiagnostic &diagnostic : selection.diagnostics)
+        std::stable_sort(own.begin(), own.end(),
+                         [&source_rank](const RuleDiagnostic &a, const RuleDiagnostic &b) { return source_rank(a) < source_rank(b); });
+        // Differences from the object list concern the volume as a whole and follow its own diagnostics.
+        if (contains(order.type_changed, i))
+            own.push_back({RuleDiagnosticCode::TypeDiffersFromTree, {}, 0, {}});
+        if (contains(order.reordered, i))
+            own.push_back({RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}});
+        for (const RuleDiagnostic &diagnostic : own)
             diagnostics_out.push_back({volumes[i], diagnostic});
-        std::vector<bool> row(numbering.object_layers.size(), false);
-        bool              any = false;
-        for (size_t layer = 0; layer < row.size(); ++layer) {
-            row[layer] = selection.contains(numbering.object_layers[layer]);
-            any        = any || row[layer];
-        }
-        if (any)
-            layers[i] = std::move(row);
+        // nowarn hides the differences from the user, not from the log.
+        if (contains(order.suppressed, i))
+            // IDs only: names may hold line breaks, and the rule warnings of SeamPlacer name them escaped.
+            BOOST_LOG_TRIVIAL(info) << "[PreciseSeamRules] nowarn: object_id=" << model_object->id().id
+                                    << " volume_id=" << volumes[i]->id().id << " type or order differs from the object list";
     }
-    for (size_t i : order.type_changed)
-        diagnostics_out.push_back({volumes[i], {RuleDiagnosticCode::TypeDiffersFromTree, {}, 0, {}}});
-    for (size_t i : order.reordered)
-        diagnostics_out.push_back({volumes[i], {RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}}});
 
     const auto collect = [&](const std::vector<size_t> &group, std::vector<const ModelVolume*> &out) {
         for (size_t i : group)

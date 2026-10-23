@@ -1632,3 +1632,86 @@ TEST_CASE("Each layer rule problem is a separate export warning", "[PreciseSeam]
     for (const std::string &warning : rule_warnings)
         CHECK(warning.find('\n') == std::string::npos);
 }
+
+namespace {
+// Rule warnings of the last export, in issue order.
+std::vector<std::string> rule_warnings(const ExportFixture &fixture)
+{
+    std::vector<std::string> out;
+    for (const auto &warning : fixture.print.step_state_with_warnings(psGCodeExport).warnings)
+        // The combined Precise Seam warning has its own id; rule warnings use the default one.
+        if (warning.message_id == 0 && warning.message.find("Precise Seam: modifier") != std::string::npos)
+            out.push_back(warning.message);
+    return out;
+}
+} // namespace
+
+// Hidden: the base export crashes in this configuration as well (SIGSEGV at 501139e527, without Precise
+// Seam), so the test cannot run until that is fixed. It guards the plan choice of the layer rules.
+TEST_CASE("A by-object print exported by layer for its wipe tower keeps its layers and rules", "[PreciseSeam][Rules][Regression][.]")
+{
+    // One object printed by object with a smooth timelapse gets a wipe tower, and the export then
+    // runs by layer: the layer plan and its numbers must follow that branch.
+    ExportFixture fixture("back");
+    fixture.config.set_deserialize_strict("print_sequence", "by object");
+    fixture.config.set_deserialize_strict("enable_prime_tower", "1");
+    fixture.config.set_deserialize_strict("timelapse_type", "1");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=1-3=ps^-");
+    const std::string gcode = fixture.export_gcode();
+    // The tower is printed, so the export took the by-layer branch.
+    REQUIRE(gcode.find("TYPE:Prime tower") != std::string::npos);
+    const auto loops = outer_wall_loops(gcode);
+    REQUIRE(loops.size() == 10);
+    for (size_t i = 0; i < loops.size(); ++i) {
+        CAPTURE(i);
+        CHECK(seam_on_front_helper(loops[i]) == (i < 3));
+    }
+}
+
+TEST_CASE("Rule warnings stay distinct per source and count equal texts", "[PreciseSeam][Rules]")
+{
+    ExportFixture fixture("back");
+    // Two modifiers with the same name and the same bad field give one message with its count.
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(2, 6, 4), Vec3d(4, -3, -1), "helper");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "bad";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(2, 6, 4), Vec3d(14, -3, -1), "helper");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "bad";
+    // One modifier with the same bad rule in its name and its field gives two messages.
+    fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, make_cube(2, 6, 4), Vec3d(9, -3, -1), "twice -^ps=bad=ps^-");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "bad";
+    fixture.export_gcode();
+    const std::vector<std::string> warnings = rule_warnings(fixture);
+    REQUIRE(warnings.size() == 3);
+    CHECK(warnings[0].find("\"helper\"") != std::string::npos);
+    CHECK(warnings[0].find("(2 in total)") != std::string::npos);
+    CHECK(warnings[1].find("name block 1, element 1") != std::string::npos);
+    CHECK(warnings[2].find("rules field, element 1") != std::string::npos);
+}
+
+TEST_CASE("Rule warnings keep one line when the rule text holds a line break", "[PreciseSeam][Rules]")
+{
+    // "50<LF>0" is the valid set 500, beyond the ten layers; the message must keep its reason.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "50\n0";
+    fixture.export_gcode();
+    const std::vector<std::string> warnings = rule_warnings(fixture);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings.front().find('\n') == std::string::npos);
+    CHECK(warnings.front().find('\r') == std::string::npos);
+    CHECK(warnings.front().find("50\\n0") != std::string::npos);
+    CHECK(warnings.front().find("selects no existing layer") != std::string::npos);
+}
+
+TEST_CASE("Rule warnings of one modifier follow the element order", "[PreciseSeam][Rules]")
+{
+    // The empty set of element 1 is found after parsing, yet it is reported before element 2.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "500,bad";
+    fixture.export_gcode();
+    const std::vector<std::string> warnings = rule_warnings(fixture);
+    REQUIRE(warnings.size() == 2);
+    CHECK(warnings[0].find("\"500\"") != std::string::npos);
+    CHECK(warnings[1].find("\"bad\"") != std::string::npos);
+}
