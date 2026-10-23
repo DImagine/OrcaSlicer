@@ -8351,7 +8351,7 @@ bool _BBS_3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive& archiv
                                     ModelVolume::type_to_string(volume->type()) << "\"/>\n";
                             if (!volume->precise_seam_rules.empty())
                                 stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRECISE_SEAM_RULES_KEY << "\" " << VALUE_ATTR << "=\"" <<
-                                    xml_escape(volume->precise_seam_rules) << "\"/>\n";
+                                    xml_escape_double_quotes_attribute_value(volume->precise_seam_rules) << "\"/>\n";
                             //stream << "    <" << PART_TAG << " " << ID_ATTR << "=\"" << it->second << "\" " << SUBTYPE_ATTR << "=\"" << ModelVolume::type_to_string(volume->type()) << "\">\n";
 
                             // stores volume's name

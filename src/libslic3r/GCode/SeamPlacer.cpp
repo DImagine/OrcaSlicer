@@ -2142,7 +2142,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       if (numbering != nullptr)
           if (const auto it = numbering->find(po); it != numbering->end())
               object_numbering = &it->second;
-      if (object_numbering == nullptr) {
+      if (object_numbering == nullptr && PreciseSeam::has_precise_seam_volumes(*po->model_object())) {
           own_layers.count = po->layers().size();
           for (size_t i = 0; i < own_layers.count; ++i)
               own_layers.object_layers.push_back(i + 1);
@@ -2345,6 +2345,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
   // User text is escaped: a line break would hide the rest of the message in the export dialog.
   const auto single_line = [](const std::string &text) {
       std::string out;
+      out.reserve(text.size());
       for (const char c : text) {
           if (c == '\n')
               out += "\\n";

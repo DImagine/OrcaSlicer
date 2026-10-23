@@ -390,8 +390,9 @@ TEST_CASE("The layer rules field survives a 3MF round trip, also on a converted 
     Scene source;
     source.populate(true);
     auto &volumes = source.model.objects.front()->volumes;
-    // Markup characters check the attribute escaping; the text itself need not be valid rules.
-    const std::string rules = "excl, 1-5, \"odd\" & <red>";
+    // Markup characters and TAB, CR, LF, CRLF check the attribute escaping: an XML parser turns literal
+    // whitespace in an attribute into spaces. The text itself need not be valid rules.
+    const std::string rules = "excl,\t1-5,\rodd,\n2,\r\n3, \"odd\" & <red>";
     volumes[1]->precise_seam_rules = rules;
     // A volume converted to an ordinary modifier keeps its rules for a later return to Precise Seam.
     volumes[2]->precise_seam_rules = "pr1";

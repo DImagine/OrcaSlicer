@@ -3214,7 +3214,7 @@ ModelVolumeType type_from_string(const std::string &s)
                                     VALUE_ATTR << "=\"" << ModelVolume::type_to_string(volume->type()) << "\"/>\n";
                             if (!volume->precise_seam_rules.empty())
                                 stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << PRECISE_SEAM_RULES_KEY << "\" " <<
-                                    VALUE_ATTR << "=\"" << xml_escape(volume->precise_seam_rules) << "\"/>\n";
+                                    VALUE_ATTR << "=\"" << xml_escape_double_quotes_attribute_value(volume->precise_seam_rules) << "\"/>\n";
 
                             // stores volume's local matrix
                             stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << MATRIX_KEY << "\" " << VALUE_ATTR << "=\"";

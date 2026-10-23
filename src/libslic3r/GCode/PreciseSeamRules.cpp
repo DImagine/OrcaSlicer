@@ -1,6 +1,7 @@
 #include "PreciseSeamRules.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -308,14 +309,9 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
 // Rounds towards positive infinity for a positive divisor.
 int64_t ceil_div(int64_t numerator, int64_t divisor) { return numerator >= 0 ? (numerator + divisor - 1) / divisor : -(-numerator / divisor); }
 
-// Layer numbers a set can select; a print never comes close. With literals up to rule_number_limit,
-// every value below stays within +-(max_rule_layer + 3 * rule_number_limit): a formula starts at most
-// one step k above count or below 1, a range or parity loop ends at most one step above count.
-constexpr int64_t max_rule_layer = 1000000000;
-static_assert(max_rule_layer + 3 * rule_number_limit < std::numeric_limits<int32_t>::max(),
-              "rule arithmetic must fit far inside int64_t");
-
-// Calls `visit` for every layer of the set within [1, count], count <= max_rule_layer.
+// Calls `visit` for every layer of the set within [1, count]. With literals up to rule_number_limit, every
+// value below stays within +-(count + 3 * rule_number_limit): a formula starts at most one step k above
+// count or below 1, a range or parity loop ends at most one step above count.
 template<class Visit>
 void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<size_t> &object_layers, Visit &&visit)
 {
@@ -376,9 +372,11 @@ LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const 
     selection.layers.assign(layer_count + 1, false);
     if (rules.off)
         return selection;
-    // Bounded before the arithmetic in for_each_layer(). Layers above the bound are never selected, by any
-    // rule or by the initial set, so the selection stays uniform; no print comes close to the bound.
-    const int64_t count = int64_t(std::min<size_t>(layer_count, size_t(max_rule_layer)));
+    // No run-time overflow check, by design: a check is kept only for a case that can happen. layer_count is
+    // the size of the vector just allocated, so the arithmetic of for_each_layer() stays far inside int64_t;
+    // the assert states this invariant in debug builds.
+    assert(layer_count <= size_t(std::numeric_limits<int64_t>::max() - 3 * rule_number_limit));
+    const int64_t count = int64_t(layer_count);
     // Without any valid set the modifier keeps its behaviour on every layer.
     // Otherwise the mode of the first valid set picks the initial set: all layers for exclusion.
     if (!rules.restricts_layers() || rules.operations.front().exclude)
@@ -398,6 +396,7 @@ LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const 
 std::vector<size_t> LayerNumbering::numbered_layers() const
 {
     std::vector<size_t> out;
+    out.reserve(object_layers.size());
     for (size_t number : object_layers)
         if (number != 0)
             out.push_back(number);
@@ -428,6 +427,9 @@ EffectiveOrder effective_order(const std::vector<RuledModifier> &modifiers)
     };
     std::vector<bool> reordered(modifiers.size(), false);
     for (std::vector<size_t> *group : {&order.strong, &order.weak}) {
+        // Without priorities the tree order stands and nothing is reordered.
+        if (std::none_of(group->begin(), group->end(), [&modifiers](size_t i) { return modifiers[i].rules->priority.has_value(); }))
+            continue;
         // The group is collected in input order, so a stable sort breaks ties by the input index.
         const std::vector<size_t> tree = *group;
         std::stable_sort(group->begin(), group->end(), [&rank](size_t a, size_t b) { return rank(a) < rank(b); });

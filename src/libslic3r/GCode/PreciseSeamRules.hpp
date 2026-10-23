@@ -1,6 +1,7 @@
 #ifndef slic3r_PreciseSeamRules_hpp_
 #define slic3r_PreciseSeamRules_hpp_
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -99,6 +100,12 @@ struct LayerNumbering {
     // Numbered layers of the object in ascending order, as select_layers() takes them.
     std::vector<size_t> numbered_layers() const;
 };
+
+// Layer numbering is built only for objects with Precise Seam volumes; other objects export as before.
+inline bool has_precise_seam_volumes(const ModelObject &object)
+{
+    return std::any_of(object.volumes.begin(), object.volumes.end(), [](const ModelVolume *volume) { return volume->is_precise_seam(); });
+}
 
 // One Precise Seam volume of an object, in ModelObject::volumes order.
 struct RuledModifier {

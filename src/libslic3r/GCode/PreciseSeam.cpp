@@ -21,6 +21,7 @@
 #include <string>
 #include <cassert>
 #include <cmath>
+#include <iterator>
 #include <tbb/parallel_for.h>
 #include <vector>
 #include <utility>
@@ -558,6 +559,8 @@ void init_precise_seam_data(
             volumes.push_back(volume);
             rules.push_back(parse_layer_rules(volume->name, volume->precise_seam_rules));
         }
+    if (volumes.empty())
+        return;
     std::vector<RuledModifier> ruled;
     for (size_t i = 0; i < volumes.size(); ++i)
         ruled.push_back({volumes[i]->type(), &rules[i]});
@@ -575,12 +578,13 @@ void init_precise_seam_data(
     const std::vector<size_t> numbered = numbering.numbered_layers();
     std::vector<std::optional<std::vector<bool>>> layers(volumes.size());
     for (size_t i = 0; i < volumes.size(); ++i) {
-        std::vector<RuleDiagnostic> own = rules[i].diagnostics;
+        // Nothing reads the diagnostics of the rules after this point.
+        std::vector<RuleDiagnostic> own = std::move(rules[i].diagnostics);
         if (!rules[i].off && !rules[i].restricts_layers())
             layers[i].emplace();
         else if (!rules[i].off) {
-            const LayerSelection selection = select_layers(rules[i], numbering.count, numbered);
-            own.insert(own.end(), selection.diagnostics.begin(), selection.diagnostics.end());
+            LayerSelection selection = select_layers(rules[i], numbering.count, numbered);
+            own.insert(own.end(), std::make_move_iterator(selection.diagnostics.begin()), std::make_move_iterator(selection.diagnostics.end()));
             std::vector<bool> row(numbering.object_layers.size(), false);
             bool              any = false;
             for (size_t layer = 0; layer < row.size(); ++layer) {
@@ -597,8 +601,8 @@ void init_precise_seam_data(
             own.push_back({RuleDiagnosticCode::TypeDiffersFromTree, {}, 0, {}});
         if (contains(order.reordered, i))
             own.push_back({RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}});
-        for (const RuleDiagnostic &diagnostic : own)
-            diagnostics_out.push_back({volumes[i], diagnostic});
+        for (RuleDiagnostic &diagnostic : own)
+            diagnostics_out.push_back({volumes[i], std::move(diagnostic)});
         // nowarn hides the differences from the user, not from the log.
         if (contains(order.suppressed, i))
             // IDs only: names may hold line breaks, and the rule warnings of SeamPlacer name them escaped.
@@ -729,20 +733,14 @@ static void refine_at_vertex(
     }
 }
 
-// Without rules (e.g. in tests) every modifier keeps its own type on every layer.
-static ModelVolumeType effective_type(const EffectiveModifiers *effective, const ModelVolume *modifier)
+// The type to apply on this layer, or nullopt where the rules exclude the layer. Without rules
+// (e.g. in tests) every modifier keeps its own type on every layer.
+static std::optional<ModelVolumeType> active_type(const EffectiveModifiers *effective, const ModelVolume *modifier, size_t layer_id)
 {
     if (effective != nullptr)
         if (const auto it = effective->find(modifier); it != effective->end())
-            return it->second.type;
+            return it->second.active_on(layer_id) ? std::optional(it->second.type) : std::nullopt;
     return modifier->type();
-}
-static bool active_on_layer(const EffectiveModifiers *effective, const ModelVolume *modifier, size_t layer_id)
-{
-    if (effective != nullptr)
-        if (const auto it = effective->find(modifier); it != effective->end())
-            return it->second.active_on(layer_id);
-    return true;
 }
 
 // Records one extraction for the warnings: the type of a modifier with a discarded fragment, the
@@ -778,11 +776,14 @@ std::optional<Point> insert_strong_seam_point(
         return std::nullopt;
     const size_t layer_id = layer->id() - layer->object()->slicing_parameters().raft_layers();
     for (const ModelVolume *modifier : strong_volumes) {
-        const auto it = slices_cache.find(modifier);
         // Layer rules filter before any usage is recorded: an excluded layer is not "no effect".
-        if (it == slices_cache.end() || layer_id >= it->second.size() || !active_on_layer(effective, modifier, layer_id))
+        const std::optional<ModelVolumeType> active = active_type(effective, modifier, layer_id);
+        if (!active)
             continue;
-        const ModelVolumeType type = effective_type(effective, modifier);
+        const auto it = slices_cache.find(modifier);
+        if (it == slices_cache.end() || layer_id >= it->second.size())
+            continue;
+        const ModelVolumeType type = *active;
         const SegmentExtraction extracted = extract_perimeter_segments(
             prepared, it->second[layer_id], type, {layer, modifier, warnings});
         record_extraction(warnings, modifier, type, extracted);
@@ -1019,10 +1020,13 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
     const size_t layer_id = layer->id() - raft_layers;
     for (const ModelVolume *modifier_volume : weak_volumes) {
-        const auto it = slices_cache.find(modifier_volume);
-        if (it == slices_cache.end() || layer_id >= it->second.size() || !active_on_layer(effective, modifier_volume, layer_id))
+        const std::optional<ModelVolumeType> active = active_type(effective, modifier_volume, layer_id);
+        if (!active)
             continue;
-        const ModelVolumeType volume_type = effective_type(effective, modifier_volume);
+        const auto it = slices_cache.find(modifier_volume);
+        if (it == slices_cache.end() || layer_id >= it->second.size())
+            continue;
+        const ModelVolumeType volume_type = *active;
         const ExtractionContext context{layer, modifier_volume, warnings};
         const SegmentExtraction extracted = extract_perimeter_segments(prepared, it->second[layer_id], volume_type, context);
         record_extraction(warnings, modifier_volume, volume_type, extracted);

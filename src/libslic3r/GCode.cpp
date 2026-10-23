@@ -4530,15 +4530,18 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>> layers_to_print_by_layer;
     std::unordered_map<const PrintObject*, std::vector<LayerToPrint>> layers_to_print_by_object;
     SeamPlacer::PreciseSeamNumbering precise_seam_layer_numbering;
+    const auto has_precise_seam = [](const PrintObject *object) { return PreciseSeam::has_precise_seam_volumes(*object->model_object()); };
     // The same condition as the export below: with a wipe tower, a by-object print is exported by layer.
     if (print.config().print_sequence == PrintSequence::ByObject && !has_wipe_tower) {
         for (const PrintObject *object : print.objects()) {
             const std::vector<LayerToPrint> &layers = layers_to_print_by_object[object] = collect_layers_to_print(*object, belt);
-            precise_seam_layer_numbering[object] = precise_seam_numbering(*object, layers);
+            if (has_precise_seam(object))
+                precise_seam_layer_numbering[object] = precise_seam_numbering(*object, layers);
         }
     } else {
-        layers_to_print_by_layer     = collect_layers_to_print(print);
-        precise_seam_layer_numbering = precise_seam_numbering(print, tool_ordering, layers_to_print_by_layer);
+        layers_to_print_by_layer = collect_layers_to_print(print);
+        if (std::any_of(print.objects().begin(), print.objects().end(), has_precise_seam))
+            precise_seam_layer_numbering = precise_seam_numbering(print, tool_ordering, layers_to_print_by_layer);
     }
 
     // Collect custom seam data from all objects.
