@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
+#include <limits>
 #include <map>
 #include <string>
 #include <string_view>
@@ -60,6 +62,48 @@ Json read_raw(const std::string &request_path)
     return read_json(raw.string());
 }
 
+// An export target whose -raw.json sibling is removed together with it.
+class ExportFile
+{
+public:
+    boost::filesystem::path path() const { return m_dir.path() / "export.json"; }
+    std::string string() const { return path().string(); }
+
+private:
+    ScopedTemporaryDir m_dir{"orca-seam-export"};
+};
+
+// The loop segment nearest to point, as the response "edge" pair of path points in millimeters.
+Json edge_of(const Json &loop, double unit, const Vec2d &point)
+{
+    Json best;
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (const Json &path : loop["paths"])
+        for (size_t i = 0; i + 1 < path["points"].size(); ++i) {
+            const Vec2d a(path["points"][i][0].get<double>() * unit, path["points"][i][1].get<double>() * unit);
+            const Vec2d b(path["points"][i + 1][0].get<double>() * unit, path["points"][i + 1][1].get<double>() * unit);
+            const Vec2d edge = b - a;
+            const double t = edge.squaredNorm() == 0. ? 0. : std::clamp((point - a).dot(edge) / edge.squaredNorm(), 0., 1.);
+            const double distance = (point - (a + t * edge)).norm();
+            if (distance < best_distance) {
+                best_distance = distance;
+                best = Json::array({Json::array({a.x(), a.y()}), Json::array({b.x(), b.y()})});
+            }
+        }
+    return best;
+}
+
+// Places one occurrence's seam at point, naming the loop segment it lies on.
+void set_seam(Json &response, const Json &loop, size_t occurrence, double unit, const Vec2d &point)
+{
+    for (Json &seam : response["seams"])
+        if (seam["occurrence_id"] == loop["occurrences"][occurrence]["occurrence_id"]) {
+            seam["x_mm"] = point.x();
+            seam["y_mm"] = point.y();
+            seam["edge"] = edge_of(loop, unit, point);
+        }
+}
+
 Json echoed_response(const Json &raw)
 {
     Json result = {{"format", "orca-ai-seams-response"}, {"version", 1},
@@ -69,10 +113,12 @@ Json echoed_response(const Json &raw)
     for (const Json &object : raw["objects"])
         for (const Json &layer : object["layers"])
             for (const Json &loop : layer["loops"])
-                for (const Json &occurrence : loop["occurrences"])
+                for (const Json &occurrence : loop["occurrences"]) {
+                    const Vec2d seam(occurrence["source_seam"][0].get<double>() * unit,
+                                     occurrence["source_seam"][1].get<double>() * unit);
                     result["seams"].push_back({{"occurrence_id", occurrence["occurrence_id"]},
-                        {"x_mm", occurrence["source_seam"][0].get<double>() * unit},
-                        {"y_mm", occurrence["source_seam"][1].get<double>() * unit}});
+                        {"x_mm", seam.x()}, {"y_mm", seam.y()}, {"edge", edge_of(loop, unit, seam)}});
+                }
     return result;
 }
 
@@ -92,7 +138,7 @@ TEST_CASE("An isolated export preserves the connected response and working Gcode
     Model model;
     slice_cube(print, model);
     const bool done_before = print.is_step_done(psGCodeExport);
-    ScopedTemporaryFile exported(".json");
+    ExportFile exported;
     Options options;
     options.export_path = exported.string();
     print.export_ai_seams(options);
@@ -119,7 +165,8 @@ TEST_CASE("The AI request uses rounded millimeters and its points are accepted",
     Print print;
     Model model;
     slice_cube(print, model);
-    ScopedTemporaryFile exported(".json"), response_file(".json");
+    ExportFile exported;
+    ScopedTemporaryFile response_file(".json");
     Options options;
     options.export_path = exported.string();
     print.export_ai_seams(options);
@@ -139,9 +186,11 @@ TEST_CASE("The AI request uses rounded millimeters and its points are accepted",
         {"export_digest", request["export_digest"]}, {"plate", request["plate"]}, {"seams", Json::array()}};
     for (const Json &layer : request["objects"][0]["layers"])
         for (const Json &loop : layer["loops"])
-            for (const Json &occurrence : loop["occurrences"])
+            for (const Json &occurrence : loop["occurrences"]) {
+                const Vec2d seam(occurrence["source_seam"][0].get<double>(), occurrence["source_seam"][1].get<double>());
                 response["seams"].push_back({{"occurrence_id", occurrence["occurrence_id"]},
-                    {"x_mm", occurrence["source_seam"][0]}, {"y_mm", occurrence["source_seam"][1]}});
+                    {"x_mm", seam.x()}, {"y_mm", seam.y()}, {"edge", edge_of(loop, 1., seam)}});
+            }
     REQUIRE_FALSE(bool(write_file_atomically(response_file.string(), response.dump())));
     print.set_ai_seam_response(response_file.string());
     REQUIRE_NOTHROW(Test::gcode(print));
@@ -248,7 +297,8 @@ TEST_CASE("Matching geometry requires a complete near-boundary response", "[AISe
     Print print;
     Model model;
     slice_cube(print, model);
-    ScopedTemporaryFile exported(".json"), response_file(".json");
+    ExportFile exported;
+    ScopedTemporaryFile response_file(".json");
     Options options;
     options.export_path = exported.string();
     print.export_ai_seams(options);
@@ -274,7 +324,8 @@ TEST_CASE("Layout coordinates in a response are named in the rejection", "[AISea
     // Two arranged copies: at least one instance has a nonzero shift.
     Test::init_print(std::vector<TriangleMesh>{Test::cube(2.)}, print, model, config, nullptr, true, 2);
     print.process();
-    ScopedTemporaryFile exported(".json"), response_file(".json");
+    ExportFile exported;
+    ScopedTemporaryFile response_file(".json");
     Options options;
     options.export_path = exported.string();
     print.export_ai_seams(options);
@@ -295,11 +346,105 @@ TEST_CASE("Layout coordinates in a response are named in the rejection", "[AISea
         const Vec2d &shift = shifts.at(instance_of.at(seam["occurrence_id"]));
         seam["x_mm"] = seam["x_mm"].get<double>() + shift.x();
         seam["y_mm"] = seam["y_mm"].get<double>() + shift.y();
+        for (Json &end : seam["edge"])
+            end = Json::array({end[0].get<double>() + shift.x(), end[1].get<double>() + shift.y()});
     }
     REQUIRE_FALSE(bool(write_file_atomically(response_file.string(), response.dump())));
     REQUIRE_THROWS_WITH(print.set_ai_seam_response(response_file.string()),
         Catch::Matchers::ContainsSubstring("layout coordinates"));
     REQUIRE(print.ai_seam_options.response_path.empty());
+}
+
+TEST_CASE("The exact raw log never overwrites the connected response", "[AISeamPlacement]")
+{
+    Print print;
+    Model model;
+    slice_cube(print, model);
+    ExportFile exported, request;
+    Options options;
+    options.export_path = exported.string();
+    print.export_ai_seams(options);
+    // The connected answer sits exactly where the next export's -raw.json would be published.
+    const std::string response_path = raw_export_path(request.string());
+    const std::string bytes = echoed_response(read_raw(exported.string())).dump();
+    REQUIRE_FALSE(bool(write_file_atomically(response_path, bytes)));
+    print.set_ai_seam_response(response_path);
+    options.export_path = request.string();
+    REQUIRE_THROWS_WITH(print.export_ai_seams(options), Catch::Matchers::ContainsSubstring("connected response"));
+    REQUIRE_FALSE(boost::filesystem::exists(request.path()));
+    REQUIRE(print.ai_seam_options.response_path == response_path);
+    boost::nowide::ifstream input(response_path, std::ios::binary);
+    REQUIRE(std::string(std::istreambuf_iterator<char>(input), {}) == bytes);
+}
+
+TEST_CASE("A response point is accepted within 0.05 mm of its exact loop", "[AISeamPlacement]")
+{
+    const double offset = GENERATE(0.04, 0.06);
+    Print print;
+    Model model;
+    slice_cube(print, model);
+    ExportFile exported;
+    ScopedTemporaryFile response_file(".json");
+    Options options;
+    options.export_path = exported.string();
+    print.export_ai_seams(options);
+    const Json raw = read_raw(exported.string());
+    Json response = echoed_response(raw);
+    // Move one seam perpendicular to the middle of a cube wall; other walls stay far away.
+    const double unit = raw["coord_unit_mm"];
+    const Json &loop = raw["objects"][0]["layers"][0]["loops"][0];
+    const Json &points = loop["paths"][0]["points"];
+    const Vec2d a(points[0][0].get<double>() * unit, points[0][1].get<double>() * unit);
+    const Vec2d b(points[1][0].get<double>() * unit, points[1][1].get<double>() * unit);
+    REQUIRE((b - a).norm() > 0.5);
+    const Vec2d edge = (b - a).normalized();
+    const Vec2d moved = (a + b) * 0.5 + Vec2d(-edge.y(), edge.x()) * offset;
+    set_seam(response, loop, 0, unit, moved);
+    REQUIRE_FALSE(bool(write_file_atomically(response_file.string(), response.dump())));
+    if (offset < 0.05)
+        REQUIRE_NOTHROW(print.set_ai_seam_response(response_file.string()));
+    else
+        REQUIRE_THROWS_WITH(print.set_ai_seam_response(response_file.string()), Catch::Matchers::ContainsSubstring("too far"));
+}
+
+TEST_CASE("The response edge selects its segment and falls back visibly", "[AISeamPlacement]")
+{
+    Print print;
+    Model model;
+    slice_cube(print, model);
+    ExportFile exported;
+    ScopedTemporaryFile response_file(".json");
+    Options options;
+    options.export_path = exported.string();
+    print.export_ai_seams(options);
+    const Json raw = read_raw(exported.string());
+    const double unit = raw["coord_unit_mm"];
+    const Json &loop = raw["objects"][0]["layers"][0]["loops"][0];
+    const Json &points = loop["paths"][0]["points"];
+    REQUIRE(points.size() >= 4);
+    const auto at = [&](size_t i) { return Json::array({points[i][0].get<double>() * unit, points[i][1].get<double>() * unit}); };
+    const Vec2d middle((points[0][0].get<double>() + points[1][0].get<double>()) * 0.5 * unit,
+                       (points[0][1].get<double>() + points[1][1].get<double>()) * 0.5 * unit);
+    // Writes a response whose first seam sits mid-wall with the given edge; returns its fallback count.
+    const auto fallbacks = [&](const Json &edge, bool strict = false) {
+        Json response = echoed_response(raw);
+        set_seam(response, loop, 0, unit, middle);
+        for (Json &seam : response["seams"])
+            if (seam["occurrence_id"] == loop["occurrences"][0]["occurrence_id"]) seam["edge"] = edge;
+        REQUIRE_FALSE(bool(write_file_atomically(response_file.string(), response.dump())));
+        Options applying;
+        applying.response_path = response_file.string();
+        applying.strict = strict;
+        return Session(print, applying).edge_fallbacks().size();
+    };
+    REQUIRE(fallbacks(Json::array({at(0), at(1)})) == 0);
+    REQUIRE(fallbacks(Json::array({at(1), at(0)})) == 0); // Swapped ends of the same segment.
+    // Another wall's edge or an unknown end: the point is on its loop, so it is placed and reported.
+    REQUIRE(fallbacks(Json::array({at(2), at(3)})) == 1);
+    REQUIRE(fallbacks(Json::array({Json::array({100., 100.}), at(1)})) == 1);
+    REQUIRE_THROWS_WITH(fallbacks(Json::array({at(2), at(3)}), true), Catch::Matchers::ContainsSubstring("too far from its edge"));
+    REQUIRE_THROWS_WITH(fallbacks(Json::array({Json::array({100., 100.}), at(1)}), true),
+        Catch::Matchers::ContainsSubstring("edge is not a segment"));
 }
 
 TEST_CASE("Geometry mismatch falls back for the whole plate and strict mode rejects it", "[AISeamPlacement]")
@@ -331,7 +476,8 @@ TEST_CASE("Copies of one source loop can receive different finalized seams", "[A
     config.set_deserialize_strict("wall_loops", "2");
     Test::init_print(std::vector<TriangleMesh>{Test::cube(2.)}, print, model, config, nullptr, true, 2);
     print.process();
-    ScopedTemporaryFile exported(".json"), response_file(".json");
+    ExportFile exported;
+    ScopedTemporaryFile response_file(".json");
     Options options;
     options.export_path = exported.string();
     print.export_ai_seams(options);
@@ -342,11 +488,7 @@ TEST_CASE("Copies of one source loop can receive different finalized seams", "[A
     const double unit = output["coord_unit_mm"];
     for (size_t i = 0; i < 2; ++i) {
         const Json &point = loop["paths"][0]["points"][i];
-        for (Json &seam : response["seams"])
-            if (seam["occurrence_id"] == loop["occurrences"][i]["occurrence_id"]) {
-                seam["x_mm"] = point[0].get<double>() * unit;
-                seam["y_mm"] = point[1].get<double>() * unit;
-            }
+        set_seam(response, loop, i, unit, Vec2d(point[0].get<double>() * unit, point[1].get<double>() * unit));
     }
     REQUIRE_FALSE(bool(write_file_atomically(response_file.string(), response.dump())));
     print.set_ai_seam_response(response_file.string());
@@ -366,7 +508,8 @@ TEST_CASE("Different wall filaments preserve source-loop identity through clones
         {"outer_wall_filament_id", "1"}, {"inner_wall_filament_id", "2"}, {"enable_prime_tower", "0"}});
     Test::init_print({Test::cube(2.)}, print, model, config);
     print.process();
-    ScopedTemporaryFile exported(".json"), response_file(".json");
+    ExportFile exported;
+    ScopedTemporaryFile response_file(".json");
     Options options;
     options.export_path = exported.string();
     REQUIRE_NOTHROW(print.export_ai_seams(options));
@@ -394,7 +537,8 @@ TEST_CASE("Playbook decisions survive new layer geometry without reusing old ass
     Print first, second;
     Model first_model, second_model;
     slice_cube(first, first_model);
-    ScopedTemporaryFile exported(".json"), response_file(".json"), next_export(".json");
+    ExportFile exported, next_export;
+    ScopedTemporaryFile response_file(".json");
     Options options;
     options.export_path = exported.string();
     first.export_ai_seams(options);
@@ -424,7 +568,8 @@ TEST_CASE("A late missing occurrence publishes neither Gcode nor a new seam expo
     Print print;
     Model model;
     slice_cube(print, model);
-    ScopedTemporaryFile exported(".json"), gcode_file(".gcode");
+    ExportFile exported;
+    ScopedTemporaryFile gcode_file(".gcode");
     Options options;
     options.export_path = exported.string();
     Session registry(print, options);
@@ -446,7 +591,7 @@ TEST_CASE("A late missing occurrence publishes neither Gcode nor a new seam expo
     REQUIRE_FALSE(boost::filesystem::exists(gcode_file.path()));
     REQUIRE_FALSE(boost::filesystem::exists(gcode_file.string() + ".tmp"));
     REQUIRE_FALSE(boost::filesystem::exists(exported.path()));
-    REQUIRE_FALSE(boost::filesystem::exists(boost::filesystem::path(exported.string()).replace_extension().string() + "-raw.json"));
+    REQUIRE_FALSE(boost::filesystem::exists(raw_export_path(exported.string())));
 }
 
 TEST_CASE("Holes retain their own assignments in a complete export", "[AISeamPlacement]")
@@ -456,7 +601,8 @@ TEST_CASE("Holes retain their own assignments in a complete export", "[AISeamPla
     Test::init_print({Test::TestMesh::cube_with_hole}, print, model,
         {{"seam_position", "back"}, {"wall_loops", "2"}, {"layer_height", "0.2"}, {"initial_layer_print_height", "0.2"}});
     print.process();
-    ScopedTemporaryFile exported(".json"), response_file(".json");
+    ExportFile exported;
+    ScopedTemporaryFile response_file(".json");
     Options options;
     options.export_path = exported.string();
     print.export_ai_seams(options);
@@ -480,7 +626,8 @@ TEST_CASE("Fully overhanging external loops remain in the generation registry", 
         {{"seam_position", "back"}, {"wall_loops", "2"}, {"layer_height", "0.2"},
          {"initial_layer_print_height", "0.2"}, {"wall_generator", generator}});
     print.process();
-    ScopedTemporaryFile exported(".json"), response_file(".json");
+    ExportFile exported;
+    ScopedTemporaryFile response_file(".json");
     Options options;
     options.export_path = exported.string();
     Session before(print, options);
@@ -514,7 +661,7 @@ TEST_CASE("Strong Precise Seam targets are distinct from recorded instance seams
     modifier->name = "Front seam";
     print.apply(model, config);
     print.process();
-    ScopedTemporaryFile exported(".json");
+    ExportFile exported;
     Options options;
     options.export_path = exported.string();
     print.export_ai_seams(options);
@@ -553,7 +700,8 @@ TEST_CASE("Generated outer-wall extrusion begins at the approved segment point",
     // Use a wide, single-layer mesh so two perimeter walls and an interior split point fit.
     Test::init_print({make_cube(10., 10., 0.2)}, print, model, config);
     print.process();
-    ScopedTemporaryFile exported(".json"), response_file(".json");
+    ExportFile exported;
+    ScopedTemporaryFile response_file(".json");
     Options options;
     options.export_path = exported.string();
     print.export_ai_seams(options);
@@ -565,11 +713,7 @@ TEST_CASE("Generated outer-wall extrusion begins at the approved segment point",
     const double unit = output["coord_unit_mm"];
     const Vec2d local((points[0][0].get<double>() + points[1][0].get<double>()) * 0.5 * unit,
                      (points[0][1].get<double>() + points[1][1].get<double>()) * 0.5 * unit);
-    for (Json &seam : response["seams"])
-        if (seam["occurrence_id"] == loop["occurrences"][0]["occurrence_id"]) {
-            seam["x_mm"] = local.x();
-            seam["y_mm"] = local.y();
-        }
+    set_seam(response, loop, 0, unit, local);
     REQUIRE_FALSE(bool(write_file_atomically(response_file.string(), response.dump())));
     print.set_ai_seam_response(response_file.string());
     const std::string gcode = Test::gcode(print);

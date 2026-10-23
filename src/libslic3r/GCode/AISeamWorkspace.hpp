@@ -21,6 +21,7 @@ enum class WorkspaceState { Idle, Checking, Exported, Ignored, Applied, Geometry
 struct WorkspaceResult {
     WorkspaceState state = WorkspaceState::Idle;
     size_t seam_count = 0;
+    size_t edge_fallback_count = 0; // Seams placed at the nearest loop point without a matching edge.
     std::string error;
 };
 

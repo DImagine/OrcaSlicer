@@ -33,7 +33,7 @@ Json response()
 {
     return {{"format", "orca-ai-seams-response"}, {"version", 1}, {"export_id", "example"},
         {"export_digest", std::string(64, 'a')},
-        {"seams", {{{"occurrence_id", "loop/i0"}, {"x_mm", 0.}, {"y_mm", 0.}}}}};
+        {"seams", {{{"occurrence_id", "loop/i0"}, {"x_mm", 0.}, {"y_mm", 0.}, {"edge", {{0., 0.}, {10., 0.}}}}}}};
 }
 } // namespace
 
@@ -77,6 +77,43 @@ TEST_CASE("Projection reports distances without snapping nearby vertices", "[AIS
     REQUIRE_THROWS(project(loop, Vec2d(std::numeric_limits<double>::infinity(), 0.)));
 }
 
+TEST_CASE("A short response edge cannot open a chain around the loop", "[AISeamPlacement]")
+{
+    // Review counterexample: A and B are within the old 0.05 mm vertex radius of each other.
+    ExtrusionPath path(erExternalPerimeter, 0.08, 0.4f, 0.2f);
+    path.polyline.points = {Point3(0., 0., 0.), Point3(scale_(0.01), scale_(0.01), 0.), Point3(scale_(10.), 0., 0.),
+        Point3(scale_(10.), scale_(10.), 0.), Point3(0., scale_(10.), 0.), Point3(0., 0., 0.)};
+    const ExtrusionLoop loop(path);
+    const Vec2d a(0., 0.), b(0.01, 0.01);
+    const auto far = project_on_edge(loop, Vec2d(5., 10.), a, b);
+    REQUIRE(far.has_value());
+    REQUIRE(far->distance_mm > 1.); // Far from A-B, never moved onto D-E.
+    const auto middle = project_on_edge(loop, Vec2d(0.005, 0.005), a, b);
+    REQUIRE(middle.has_value());
+    REQUIRE(middle->distance_mm < 1e-6);
+    const auto swapped = project_on_edge(loop, Vec2d(0.005, 0.005), b, a);
+    REQUIRE(swapped.has_value());
+    REQUIRE(swapped->distance_mm < 1e-6);
+    const auto closing = project_on_edge(loop, Vec2d(0., 5.), Vec2d(0., 10.), a); // E-A closes the loop.
+    REQUIRE(closing.has_value());
+    REQUIRE(closing->distance_mm < 1e-6);
+    REQUIRE(closing->segment_idx == 4);
+    REQUIRE_FALSE(project_on_edge(loop, Vec2d(5., 10.), a, Vec2d(10., 10.)).has_value()); // A-D is not a segment.
+}
+
+TEST_CASE("A fitting swapped edge beats a matching but unfitting path-order edge", "[AISeamPlacement]")
+{
+    // Review round 3: rounded ends of the thin loop match A-B in path order and C-D swapped.
+    ExtrusionPath path(erExternalPerimeter, 0.08, 0.4f, 0.2f);
+    path.polyline.points = {Point3(0., scale_(0.004), 0.), Point3(scale_(10.), scale_(0.004), 0.),
+        Point3(scale_(10.), scale_(0.014), 0.), Point3(0., scale_(0.014), 0.), Point3(0., scale_(0.004), 0.)};
+    const ExtrusionLoop loop(path);
+    const auto projection = project_on_edge(loop, Vec2d(5., 0.06), Vec2d(0., 0.01), Vec2d(10., 0.01));
+    REQUIRE(projection.has_value());
+    REQUIRE(projection->segment_idx == 2); // C-D
+    REQUIRE(projection->distance_mm < 0.05);
+}
+
 TEST_CASE("Responses reject duplicate IDs and nonfinite coordinates", "[AISeamPlacement]")
 {
     Json value = response();
@@ -88,6 +125,12 @@ TEST_CASE("Responses reject duplicate IDs and nonfinite coordinates", "[AISeamPl
     REQUIRE_THROWS(validate_response(value));
     value = response();
     value["seams"][0]["y_mm"] = "0.0";
+    REQUIRE_THROWS(validate_response(value));
+    value = response();
+    value["seams"][0].erase("edge");
+    REQUIRE_THROWS(validate_response(value));
+    value = response();
+    value["seams"][0]["edge"][1] = {10.};
     REQUIRE_THROWS(validate_response(value));
 }
 

@@ -3983,9 +3983,12 @@ void Print::export_ai_seams(const AISeamPlacement::Options &options)
     if (options.export_path.empty()) throw std::invalid_argument("AI seam export needs an output path");
     if (!is_step_done(psSlicingFinished)) throw std::runtime_error("Finish slicing the current plate before exporting seams");
     if (!ai_seam_options.response_path.empty()) {
-        boost::system::error_code error;
-        if (boost::filesystem::equivalent(options.export_path, ai_seam_options.response_path, error))
-            throw std::runtime_error("The seam export cannot overwrite the connected response file");
+        // Both published files, the AI request and its exact -raw log, must spare the connected response.
+        for (const std::string &target : {options.export_path, AISeamPlacement::raw_export_path(options.export_path)}) {
+            boost::system::error_code error;
+            if (boost::filesystem::equivalent(target, ai_seam_options.response_path, error))
+                throw std::runtime_error("The seam export cannot overwrite the connected response file");
+        }
     }
     AISeamPlacement::Options effective = options;
     if (effective.playbook.is_null() && !ai_seam_options.response_path.empty()) {

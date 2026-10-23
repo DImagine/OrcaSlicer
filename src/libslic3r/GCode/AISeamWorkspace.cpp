@@ -85,6 +85,7 @@ WorkspaceResult generate_in_workspace(Print &print, const WorkspaceSettings &set
             Session preflight(print, print.ai_seam_options);
             mismatch = !preflight.warning().empty();
             result.seam_count = response.at("seams").size();
+            result.edge_fallback_count = preflight.edge_fallbacks().size();
         }
         if (!has_response || mismatch) {
             Options options;

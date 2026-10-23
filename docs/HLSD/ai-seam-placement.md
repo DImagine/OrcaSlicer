@@ -2,7 +2,8 @@
 
 AI seam exchange replaces the finalized position of external printing loops. Geometry is
 exported as one UTF-8 JSON request for the AI and assignments return as one JSON response.
-During the experiment an exact `<request>-raw.json` log is written beside every request. The contract
+During the experiment an exact `<request>-raw.json` log is written beside every request.
+Neither file may resolve to the connected response; this is checked before any write. The contract
 schemas are in `resources/ai_seams`. The runtime API is `Print::export_ai_seams` and
 `Print::set_ai_seam_response`; an empty response path disconnects the response. These
 methods require an idle slicing worker. No exchange state belongs to PrintConfig,
@@ -67,11 +68,19 @@ members/occurrence IDs. Generation compares the digest, then requires exactly on
 assignment for every registered occurrence. An XY point in millimeters must be within
 0.05 mm of its own exact source loop: request rounding moves path vertices by at most
 about 0.007 mm, and the remainder covers the AI's own rounding. Projection uses double
-arithmetic on exact segments and rounds XY to the integer grid. The selected
+arithmetic on exact segments and rounds XY to the integer grid.
+Each seam also names its `edge`: the XY of two consecutive points of one request path. Only a
+single exact segment whose ends match within request rounding (0.01 mm) qualifies, in path order;
+swapped ends are tried when path order gives no fit within 0.05 mm, so close vertices can never
+open a chain around the loop. Repeated visits of the same
+XY segment resolve to the nearest projection. A point on its own loop but off its edge is placed at
+the nearest loop point and reported (G-code warning with IDs, count in the GUI status); `--strict`
+rejects it. A point off its loop is rejected with the frame diagnostics above. Future point thinning
+will need an explicit link from request edges to ranges of exact segments. The selected
 segment/visit survives preflight and supplies the Z interpolation parameter.
 Response XY uses the object-local frame of the exported paths. A rejected point that
-fits only after removing the instance shift (and plate origin) is reported as layout or
-plate coordinates; it is never converted silently.
+fits only after removing the instance shift (and plate origin) is reported as looking like
+layout or plate coordinates; it is never converted silently.
 
 SeamPlacer receives this effective finalized point before its usual finalized/nearest
 selection. Exact splitting bypasses vertex snapping and non-overhang relocation. Scarf

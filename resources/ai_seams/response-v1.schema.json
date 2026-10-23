@@ -39,7 +39,8 @@
         "required": [
           "occurrence_id",
           "x_mm",
-          "y_mm"
+          "y_mm",
+          "edge"
         ],
         "properties": {
           "occurrence_id": {
@@ -51,6 +52,20 @@
           },
           "y_mm": {
             "type": "number"
+          },
+          "edge": {
+            "description": "XY (without Z) of two consecutive points of the same request path, in path order, naming the segment that holds the seam. Swapped ends are accepted; a point on its loop but off this segment is placed at the nearest loop point with a warning (rejected in strict mode).",
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "type": "number"
+              }
+            }
           },
           "exception": {
             "type": "string"

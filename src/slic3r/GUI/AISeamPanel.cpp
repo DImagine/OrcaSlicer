@@ -133,7 +133,10 @@ void AISeamPanel::refresh()
     case State::Exported: text = _L("Request exported. Waiting for an AI response."); break;
     case State::Ignored: text = _L("Response ignored. New request exported."); break;
     case State::Applied:
-        text = wxString::Format(_L("AI seam response applied. Seam count: %s."), from_u8(std::to_string(result.seam_count))); break;
+        text = wxString::Format(_L("AI seam response applied. Seam count: %s."), from_u8(std::to_string(result.seam_count)));
+        if (result.edge_fallback_count > 0)
+            text += " " + wxString::Format(_L("Placed without a matching edge: %s."), from_u8(std::to_string(result.edge_fallback_count)));
+        break;
     case State::GeometryChanged: text = _L("Geometry changed. Standard seams used; new request exported."); break;
     case State::Error:
         text = result.error.empty() ? _L("AI Seam failed. See the slicing error notification.") :

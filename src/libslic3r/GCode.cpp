@@ -4483,6 +4483,15 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
             (m_ai_seams->exporting() ? "exporting" : "pending") : m_ai_seams->warning();
         if (!m_ai_seams->warning().empty())
             print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, m_ai_seams->warning());
+        if (const auto &fallbacks = m_ai_seams->edge_fallbacks(); !fallbacks.empty()) {
+            // Name a few occurrences so the user can find them in the response; the count covers the rest.
+            std::string ids;
+            for (size_t i = 0; i < std::min<size_t>(fallbacks.size(), 5); ++i) ids += (i ? ", " : "") + fallbacks[i];
+            print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                "AI Seam Placement: " + std::to_string(fallbacks.size()) +
+                " seams did not lie on their named edge and were placed at the nearest loop point: " + ids +
+                (fallbacks.size() > 5 ? ", ..." : ""));
+        }
     }
     m_seam_placer.init(print, throw_if_canceled_func, m_ai_seams.get());
     // Precise Seam: init() only prepares its warning; issue it here, inside the active export step.

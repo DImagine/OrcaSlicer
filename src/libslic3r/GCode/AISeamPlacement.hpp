@@ -44,11 +44,18 @@ struct Projection {
 
 bool is_external(const ExtrusionLoop &loop);
 Projection project(const ExtrusionLoop &loop, const Vec2d &point_mm);
+// Nearest projection onto the loop segments whose ends match a response edge: path order first,
+// swapped ends when path order gives no projection within 0.05 mm. Empty when no segment matches
+// either order; otherwise the result may still lie beyond 0.05 mm, for the caller to judge.
+std::optional<Projection> project_on_edge(const ExtrusionLoop &loop, const Vec2d &point_mm,
+                                          const Vec2d &start_mm, const Vec2d &end_mm);
 // Uses the preflight segment/visit, bypassing all standard snapping and overhang preferences.
 void split_exact(ExtrusionLoop &loop, const Projection &projection);
 Json read_response(const std::string &path);
 void validate_response(const Json &response);
 std::string initial_prompt();
+// Exact integer export written beside the AI request X.json as X-raw.json.
+std::string raw_export_path(const std::string &export_path);
 
 class Session {
 public:
@@ -67,6 +74,8 @@ public:
     bool exporting() const { return !m_options.export_path.empty(); }
     bool applying() const { return m_applying; }
     const std::string &warning() const { return m_warning; }
+    // Occurrences placed at the nearest loop point because their edge did not match.
+    const std::vector<std::string> &edge_fallbacks() const { return m_edge_fallbacks; }
     const std::string &digest() const { return m_digest; }
     const std::vector<Source> &sources() const { return m_sources; }
     void annotate(const ExtrusionLoop *loop, Json annotations);
@@ -98,6 +107,7 @@ private:
     Json m_alignment_groups = Json::array();
     std::string m_digest;
     std::string m_warning;
+    std::vector<std::string> m_edge_fallbacks;
     bool m_applying = false;
     const ExtrusionLoop &original(const ExtrusionLoop &loop) const;
 };
