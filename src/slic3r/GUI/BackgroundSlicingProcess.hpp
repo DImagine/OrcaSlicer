@@ -11,6 +11,8 @@
 #include <string>
 #include <condition_variable>
 #include <mutex>
+#include <map>
+#include "libslic3r/GCode/AISeamWorkspace.hpp"
 
 #include <boost/thread.hpp>
 
@@ -94,6 +96,11 @@ class BackgroundSlicingProcess
 {
 public:
 	BackgroundSlicingProcess();
+    // Configure only while idle; the worker owns these immutable settings until completion.
+    void configure_ai_seams(const AISeamPlacement::WorkspaceSettings &settings,
+                            const AISeamPlacement::Json &environment);
+    AISeamPlacement::WorkspaceResult ai_seam_result(int plate_index) const;
+    void clear_ai_seam_results();
 	// Stop the background processing and finalize the bacgkround processing thread, remove temp files.
 	~BackgroundSlicingProcess();
 
@@ -206,6 +213,12 @@ public:
 
 private:
 	void 	thread_proc();
+    AISeamPlacement::WorkspaceSettings m_ai_seam_settings;
+    AISeamPlacement::Json m_ai_seam_environment = AISeamPlacement::Json::object();
+    AISeamPlacement::WorkspaceResult m_ai_seam_pending;
+    mutable std::mutex m_ai_seam_mutex;
+    std::map<int, AISeamPlacement::WorkspaceResult> m_ai_seam_results;
+    void publish_ai_seam_result(const AISeamPlacement::WorkspaceResult &result);
 	// Calls thread_proc(), catches all C++ exceptions and shows them using wxApp::OnUnhandledException().
 	void 	thread_proc_safe() throw();
 #ifdef _WIN32

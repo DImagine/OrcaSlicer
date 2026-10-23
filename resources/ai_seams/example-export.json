@@ -22,7 +22,7 @@
   "slicer_version": "contract-example",
   "plate": 1,
   "coordinate_system": "object_local",
-  "coord_unit_mm": 1e-06,
+  "precision_mm": 0.01,
   "markup_types": {
     "blocked_red": 0,
     "neutral": 1,
@@ -60,15 +60,15 @@
         ]
       ],
       "center_offset": [
-        0,
-        0
+        0.0,
+        0.0
       ],
       "instances": [
         {
           "instance_key": "0",
           "shift": [
-            0,
-            0
+            0.0,
+            0.0
           ],
           "model_transform": [
             [
@@ -114,29 +114,29 @@
                   "z_contoured": false,
                   "points": [
                     [
-                      0,
-                      0,
-                      0
+                      0.0,
+                      0.0,
+                      0.0
                     ],
                     [
-                      1000000,
-                      0,
-                      0
+                      1.0,
+                      0.0,
+                      0.0
                     ],
                     [
-                      1000000,
-                      1000000,
-                      0
+                      1.0,
+                      1.0,
+                      0.0
                     ],
                     [
-                      0,
-                      1000000,
-                      0
+                      0.0,
+                      1.0,
+                      0.0
                     ],
                     [
-                      0,
-                      0,
-                      0
+                      0.0,
+                      0.0,
+                      0.0
                     ]
                   ]
                 }
@@ -167,8 +167,8 @@
                   "occurrence_id": "m0/o0/l0/r0/0/0/i0",
                   "instance_key": "0",
                   "source_seam": [
-                    0,
-                    0
+                    0.0,
+                    0.0
                   ]
                 }
               ]

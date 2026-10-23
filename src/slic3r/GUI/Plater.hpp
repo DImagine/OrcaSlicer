@@ -3,6 +3,7 @@
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/GCode/AISeamWorkspace.hpp"
 #include <cstddef>
 #include <map>
 #include "libslic3r/Technologies.hpp"
@@ -699,6 +700,9 @@ public:
     //void show_action_buttons(const bool is_ready_to_slice) const;
 
     wxString get_project_filename(const wxString& extension = wxEmptyString) const;
+    AISeamPlacement::WorkspaceSettings ai_seam_settings() const;
+    void set_ai_seam_settings(const AISeamPlacement::WorkspaceSettings &settings);
+    AISeamPlacement::WorkspaceResult ai_seam_result() const;
     wxString get_export_gcode_filename(const wxString& extension = wxEmptyString, bool only_filename = false, bool export_all = false) const;
     void set_project_filename(const wxString& filename);
     void update_print_error_info(int code, std::string msg, std::string extra);

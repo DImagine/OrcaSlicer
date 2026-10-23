@@ -42,6 +42,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/AVVideoDecoder.hpp
     GUI/Auxiliary.hpp
     GUI/BackgroundSlicingProcess.cpp
+    GUI/AISeamPanel.cpp
+    GUI/AISeamPanel.hpp
     GUI/BackgroundSlicingProcess.hpp
     GUI/PostProcessor.cpp
     GUI/PostProcessor.hpp

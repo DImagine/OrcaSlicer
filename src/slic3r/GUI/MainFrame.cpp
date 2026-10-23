@@ -2495,7 +2495,7 @@ bool MainFrame::get_enable_slice_status()
     }
     else if (m_slice_select == eSlicePlate)
     {
-        if (current_plate->is_slice_result_valid())
+        if (current_plate->is_slice_result_valid() && !m_plater->ai_seam_settings().enabled)
         {
             enable = false;
         }
@@ -2660,7 +2660,11 @@ void MainFrame::update_slice_print_status(SlicePrintEventType event, bool can_sl
 {
     bool enable_print = true, enable_slice = true;
 
-    if (!can_slice)
+    // AI Seam re-reads its response on every Slice: an already valid result must not disable Slice.
+    PartPlate *current_plate = m_plater ? m_plater->get_partplate_list().get_curr_plate() : nullptr;
+    const bool ai_seam_reslice = current_plate && m_plater->ai_seam_settings().enabled &&
+        current_plate->can_slice() && current_plate->is_slice_result_valid();
+    if (!can_slice && !ai_seam_reslice)
     {
         if (m_slice_select == eSlicePlate)
             enable_slice = false;

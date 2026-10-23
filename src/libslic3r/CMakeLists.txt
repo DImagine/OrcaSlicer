@@ -289,6 +289,8 @@ set(lisbslic3r_sources
     GCode/SeamPlacer.hpp
     GCode/AISeamPlacement.cpp
     GCode/AISeamPlacement.hpp
+    GCode/AISeamWorkspace.cpp
+    GCode/AISeamWorkspace.hpp
     GCode/PreciseSeam.cpp
     GCode/PreciseSeam.hpp
     GCode/PreciseSeamInternal.hpp

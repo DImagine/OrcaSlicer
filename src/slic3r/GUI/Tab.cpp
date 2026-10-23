@@ -1,5 +1,6 @@
 //#include "slic3r/Utils/Serial.hpp"
 #include "Tab.hpp"
+#include "AISeamPanel.hpp"
 #include "PresetHints.hpp"
 #include "libslic3r/IMEXHelpers.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -2888,6 +2889,27 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_inward", "quality_settings_seam#wipe-inward");
         optgroup->append_single_option_line("wipe_inward_distance", "quality_settings_seam#wipe-inward");
         optgroup->append_single_option_line("wipe_before_external_loop","quality_settings_seam#wipe-before-external");
+
+        if (dynamic_cast<TabPrintModel *>(this) == nullptr) {
+            // Runtime-only controls belong to the global process tab, never object/part overrides.
+            auto ai_group = page->new_optgroup(L("AI Seam"), L"param_seam");
+            ai_group->label_width = 0;
+            ConfigOptionDef placeholder;
+            placeholder.label = L("AI Seam");
+            placeholder.mode = comAdvanced;
+            placeholder.full_width = true;
+            auto line = Line{wxEmptyString, L("Experimental AI seam exchange using a working folder.")};
+            line.append_option(Option{placeholder, "ai_seam_session"});
+            line.widget = [weak = ConfigOptionsGroupWkp(ai_group)](wxWindow *parent) -> wxSizer * {
+                auto *sizer = new wxBoxSizer(wxVERTICAL);
+                sizer->Add(new AISeamPanel(parent, [weak] {
+                    if (auto group = weak.lock())
+                        if (group->custom_ctrl) group->custom_ctrl->refresh_widget_sizes();
+                }), 0, wxEXPAND);
+                return sizer;
+            };
+            ai_group->append_line(line);
+        }
 
 
         optgroup = page->new_optgroup(L("Precision"), L"param_precision");

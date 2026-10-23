@@ -113,6 +113,7 @@ public:
     void    OnLeaveWin(wxMouseEvent& event);
 
     void    init_ctrl_lines();
+    void    refresh_widget_sizes();
     bool    update_visibility(ConfigOptionMode mode);
     void    correct_window_position(wxWindow* win, const Line& line, Field* field = nullptr);
     void    correct_widgets_position(wxSizer* widget, const Line& line, Field* field = nullptr);

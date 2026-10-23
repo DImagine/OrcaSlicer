@@ -15,6 +15,5 @@
     "version": 1,
     "text": "# Seam decisions\nKeep seams on the rear side. Recheck overhang assumptions after nozzle or layer-height changes.\n"
   },
-  "coord_unit_mm": 1e-06,
   "plate": 1
 }

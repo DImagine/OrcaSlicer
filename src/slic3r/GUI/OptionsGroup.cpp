@@ -353,7 +353,8 @@ void OptionsGroup::activate_line(Line& line)
     }
 
     // if we have a single option with no label, no sidetext just add it directly to sizer
-    if (option_set.size() == 1 && label_width == 0 && option_set.front().opt.full_width && option_set.front().opt.sidetext.size() == 0 &&
+    // A custom widget supplies its own controls; its placeholder must never build a config Field.
+    if (line.widget == nullptr && option_set.size() == 1 && label_width == 0 && option_set.front().opt.full_width && option_set.front().opt.sidetext.size() == 0 &&
         option_set.front().side_widget == nullptr && line.get_extra_widgets().size() == 0) {
         const auto& option = option_set.front();
         const auto& field  = build_field(option);

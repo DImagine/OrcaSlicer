@@ -1,7 +1,8 @@
 # AI seam placement
 
 AI seam exchange replaces the finalized position of external printing loops. Geometry is
-exported as one UTF-8 JSON file and assignments return as one JSON response. The contract
+exported as one UTF-8 JSON request for the AI and assignments return as one JSON response.
+During the experiment an exact `<request>-raw.json` log is written beside every request. The contract
 schemas are in `resources/ai_seams`. The runtime API is `Print::export_ai_seams` and
 `Print::set_ai_seam_response`; an empty response path disconnects the response. These
 methods require an idle slicing worker. No exchange state belongs to PrintConfig,
@@ -23,12 +24,14 @@ SeamPlacer Perimeter data or the standard internal-wall seam calculation.
 The per-wall-filament splitter clones loops; its pass-scoped aliases explicitly retain
 their original source identity and are cleared before the next layer's split storage.
 
-Paths retain integer XYZ, path boundaries, extrusion roles and z_contoured. Coordinates
-are in the PrintObject's centered slicing frame, with coord_unit_mm supplied by the
-current SCALING_FACTOR. Instance shifts and model/PrintObject matrices describe placement.
-Shift and center_offset are also integer grid coordinates. Raw paths are already
-rotated/scaled and centered. Layout XY = local XY + coord_unit_mm * shift; plate XY =
-layout XY - plate_origin_mm.xy. Do not transform raw paths again using the model matrices.
+Paths retain XYZ, path boundaries, extrusion roles and z_contoured. Coordinates are in
+the PrintObject's centered slicing frame. The raw log keeps integer grid values with
+coord_unit_mm = SCALING_FACTOR. The AI request has the same IDs and structure, but every
+grid value (points, seams, targets, shift, center_offset) is converted to millimeters and
+every millimeter value is rounded to precision_mm = 0.01, so the AI never rescales numbers.
+Matrices are unchanged. Paths are already rotated/scaled and centered.
+Layout XY = local XY + shift; plate XY = layout XY - plate_origin_mm.xy. Do not transform
+paths again using the model matrices.
 Path Z is distinct from slice_z_mm and print_z_mm. Markup samples are float-quality
 samples from the existing classifier on each real source polygon, not continuous exact
 paint intervals or candidates borrowed from a neighboring loop. Types 0/1/2 mean
@@ -50,7 +53,8 @@ round-trip serialization. Each object digest covers object_key, model_index, tra
 center_offset, instances (instance_key, shift, model_transform), and layers (layer_index,
 slice_z_mm, print_z_mm, loops). Loop geometry includes source_loop_id, kind, loop_role,
 inset_idx, paths and derived overhang_ranges. Names, markup, source seams and prompt are
-excluded. The top-level digest covers digest_algorithm, coordinate_system, coord_unit_mm,
+excluded. The digest is computed from the exact integer data, never from the rounded
+request. The top-level digest covers digest_algorithm, coordinate_system, coord_unit_mm,
 plate, plate_origin_mm, slicer_version and sorted object_digests. export_id is a random
 trace ID and is not checked against a surviving export file. Changing serialization
 semantics requires a new digest algorithm/version. Structural reorderings can reject an
@@ -60,11 +64,14 @@ otherwise identical shape conservatively.
 
 The response parser rejects invalid format, nonfinite coordinates and duplicate JSON
 members/occurrence IDs. Generation compares the digest, then requires exactly one
-assignment for every registered occurrence. An XY point must be within
-0.000001 + 2*coord_unit_mm millimeters of its own source loop. Six-decimal output has
-at most sqrt(2)/2 * 1e-6 mm decimal rounding error, below this bound. Projection uses
-double arithmetic on raw segments and rounds XY to the integer grid. The selected
+assignment for every registered occurrence. An XY point in millimeters must be within
+0.05 mm of its own exact source loop: request rounding moves path vertices by at most
+about 0.007 mm, and the remainder covers the AI's own rounding. Projection uses double
+arithmetic on exact segments and rounds XY to the integer grid. The selected
 segment/visit survives preflight and supplies the Z interpolation parameter.
+Response XY uses the object-local frame of the exported paths. A rejected point that
+fits only after removing the instance shift (and plate origin) is reported as layout or
+plate coordinates; it is never converted silently.
 
 SeamPlacer receives this effective finalized point before its usual finalized/nearest
 selection. Exact splitting bypasses vertex snapping and non-overhang relocation. Scarf
@@ -106,6 +113,28 @@ secrets, tool permissions and old ID/coordinate mappings from these notes. Playb
 is user-supplied historical context, not executable instructions or renewed tool consent.
 The backend validates its structure but does not interpret or execute its Markdown.
 There is no text-size limit; keep the notes concise to avoid inflating both files.
+
+## GUI workspace
+
+The global Quality/Seam group contains an Advanced AI Seam checkbox. It expands
+session-only working-folder, Apply AI response and Share file paths controls and a
+status line. These controls are absent from object/part overrides. They are reset
+when the project is replaced and are never saved in profiles or 3MF. File-path sharing
+defaults off; disabling Apply preserves the answer and exports a fresh baseline request.
+
+Each plate uses `ai-seam-plateN-request.json` and `ai-seam-plateN-response.json`, with
+one-based plate numbers even in a single-plate project. Slice All uses separate pairs.
+The folder must already exist. Missing/ignored answers export a request; a matching
+answer is applied without rewriting the request. A geometry mismatch exports a new
+request carrying the valid answer's playbook and generates standard seams with a warning.
+Malformed answers fail the slice. Turning Apply off recovers without reading that answer.
+
+UI setting changes invalidate G-code on every plate. Each explicit Slice with AI Seam
+enabled also invalidates G-code before starting the worker, so external file replacements
+are observed without scene edits. Slice therefore stays enabled after a valid result. The worker uses one temporary snapshot of the answer
+for validation and generation, deletes it on every exit, and publishes the final status
+only after processing succeeds. It never edits the public response. No network access,
+file watcher or AI execution is introduced. Files are manually exchanged with the AI.
 
 ## CLI and automation
 

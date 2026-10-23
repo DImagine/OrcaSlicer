@@ -508,6 +508,20 @@ void OG_CustomCtrl::OnLeaveWin(wxMouseEvent& event)
     event.Skip();
 }
 
+void OG_CustomCtrl::refresh_widget_sizes()
+{
+    // Dynamic widget rows must shrink as well as grow when their contents are folded.
+    for (CtrlLine &line : ctrl_lines) {
+        if (!line.og_line.widget_sizer) continue;
+        line.height = GetTextExtent(line.og_line.label).y + m_v_gap;
+        for (wxSizerItem *item : line.og_line.widget_sizer->GetChildren())
+            if (item->IsWindow()) line.height = std::max(line.height, item->GetWindow()->GetSize().y);
+    }
+    update_visibility(wxGetApp().get_mode());
+    GetParent()->Layout();
+    Refresh();
+}
+
 bool OG_CustomCtrl::update_visibility(ConfigOptionMode mode)
 {
     // BBS: new layout
@@ -695,7 +709,8 @@ int OG_CustomCtrl::CtrlLine::get_max_win_width()
 
 void OG_CustomCtrl::CtrlLine::correct_items_positions()
 {
-    if (draw_just_act_buttons || !is_visible)
+    // Widget-only rows still need positioning after a mode or page layout change.
+    if ((draw_just_act_buttons && !og_line.widget_sizer) || !is_visible)
         return;
 
     if (og_line.near_label_widget_win)
@@ -761,7 +776,7 @@ void OG_CustomCtrl::CtrlLine::update_visibility(ConfigOptionMode mode)
     const ConfigOptionMode& line_mode = option_set.front().opt.mode;
     is_visible = og_line.toggle_visible && line_mode <= mode;
 
-    if (draw_just_act_buttons)
+    if (draw_just_act_buttons && !og_line.widget_sizer)
         return;
 
     if (og_line.near_label_widget_win)

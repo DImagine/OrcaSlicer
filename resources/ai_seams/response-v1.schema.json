@@ -64,16 +64,12 @@
     "playbook": {
       "$ref": "#/$defs/playbook"
     },
-    "coord_unit_mm": {
-      "type": "number",
-      "exclusiveMinimum": 0
-    },
     "plate": {
       "type": "integer",
       "minimum": 1
     }
   },
-  "$comment": "Additionally require unique occurrence IDs, finite XY, the current geometry digest, full bijection and distance <= 0.000001 + 2*coord_unit_mm.",
+  "$comment": "Additionally require unique occurrence IDs, finite XY, the current geometry digest, full bijection and distance <= 0.05 mm from the exact source loop, in the same object_local millimeters as the request paths.",
   "$defs": {
     "playbook": {
       "type": "object",

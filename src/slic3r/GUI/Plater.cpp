@@ -174,6 +174,7 @@
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
+#include <wx/stdpaths.h>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
@@ -7216,6 +7217,7 @@ struct Plater::priv
     PartPlateList partplate_list;
     //BBS: add a flag to ignore cancel event
     bool m_ignore_event{false};
+    AISeamPlacement::WorkspaceSettings ai_seam_settings;
     bool m_slice_all{false};
     bool m_is_slicing {false};
     // Missing-plugin set signatures (sorted full refs joined by '\n'), one per notification. They
@@ -10868,6 +10870,8 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     // Stop and reset the Print content.
     this->background_process.reset();
     model.clear_objects();
+    ai_seam_settings = {};
+    this->background_process.clear_ai_seam_results();
     // clear_objects() only drops the ModelObjects; the CAD recipe is Model-level state and would
     // otherwise be written into every project saved for the rest of the session.
     model.cad_recipe.clear();
@@ -11616,6 +11620,21 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
 // Restart background processing thread based on a bitmask of UpdateBackgroundProcessReturnState.
 bool Plater::priv::restart_background_process(unsigned int state)
 {
+    if (!background_process.running()) {
+        AISeamPlacement::Json environment = AISeamPlacement::Json::object();
+        if (ai_seam_settings.share_paths) {
+            const boost::filesystem::path executable(into_u8(wxStandardPaths::Get().GetExecutablePath()));
+            environment["executable"] = boost::filesystem::absolute(executable).string();
+            environment["resources"] = boost::filesystem::absolute(resources_dir()).string();
+            const boost::filesystem::path project(into_u8(get_project_filename()));
+            if (project.extension() == ".3mf" && boost::filesystem::is_regular_file(project))
+                environment["project"] = boost::filesystem::absolute(project).string();
+#ifdef _WIN32
+            environment["dll"] = (executable.parent_path() / "OrcaSlicer.dll").string();
+#endif
+        }
+        background_process.configure_ai_seams(ai_seam_settings, environment);
+    }
     if (!m_worker.is_idle()) {
         // Avoid a race condition
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: ui jobs running, return false")%__LINE__;
@@ -13811,6 +13830,18 @@ void Plater::priv::on_action_slice_all(SimpleEvent&)
 
         Model::setExtruderParams(config, numExtruders);
         Model::setPrintSpeedTable(config, print_config);
+        if (ai_seam_settings.enabled) {
+            // Slice All must revisit ready plates too: their external answers may have changed.
+            background_process.stop();
+            for (int i = 0; i < partplate_list.get_plate_count(); ++i) {
+                PartPlate *plate = partplate_list.get_plate(i);
+                if (Print *print = plate->fff_print()) print->set_ai_seam_response({});
+                plate->update_slice_result_valid_state(false);
+            }
+            background_process.invalidate_all_steps();
+            background_process.clear_ai_seam_results();
+            process_completed_with_error = -1;
+        }
         m_slice_all = true;
         m_slice_all_only_has_gcode = true;
         m_cur_slice_plate = 0;
@@ -20745,11 +20776,54 @@ bool Plater::is_multi_extruder_ams_empty()
 }
 
 //BBS: add multiple plate reslice logic
+AISeamPlacement::WorkspaceSettings Plater::ai_seam_settings() const
+{
+    return p->ai_seam_settings;
+}
+
+void Plater::set_ai_seam_settings(const AISeamPlacement::WorkspaceSettings &settings)
+{
+    const auto &old = p->ai_seam_settings;
+    if (old.enabled == settings.enabled && old.apply_response == settings.apply_response &&
+        old.share_paths == settings.share_paths && old.directory == settings.directory) return;
+    p->background_process.stop();
+    p->ai_seam_settings = settings;
+    // Session controls affect G-code, not geometry, and apply to every plate in Slice All.
+    for (int i = 0; i < p->partplate_list.get_plate_count(); ++i) {
+        PartPlate *plate = p->partplate_list.get_plate(i);
+        if (Print *print = plate->fff_print()) {
+            print->set_ai_seam_response({});
+            print->ai_seam_options = {};
+        }
+        plate->update_slice_result_valid_state(false);
+    }
+    p->background_process.invalidate_all_steps();
+    p->background_process.clear_ai_seam_results();
+    p->process_completed_with_error = -1;
+    // Refresh availability from the plate; changing AI settings must still allow slicing.
+    p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate,
+                                            p->partplate_list.get_curr_plate()->can_slice());
+}
+
+AISeamPlacement::WorkspaceResult Plater::ai_seam_result() const
+{
+    auto result = p->background_process.ai_seam_result(p->partplate_list.get_curr_plate_index());
+    using State = AISeamPlacement::WorkspaceState;
+    const bool final = result.state == State::Applied || result.state == State::Exported ||
+        result.state == State::Ignored || result.state == State::GeometryChanged;
+    // A completed previous slice is not the current result after edits or before completion handling.
+    if (final && !p->partplate_list.get_curr_plate()->is_slice_result_valid()) return {};
+    return result;
+}
+
 void Plater::reslice()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter, process_completed_with_error=%2%")%__LINE__ %p->process_completed_with_error;
     // There is "invalid data" button instead "slice now"
-    if (p->process_completed_with_error == p->partplate_list.get_curr_plate_index())
+    const auto seam_result = ai_seam_result();
+    const bool retry_ai_error = p->ai_seam_settings.enabled &&
+        seam_result.state == AISeamPlacement::WorkspaceState::Error && seam_result.error.rfind("AI Seam:", 0) == 0;
+    if (p->process_completed_with_error == p->partplate_list.get_curr_plate_index() && !retry_ai_error)
     {
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": process_completed_with_error, return directly");
         reset_gcode_toolpaths();
@@ -20789,6 +20863,15 @@ void Plater::reslice()
         BOOST_LOG_TRIVIAL(error) << "Could not stop UI job within "
                                  << timeout_ms << " milliseconds timeout!";
         return;
+    }
+
+    if (p->ai_seam_settings.enabled && printer_technology() == ptFFF) {
+        // A response may have changed without any scene/config diff; force a fresh G-code pass.
+        p->background_process.stop();
+        p->partplate_list.get_current_fff_print().set_ai_seam_response({});
+        p->partplate_list.get_curr_plate()->update_slice_result_valid_state(false);
+        p->background_process.invalidate_all_steps();
+        p->process_completed_with_error = -1;
     }
 
     // Orca: regenerate CalibPressureAdvancePattern custom G-code to apply changes

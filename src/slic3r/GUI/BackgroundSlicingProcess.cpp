@@ -217,9 +217,43 @@ std::string BackgroundSlicingProcess::output_filepath_for_project(const boost::f
 
 // This function may one day be merged into the Print, but historically the print was separated
 // from the G-code generator.
+void BackgroundSlicingProcess::configure_ai_seams(const AISeamPlacement::WorkspaceSettings &settings,
+                                                 const AISeamPlacement::Json &environment)
+{
+    assert(!running());
+    m_ai_seam_settings = settings;
+    m_ai_seam_environment = environment;
+}
+
+AISeamPlacement::WorkspaceResult BackgroundSlicingProcess::ai_seam_result(int plate_index) const
+{
+    std::lock_guard<std::mutex> lock(m_ai_seam_mutex);
+    const auto found = m_ai_seam_results.find(plate_index);
+    return found == m_ai_seam_results.end() ? AISeamPlacement::WorkspaceResult{} : found->second;
+}
+
+void BackgroundSlicingProcess::clear_ai_seam_results()
+{
+    std::lock_guard<std::mutex> lock(m_ai_seam_mutex);
+    m_ai_seam_results.clear();
+}
+
+void BackgroundSlicingProcess::publish_ai_seam_result(const AISeamPlacement::WorkspaceResult &result)
+{
+    // UI reads a copy; it never dereferences a Print currently owned by the worker.
+    std::lock_guard<std::mutex> lock(m_ai_seam_mutex);
+    m_ai_seam_results[m_fff_print->get_plate_index()] = result;
+}
+
 void BackgroundSlicingProcess::process_fff()
 {
     assert(m_print == m_fff_print);
+    m_ai_seam_pending = ai_seam_result(m_fff_print->get_plate_index());
+    if (!m_ai_seam_settings.enabled) m_ai_seam_pending = {};
+    if (m_ai_seam_settings.enabled && !m_print->finished()) {
+        m_ai_seam_pending.state = AISeamPlacement::WorkspaceState::Checking;
+        publish_ai_seam_result(m_ai_seam_pending);
+    }
     PresetBundle& preset_bundle   = *GUI::wxGetApp().preset_bundle;
     m_fff_print->is_BBL_printer() = preset_bundle.is_bbl_vendor();
     // BBS: add the logic to process from an existed gcode file
@@ -283,8 +317,11 @@ void BackgroundSlicingProcess::process_fff()
 
         // BBS: add plate index into render params
         m_temp_output_path = this->get_current_plate()->get_tmp_gcode_path();
-        m_fff_print->export_gcode(m_temp_output_path, m_gcode_result,
-                                  [this](const ThumbnailsParams& params) { return this->render_thumbnails(params); });
+        m_ai_seam_pending = AISeamPlacement::generate_in_workspace(
+            *m_fff_print, m_ai_seam_settings, m_ai_seam_environment, [this] {
+                m_fff_print->export_gcode(m_temp_output_path, m_gcode_result,
+                    [this](const ThumbnailsParams& params) { return this->render_thumbnails(params); });
+            });
         // Orca: BBL printers post-process the g-code in place here, in the file the G-code viewer maps, so
         // the preview re-reads its moves and line offsets from the edited file. The rest of m_gcode_result,
         // including nozzle_group_result (consumed by the H2C print-dispatch nozzle mapping), is kept.
@@ -488,16 +525,30 @@ void BackgroundSlicingProcess::call_process(std::exception_ptr& ex) throw()
     try {
         assert(m_print != nullptr);
         switch (m_print->technology()) {
-        case ptFFF: this->process_fff(); break;
+        case ptFFF:
+            this->process_fff();
+            publish_ai_seam_result(m_ai_seam_pending);
+            break;
         case ptSLA: this->process_sla(); break;
         default: m_print->process(); break;
         }
     } catch (CanceledException& /* ex */) {
+        if (m_ai_seam_settings.enabled) {
+            AISeamPlacement::WorkspaceResult result;
+            result.state = AISeamPlacement::WorkspaceState::Cancelled;
+            publish_ai_seam_result(result);
+        }
         // Canceled, this is all right.
         assert(m_print->canceled());
         ex = std::current_exception();
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":got cancelled exception" << std::endl;
     } catch (...) {
+        if (m_ai_seam_settings.enabled) {
+            AISeamPlacement::WorkspaceResult result;
+            result.state = AISeamPlacement::WorkspaceState::Error;
+            try { throw; } catch (const std::exception &error) { result.error = error.what(); } catch (...) {}
+            publish_ai_seam_result(result);
+        }
         ex = std::current_exception();
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":got other exception" << std::endl;
     }

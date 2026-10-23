@@ -15,7 +15,7 @@
     "slicer_version",
     "plate",
     "coordinate_system",
-    "coord_unit_mm",
+    "precision_mm",
     "markup_types",
     "alignment_groups",
     "objects",
@@ -89,9 +89,8 @@
     "coordinate_system": {
       "const": "object_local"
     },
-    "coord_unit_mm": {
-      "type": "number",
-      "exclusiveMinimum": 0
+    "precision_mm": {
+      "const": 0.01
     },
     "markup_types": {
       "type": "object",
@@ -243,7 +242,7 @@
     "xy": {
       "type": "array",
       "items": {
-        "type": "integer"
+        "type": "number"
       },
       "minItems": 2,
       "maxItems": 2
@@ -251,7 +250,7 @@
     "xyz": {
       "type": "array",
       "items": {
-        "type": "integer"
+        "type": "number"
       },
       "minItems": 3,
       "maxItems": 3
@@ -471,5 +470,5 @@
       "additionalProperties": false
     }
   },
-  "$comment": "Raw paths preserve original XYZ integer coordinates and structural path/segment order. Numeric metadata and markup samples are not substitutes for raw geometry. Digest serialization is documented in docs/HLSD/ai-seam-placement.md."
+  "$comment": "Paths are object_local millimeters rounded to precision_mm (exact integer data is in the separate -raw.json log) and structural path/segment order. Numeric metadata and markup samples are not substitutes for raw geometry. Digest serialization is documented in docs/HLSD/ai-seam-placement.md."
 }

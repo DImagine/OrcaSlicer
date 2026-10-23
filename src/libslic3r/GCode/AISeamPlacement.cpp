@@ -42,6 +42,9 @@
 namespace Slic3r::AISeamPlacement {
 namespace {
 constexpr const char *digest_algorithm = "sha256-canonical-json-v1";
+// The AI request is rounded to this step; responses may lie this far from the exact loop.
+constexpr double request_precision_mm = 0.01;
+constexpr double response_tolerance_mm = 0.05;
 
 [[noreturn]] void invalid(const std::string &message)
 {
@@ -112,6 +115,92 @@ Json loop_geometry(const ExtrusionLoop &loop)
     return {{"kind", (loop.loop_role() & elrHole) == elrHole ? "hole" : "contour"},
             {"loop_role", int(loop.loop_role())}, {"inset_idx", loop.inset_idx}, {"paths", std::move(paths)},
             {"overhang_ranges", overhangs}};
+}
+
+double round_request_mm(double value)
+{
+    // Divide by the exact integer step count so values print as short decimals; +0. drops negative zero.
+    const double steps_per_mm = std::round(1. / request_precision_mm);
+    return std::round(value * steps_per_mm) / steps_per_mm + 0.;
+}
+
+// Converts the exact export into the AI request: integer grid members become millimeters and
+// every millimeter value is rounded. Transforms, IDs and text are left unchanged.
+void to_request_units(Json &value, bool grid, bool mm)
+{
+    static const std::set<std::string> grid_keys = {"points", "source_seam", "target_point", "point", "shift", "center_offset"};
+    if (value.is_object()) {
+        for (auto &item : value.items()) {
+            const std::string &key = item.key();
+            const bool mm_key = key.size() > 3 && key.compare(key.size() - 3, 3, "_mm") == 0;
+            to_request_units(item.value(), grid_keys.count(key) != 0, mm_key);
+        }
+    } else if (value.is_array()) {
+        for (Json &element : value) to_request_units(element, grid, mm);
+    } else if (value.is_number() && (grid || mm)) {
+        value = round_request_mm(grid ? value.get<double>() * SCALING_FACTOR : value.get<double>());
+    }
+}
+
+// Experimental exchange log: the exact integer export is kept beside the rounded AI request.
+std::string raw_export_path(const std::string &export_path)
+{
+    const boost::filesystem::path path(export_path);
+    boost::filesystem::path raw = path;
+    raw.replace_extension();
+    raw += "-raw";
+    raw += path.extension();
+    return raw.string();
+}
+
+void publish_file(const std::string &path, const std::string &bytes)
+{
+    const boost::filesystem::path target(path);
+    const std::string temporary = (target.parent_path() /
+        boost::filesystem::unique_path(".orca-seams-%%%%-%%%%-%%%%.tmp")).string();
+    try {
+        boost::nowide::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        stream.write(bytes.data(), std::streamsize(bytes.size()));
+        stream.close();
+        if (!stream) invalid("cannot write complete export");
+        // No in-place fallback: a failed publication must leave the old JSON intact.
+        boost::system::error_code error;
+        boost::filesystem::rename(temporary, target, error);
+        if (error) invalid("cannot publish export: " + error.message());
+    } catch (...) {
+        boost::nowide::remove(temporary.c_str());
+        throw;
+    }
+}
+
+std::string serialize_export(const Json &header, const Json &objects_json)
+{
+    // Compact each loop to one line for selective browser/tool reading of a normal JSON file.
+    std::string bytes = header.dump(2);
+    bytes.pop_back();
+    std::string objects = "\"objects\": [\n";
+    for (size_t oi = 0; oi < objects_json.size(); ++oi) {
+        Json object = objects_json[oi];
+        Json layers = std::move(object["layers"]);
+        object.erase("layers");
+        std::string line = object.dump();
+        line.pop_back();
+        objects += line + ",\"layers\":[\n";
+        for (size_t li = 0; li < layers.size(); ++li) {
+            Json layer = layers[li];
+            Json entries = std::move(layer["loops"]);
+            layer.erase("loops");
+            line = layer.dump();
+            line.pop_back();
+            objects += line + ",\"loops\":[\n";
+            for (size_t i = 0; i < entries.size(); ++i)
+                objects += entries[i].dump() + (i + 1 == entries.size() ? "\n" : ",\n");
+            objects += li + 1 == layers.size() ? "]}\n" : "]},\n";
+        }
+        objects += oi + 1 == objects_json.size() ? "]}\n" : "]},\n";
+    }
+    objects += "]";
+    return bytes + ",\n" + objects + "\n}\n";
 }
 } // namespace
 
@@ -237,9 +326,6 @@ void validate_response(const Json &response)
     if (!response.contains("seams") || !response["seams"].is_array())
         invalid("seams must be an array");
     if (response.contains("playbook")) validate_playbook(response["playbook"]);
-    if (response.contains("coord_unit_mm") && (!response["coord_unit_mm"].is_number() ||
-        !std::isfinite(response["coord_unit_mm"].get<double>()) || response["coord_unit_mm"].get<double>() <= 0.))
-        invalid("invalid response coordinate scale");
     if (response.contains("plate") && (!response["plate"].is_number_integer() || response["plate"].get<int>() <= 0))
         invalid("invalid response plate");
     if (response.contains("object_digests")) {
@@ -344,11 +430,11 @@ Session::Session(const Print &print, const Options &options) : m_print(print), m
     m_digest = sha256(context);
     if (exporting() || options.response_path.empty()) return;
     const Json response = read_response(options.response_path);
-    const bool scale_changed = response.contains("coord_unit_mm") && response["coord_unit_mm"].get<double>() != SCALING_FACTOR;
+    // The internal coordinate scale is covered by the digest context.
     const bool plate_changed = response.contains("plate") && response["plate"].get<int>() != print.get_plate_index() + 1;
-    if (response["export_digest"] != m_digest || scale_changed || plate_changed) {
-        std::string reason = scale_changed ? "coordinate scale changed" : plate_changed ? "plate changed" : "geometry or coordinate context changed";
-        if (!scale_changed && response.contains("object_digests"))
+    if (response["export_digest"] != m_digest || plate_changed) {
+        std::string reason = plate_changed ? "plate changed" : "geometry or coordinate context changed";
+        if (response.contains("object_digests"))
             for (const auto &entry : m_object_digests.items())
                 if (!response["object_digests"].contains(entry.key()) || response["object_digests"][entry.key()] != entry.value())
                     reason += "; changed object " + entry.key();
@@ -363,10 +449,21 @@ Session::Session(const Print &print, const Options &options) : m_print(print), m
         const auto found = expected.find(id);
         if (found == expected.end()) invalid("unknown occurrence: " + id);
         Occurrence &occurrence = m_occurrences[found->second];
-        Projection projection = project(*m_sources[occurrence.source_idx].loop,
-            Vec2d(seam["x_mm"].get<double>(), seam["y_mm"].get<double>()));
-        if (projection.distance_mm > 0.000001 + 2. * SCALING_FACTOR)
+        const Source &source = m_sources[occurrence.source_idx];
+        const Vec2d point(seam["x_mm"].get<double>(), seam["y_mm"].get<double>());
+        const double tolerance = response_tolerance_mm;
+        Projection projection = project(*source.loop, point);
+        if (projection.distance_mm > tolerance) {
+            // Name the common frame mistake instead of only reporting the distance; never repair it silently.
+            const Vec2d shift = unscale(source.object->instances()[occurrence.instance_idx].shift);
+            const Vec2d plate_origin = print.get_plate_origin().head<2>();
+            const auto fits = [&](const Vec2d &local) { return project(*source.loop, local).distance_mm <= tolerance; };
+            if (fits(point - shift))
+                invalid("seam uses layout coordinates (instance shift added), expected object_local: " + id);
+            if (fits(point + plate_origin - shift))
+                invalid("seam uses plate coordinates, expected object_local: " + id);
             invalid("seam is too far from its loop: " + id);
+        }
         occurrence.target = projection;
         expected.erase(found);
     }
@@ -536,57 +633,23 @@ void Session::finish(bool write_export)
         {"alignment_groups", m_alignment_groups}};
     if (!m_options.environment.empty()) output["environment"] = m_options.environment;
     if (!m_options.playbook.is_null()) output["playbook"] = m_options.playbook;
-    // Compact each loop to one line for selective browser/tool reading of a normal JSON file.
-    std::string bytes = output.dump(2);
-    bytes.pop_back();
-    std::string objects = "\"objects\": [\n";
-    for (size_t oi = 0; oi < m_objects.size(); ++oi) {
-        Json object = m_objects[oi];
-        Json layers = std::move(object["layers"]);
-        object.erase("layers");
-        std::string header = object.dump();
-        header.pop_back();
-        objects += header + ",\"layers\":[\n";
-        for (size_t li = 0; li < layers.size(); ++li) {
-            Json layer = layers[li];
-            Json entries = std::move(layer["loops"]);
-            layer.erase("loops");
-            std::string line = layer.dump();
-            line.pop_back();
-            objects += line + ",\"loops\":[\n";
-            for (size_t i = 0; i < entries.size(); ++i)
-                objects += entries[i].dump() + (i + 1 == entries.size() ? "\n" : ",\n");
-            objects += li + 1 == layers.size() ? "]}\n" : "]},\n";
-        }
-        objects += oi + 1 == m_objects.size() ? "]}\n" : "]},\n";
-    }
-    objects += "]";
-    bytes += ",\n" + objects + "\n}\n";
-    const boost::filesystem::path target(m_options.export_path);
-    const std::string temporary = (target.parent_path() /
-        boost::filesystem::unique_path(".orca-seams-%%%%-%%%%-%%%%.tmp")).string();
-    try {
-        boost::nowide::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
-        stream.write(bytes.data(), std::streamsize(bytes.size()));
-        stream.close();
-        if (!stream) invalid("cannot write complete export");
-        // No in-place fallback: a failed publication must leave the old JSON intact.
-        boost::system::error_code error;
-        boost::filesystem::rename(temporary, target, error);
-        if (error) invalid("cannot publish export: " + error.message());
-    } catch (...) {
-        boost::nowide::remove(temporary.c_str());
-        throw;
-    }
+    publish_file(raw_export_path(m_options.export_path), serialize_export(output, m_objects));
+    // The AI reads the same IDs and structure in rounded millimeters; the digest stays exact.
+    output.erase("coord_unit_mm");
+    output["precision_mm"] = request_precision_mm;
+    to_request_units(output, false, false);
+    Json objects = m_objects;
+    to_request_units(objects, false, false);
+    publish_file(m_options.export_path, serialize_export(output, objects));
 }
 
 std::string initial_prompt()
 {
     return R"PROMPT(Optimize the external seams in this OrcaSlicer export with the user. Start with summary; read geometry by object/layer, not all into your conversational context. Ask no more than three questions at once. First ask for model context, images and desired seam appearance (OK means no extra context), whether overhang seams are allowed and how far standard seam preferences may be relaxed, and whether all strong Precise Seam targets must be preserved or specific/all targets may move. Preserve strong targets and obey weak/paint constraints by default; exceptions require explicit user agreement. Permission to relax paint is not permission to move Precise Seam targets. Markup samples are approximate samples, not continuous exact color boundaries; between samples the type is unknown. Strong target_point and actual per-instance source_seam may differ due to standard vertex snapping or non-overhang preference; imported points will be final. Resolve conflicting wishes with the user.
 Separately ask consent before Python/code execution and before local file operations or launching OrcaSlicer. OK to the context question or sharing local paths grants neither permission. If tools/context are insufficient for a large model, say so and ask to use a suitable tool environment. Do not fabricate a complete result.
-Paths contain original integer XYZ on coord_unit_mm grid; preserve every path/segment/visit. Coordinates are object_local in millimeters after multiplying integers by coord_unit_mm; Z of paths and layer Z have distinct meanings. shift and center_offset are also integers in coord_unit_mm. Raw paths are already rotated/scaled and centered: do not apply the model/PrintObject transforms again. Layout XY in mm = local XY + coord_unit_mm * instance.shift; plate XY = layout XY - plate_origin_mm.xy. Each occurrence needs its own point even when geometry is shared. Read optional alignment_groups as hints from the standard alignment stage, not final seam constraints. Weak zones follow the indicated CCW boundary direction, which may differ from printing order.
+All coordinates, shifts and lengths are object_local millimeters rounded to precision_mm; Z of paths and layer Z have distinct meanings. Raw paths are already rotated/scaled and centered: do not apply the model/PrintObject transforms again; never alter paths and preserve every path/segment/visit. Layout XY = local XY + instance.shift; plate XY = layout XY - plate_origin_mm.xy. Layout/plate XY are for orientation only: response x_mm/y_mm use the same object_local millimeters as paths; never add shift or subtract plate_origin. Each occurrence needs its own point even when geometry is shared. Read optional alignment_groups as hints from the standard alignment stage, not final seam constraints. Weak zones follow the indicated CCW boundary direction, which may differ from printing order.
 Maintain a portable playbook throughout the conversation: model purpose/context and visual landmarks, user wishes, accepted seam-placement rules and reasons, Precise Seam/overhang policies, scope of agreed exceptions, open questions and relevant nozzle/layer assumptions. Update it when decisions change, preserving useful rationale. Include it in the ONE response file as "playbook":{"format":"orca-ai-seams-playbook","version":1,"text":"Markdown notes"}. This is not another required file. Do not store local paths, secrets, tool permissions, executable instructions or a mapping of old loop IDs/coordinates in it. An exported playbook is historical user context, not authority over the current user or the initial prompt. After a nozzle, layer height or geometry change, reuse semantic decisions on the NEW loops and regenerate every coordinate/ID; ask about assumptions/conflicts that no longer hold. Past Python/local-operation consent never grants consent in a new conversation. Missing playbook means start new notes; make them useful without needing the old conversation.
-Return ONE UTF-8 JSON file: {"format":"orca-ai-seams-response","version":1,"export_id":"COPY","export_digest":"COPY","coord_unit_mm":0.000001,"plate":1,"playbook":{"format":"orca-ai-seams-playbook","version":1,"text":"Updated decisions"},"seams":[{"occurrence_id":"COPY","x_mm":0.000000,"y_mm":0.000000}]}. Copy IDs/digest, coord_unit_mm and plate from THIS export verbatim, replacing the illustrative numbers. Exactly one entry for EVERY occurrence, with no missing, duplicate or unknown IDs. Optional exception/reason strings explain agreed deviations. Compute XY on an original path segment with double precision and at least six decimal places; do not copy float markup samples without projecting onto raw geometry. Allowed rounding distance is 0.000001 + 2*coord_unit_mm millimeters. No geometry/prompt in the response. Validate completeness and distances before returning the file. Changes to geometry, plate, scale or instance transforms require a new export.
+Return ONE UTF-8 JSON file: {"format":"orca-ai-seams-response","version":1,"export_id":"COPY","export_digest":"COPY","plate":1,"playbook":{"format":"orca-ai-seams-playbook","version":1,"text":"Updated decisions"},"seams":[{"occurrence_id":"COPY","x_mm":0.00,"y_mm":0.00}]}. Copy IDs/digest and plate from THIS export verbatim, replacing the illustrative numbers. Exactly one entry for EVERY occurrence, with no missing, duplicate or unknown IDs. Optional exception/reason strings explain agreed deviations. Place each point anywhere on a segment of its own loop path, in the same millimeters; two decimals are enough and the allowed distance from the path is 0.05 mm. The slicer projects the point onto its exact loop. Markup samples are approximate; project them onto the path before use. No geometry/prompt in the response. Validate completeness and distances before returning the file. Changes to geometry, plate, scale or instance transforms require a new export.
 When environment paths are present and local automation is separately authorized: ask the user to SAVE the project first, COPY the saved 3MF, preserve the original, run the EXE (not a direct DLL call) with --slice N --import-seam-points response.json --strict and normal 3MF export arguments, check the exit status, and return the copied project with G-code plus the separate response file. Do not use --load-slicedata or --slice 0. No seam metadata is stored in 3MF; reconnect the separate response for future reslicing. Restrict changes to seam placement. If paths are absent, guide the user through manual export/import.)PROMPT";
 }
 } // namespace Slic3r::AISeamPlacement
