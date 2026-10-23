@@ -310,8 +310,8 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
 int64_t ceil_div(int64_t numerator, int64_t divisor) { return numerator >= 0 ? (numerator + divisor - 1) / divisor : -(-numerator / divisor); }
 
 // Calls `visit` for every layer of the set within [1, count]. With literals up to rule_number_limit, every
-// value below stays within +-(count + 3 * rule_number_limit): a formula starts at most one step k above
-// count or below 1, a range or parity loop ends at most one step above count.
+// value below stays within +-(count + 3 * rule_number_limit): a formula starts at b or within one step k
+// of 1 or count, and every loop stops at most one step past its bound.
 template<class Visit>
 void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<size_t> &object_layers, Visit &&visit)
 {

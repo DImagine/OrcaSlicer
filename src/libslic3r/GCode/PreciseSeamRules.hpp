@@ -101,7 +101,8 @@ struct LayerNumbering {
     std::vector<size_t> numbered_layers() const;
 };
 
-// Layer numbering is built only for objects with Precise Seam volumes; other objects export as before.
+// Layer numbering is needed only when the plate has Precise Seam volumes: by object, only for those
+// objects; by layer, for the whole plate.
 inline bool has_precise_seam_volumes(const ModelObject &object)
 {
     return std::any_of(object.volumes.begin(), object.volumes.end(), [](const ModelVolume *volume) { return volume->is_precise_seam(); });
