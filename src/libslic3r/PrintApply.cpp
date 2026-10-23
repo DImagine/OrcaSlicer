@@ -111,6 +111,7 @@ static inline void model_volume_list_copy_configs(ModelObject &model_object_dst,
         assert(mv_src.id() == mv_dst.id());
         // Copy the ModelVolume data.
         mv_dst.name   = mv_src.name;
+        mv_dst.precise_seam_rules = mv_src.precise_seam_rules;
 		mv_dst.config.assign_config(mv_src.config);
         assert(mv_dst.supported_facets.id() == mv_src.supported_facets.id());
         mv_dst.supported_facets.assign(mv_src.supported_facets);
@@ -1869,7 +1870,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 update_apply_status(false);
                 // Invalidate seam placement (affects G-code export).
                 update_apply_status(this->invalidate_step(psGCodeExport));
-            } else if (model_custom_seam_data_changed(model_object, model_object_new)) {
+            } else if (model_custom_seam_data_changed(model_object, model_object_new) ||
+                       model_precise_seam_rules_changed(model_object, model_object_new)) {
+                // Layer rules change only the seam placement, without slicing again.
                 update_apply_status(this->invalidate_step(psGCodeExport));
             }
             // Synchronize both families once, after cancellation and all affected-step invalidations.

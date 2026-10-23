@@ -1,0 +1,443 @@
+#include "PreciseSeamRules.hpp"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+#include "libslic3r/Model.hpp"
+
+namespace Slic3r {
+namespace PreciseSeam {
+
+namespace {
+
+constexpr std::string_view open_marker  = "-^ps=";
+constexpr std::string_view close_marker = "=ps^-";
+
+// ASCII only and independent of the locale, as the language is defined over ASCII.
+char ascii_lower(char c) { return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c; }
+bool is_ascii_space(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f'; }
+
+// Markers are matched without case so that names typed in CAD keep working.
+bool marker_at(std::string_view text, size_t pos, std::string_view marker)
+{
+    if (text.size() - pos < marker.size())
+        return false;
+    for (size_t i = 0; i < marker.size(); ++i)
+        if (ascii_lower(text[pos + i]) != marker[i])
+            return false;
+    return true;
+}
+
+struct NameBlocks {
+    std::vector<std::string_view> blocks;
+    std::vector<RuleDiagnostic>   diagnostics;
+};
+
+// Marker diagnostics refer to the name as a whole (name_block 0): a discarded block gets no number.
+NameBlocks extract_name_blocks(std::string_view name)
+{
+    NameBlocks            out;
+    std::optional<size_t> content_begin; // Set while inside a block.
+    for (size_t pos = 0; pos < name.size();) {
+        if (marker_at(name, pos, open_marker)) {
+            // A new opening inside a block discards the started one.
+            if (content_begin)
+                out.diagnostics.push_back({RuleDiagnosticCode::BrokenMarker, {}, 0,
+                                           std::string(name.substr(*content_begin, pos - *content_begin))});
+            pos += open_marker.size();
+            content_begin = pos;
+        } else if (marker_at(name, pos, close_marker)) {
+            if (content_begin) {
+                out.blocks.push_back(name.substr(*content_begin, pos - *content_begin));
+                content_begin.reset();
+            } else
+                out.diagnostics.push_back({RuleDiagnosticCode::BrokenMarker, {}, 0, {}}); // Stray closing marker.
+            pos += close_marker.size();
+        } else
+            ++pos;
+    }
+    if (content_begin) // Unclosed at the end of the name.
+        out.diagnostics.push_back({RuleDiagnosticCode::BrokenMarker, {}, 0, std::string(name.substr(*content_begin))});
+    if (out.blocks.size() > 1)
+        out.diagnostics.push_back({RuleDiagnosticCode::MultipleBlocks, {}, 0, {}});
+    return out;
+}
+
+// Whitespace never separates elements: "1 2" is "12".
+std::string normalize(std::string_view element)
+{
+    std::string out;
+    out.reserve(element.size());
+    for (char c : element)
+        if (!is_ascii_space(c))
+            out.push_back(ascii_lower(c));
+    return out;
+}
+
+std::string_view trim(std::string_view text)
+{
+    while (!text.empty() && is_ascii_space(text.front()))
+        text.remove_prefix(1);
+    while (!text.empty() && is_ascii_space(text.back()))
+        text.remove_suffix(1);
+    return text;
+}
+
+// Reads one normalized element; a rule matches only if it consumes the element completely.
+class Cursor
+{
+public:
+    explicit Cursor(std::string_view text) : m_text(text) {}
+
+    bool done() const { return m_pos == m_text.size(); }
+    bool out_of_range() const { return m_out_of_range; }
+
+    bool eat(std::string_view word)
+    {
+        if (m_text.compare(m_pos, word.size(), word) != 0)
+            return false;
+        m_pos += word.size();
+        return true;
+    }
+    bool eat(char c)
+    {
+        if (done() || m_text[m_pos] != c)
+            return false;
+        ++m_pos;
+        return true;
+    }
+    // One optional dot after a keyword.
+    bool eat_keyword(std::string_view word)
+    {
+        if (!eat(word))
+            return false;
+        eat('.');
+        return true;
+    }
+
+    // Leading zeros are allowed; the value saturates above the limit, which is remembered.
+    std::optional<int64_t> uint()
+    {
+        const size_t begin = m_pos;
+        int64_t      value = 0;
+        while (!done() && m_text[m_pos] >= '0' && m_text[m_pos] <= '9') {
+            value = std::min<int64_t>(value * 10 + (m_text[m_pos] - '0'), rule_number_limit + 1);
+            ++m_pos;
+        }
+        if (m_pos == begin)
+            return std::nullopt;
+        if (value > rule_number_limit)
+            m_out_of_range = true;
+        return value;
+    }
+
+private:
+    std::string_view m_text;
+    size_t           m_pos          = 0;
+    bool             m_out_of_range = false;
+};
+
+// layer_set = uint | uint "-" uint [step] | formula | parity | top | all
+std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
+{
+    using Kind = RuleLayerSet::Kind;
+    if (c.eat_keyword("odd"))
+        return RuleLayerSet{Kind::Odd};
+    if (c.eat_keyword("even"))
+        return RuleLayerSet{Kind::Even};
+    if (c.eat_keyword("all"))
+        return RuleLayerSet{Kind::All};
+    if (c.eat_keyword("top")) {
+        const std::optional<int64_t> k = c.uint();
+        if (!k || *k < 1)
+            return std::nullopt;
+        return RuleLayerSet{Kind::Top, *k};
+    }
+
+    // formula = [ "+" | "-" ], [ uint ], "x", [ ( "+" | "-" ), uint ]
+    int sign = 0;
+    if (c.eat('+'))
+        sign = 1;
+    else if (c.eat('-'))
+        sign = -1;
+    const std::optional<int64_t> lead = c.uint();
+    if (c.eat('x')) {
+        if (lead && *lead == 0) // "0x+5" is a constant, not a formula.
+            return std::nullopt;
+        RuleLayerSet set{Kind::Formula, (sign < 0 ? -1 : 1) * lead.value_or(1), 0};
+        const bool plus = c.eat('+');
+        if (plus || c.eat('-')) {
+            const std::optional<int64_t> b = c.uint();
+            if (!b)
+                return std::nullopt;
+            set.last = plus ? *b : -*b;
+        }
+        return set;
+    }
+    // Layer numbers and ranges are unsigned: "-5" and "+5" are not valid.
+    if (sign != 0 || !lead || *lead < 1)
+        return std::nullopt;
+    RuleLayerSet set{Kind::Range, *lead, *lead};
+    if (c.eat('-')) {
+        const std::optional<int64_t> last = c.uint();
+        if (!last || *last < set.first)
+            return std::nullopt;
+        set.last = *last;
+        if (c.eat_keyword("step")) {
+            const std::optional<int64_t> step = c.uint();
+            if (!step || *step < 1)
+                return std::nullopt;
+            set.step = *step;
+        }
+    }
+    return set;
+}
+
+struct ParsedElement {
+    enum class Kind { Mode, Set, Type, Priority, Off, Nowarn };
+    Kind                        kind;
+    bool                        exclude = false; // Mode only.
+    std::optional<RuleLayerSet> set;             // Mode with a prefixed set, or Set.
+    ModelVolumeType             type     = ModelVolumeType::INVALID;
+    int                         priority = 0;
+};
+
+const std::pair<std::string_view, ModelVolumeType> type_labels[] = {
+    {"center", ModelVolumeType::PRECISE_SEAM_CENTER},  {"left", ModelVolumeType::PRECISE_SEAM_LEFT},
+    {"right", ModelVolumeType::PRECISE_SEAM_RIGHT},    {"green", ModelVolumeType::PRECISE_SEAM_ENFORCED},
+    {"red", ModelVolumeType::PRECISE_SEAM_BLOCKED},    {"gray", ModelVolumeType::PRECISE_SEAM_NEUTRAL},
+    {"grey", ModelVolumeType::PRECISE_SEAM_NEUTRAL},
+};
+
+// No keyword of the language is a prefix of another, so the first matching keyword decides the rule.
+std::optional<ParsedElement> parse_element(Cursor &c)
+{
+    using Kind = ParsedElement::Kind;
+    const bool incl = c.eat_keyword("incl");
+    if (incl || c.eat_keyword("excl")) {
+        ParsedElement element{Kind::Mode, !incl};
+        if (!c.done() && !(element.set = parse_layer_set(c)))
+            return std::nullopt;
+        return element;
+    }
+    for (const auto &[label, type] : type_labels)
+        if (c.eat_keyword(label)) {
+            ParsedElement element{Kind::Type};
+            element.type = type;
+            return element;
+        }
+    if (c.eat_keyword("pr")) {
+        const bool                   negative = c.eat('-');
+        const std::optional<int64_t> value    = c.uint();
+        if (!value || *value < 1)
+            return std::nullopt;
+        ParsedElement element{Kind::Priority};
+        element.priority = int(negative ? -*value : *value);
+        return element;
+    }
+    if (c.eat_keyword("off"))
+        return ParsedElement{Kind::Off};
+    if (c.eat_keyword("nowarn"))
+        return ParsedElement{Kind::Nowarn};
+    if (std::optional<RuleLayerSet> set = parse_layer_set(c)) {
+        ParsedElement element{Kind::Set};
+        element.set = std::move(set);
+        return element;
+    }
+    return std::nullopt;
+}
+
+// Each source starts in the include mode; sets, type and priority carry over between sources.
+void parse_source(LayerRules &rules, std::string_view source_text, const RuleSource &source)
+{
+    bool   exclude = false;
+    size_t index   = 0;
+    for (size_t begin = 0; begin <= source_text.size(); ++index) {
+        const size_t           comma = std::min(source_text.find(',', begin), source_text.size());
+        const std::string_view raw   = trim(source_text.substr(begin, comma - begin));
+        begin                        = comma + 1;
+
+        const std::string normalized = normalize(raw);
+        if (normalized.empty())
+            continue;
+        const size_t element_index = index + 1;
+        Cursor       cursor(normalized);
+        std::optional<ParsedElement> element = parse_element(cursor);
+        // A malformed element changes nothing, not even the mode.
+        if (!element || !cursor.done() || cursor.out_of_range()) {
+            rules.diagnostics.push_back({cursor.out_of_range() ? RuleDiagnosticCode::NumberOutOfRange :
+                                                                 RuleDiagnosticCode::InvalidElement,
+                                         source, element_index, std::string(raw)});
+            continue;
+        }
+        const auto add_set = [&](const RuleLayerSet &set) {
+            rules.operations.push_back({exclude, set, source, element_index, std::string(raw)});
+        };
+        switch (element->kind) {
+        case ParsedElement::Kind::Mode:
+            exclude = element->exclude;
+            if (element->set)
+                add_set(*element->set);
+            break;
+        case ParsedElement::Kind::Set: add_set(*element->set); break;
+        case ParsedElement::Kind::Type:
+            // The first label stays in effect; repeating the same type is not a conflict.
+            if (!rules.type)
+                rules.type = element->type;
+            else if (*rules.type != element->type)
+                rules.diagnostics.push_back({RuleDiagnosticCode::TypeConflict, source, element_index, std::string(raw)});
+            break;
+        case ParsedElement::Kind::Priority:
+            if (!rules.priority)
+                rules.priority = element->priority;
+            else if (*rules.priority != element->priority)
+                rules.diagnostics.push_back({RuleDiagnosticCode::PriorityConflict, source, element_index, std::string(raw)});
+            break;
+        case ParsedElement::Kind::Off: rules.off = true; break;
+        case ParsedElement::Kind::Nowarn: rules.nowarn = true; break;
+        }
+    }
+}
+
+// Rounds towards positive infinity for a positive divisor.
+int64_t ceil_div(int64_t numerator, int64_t divisor) { return numerator >= 0 ? (numerator + divisor - 1) / divisor : -(-numerator / divisor); }
+
+// Calls `visit` for every layer of the set within [1, count]. Literals are bounded by rule_number_limit
+// and the visited values by count, so the arithmetic below cannot overflow.
+template<class Visit>
+void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<size_t> &object_layers, Visit &&visit)
+{
+    using Kind = RuleLayerSet::Kind;
+    switch (set.kind) {
+    case Kind::Range:
+        for (int64_t layer = set.first; layer <= std::min(set.last, count); layer += set.step)
+            visit(layer);
+        break;
+    case Kind::Odd:
+    case Kind::Even:
+        for (int64_t layer = set.kind == Kind::Odd ? 1 : 2; layer <= count; layer += 2)
+            visit(layer);
+        break;
+    case Kind::All:
+        for (int64_t layer = 1; layer <= count; ++layer)
+            visit(layer);
+        break;
+    case Kind::Top: {
+        // The highest numbered layers of this object, regardless of taller objects on the plate.
+        auto end = std::upper_bound(object_layers.begin(), object_layers.end(), size_t(count));
+        for (auto it = end - std::min<int64_t>(set.first, end - object_layers.begin()); it != end; ++it)
+            if (*it >= 1)
+                visit(int64_t(*it));
+        break;
+    }
+    case Kind::Formula: {
+        // Only x >= 0 whose value k*x+b falls into [1, count] is visited, without scanning from x = 0.
+        const int64_t k = set.first, b = set.last;
+        if (k > 0) {
+            for (int64_t layer = k * std::max<int64_t>(0, ceil_div(1 - b, k)) + b; layer <= count; layer += k)
+                visit(layer);
+        } else {
+            for (int64_t layer = b - (-k) * std::max<int64_t>(0, ceil_div(b - count, -k)); layer >= 1; layer += k)
+                visit(layer);
+        }
+        break;
+    }
+    }
+}
+
+} // namespace
+
+LayerRules parse_layer_rules(std::string_view volume_name, std::string_view field)
+{
+    LayerRules rules;
+    NameBlocks name = extract_name_blocks(volume_name);
+    rules.diagnostics = std::move(name.diagnostics);
+    for (size_t i = 0; i < name.blocks.size(); ++i)
+        parse_source(rules, name.blocks[i], {false, i + 1});
+    parse_source(rules, field, {true, 0});
+    return rules;
+}
+
+LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const std::vector<size_t> &object_layers)
+{
+    LayerSelection selection;
+    selection.layers.assign(layer_count + 1, false);
+    if (rules.off)
+        return selection;
+    // Without any valid set the modifier keeps its behaviour on every layer.
+    // Otherwise the mode of the first valid set picks the initial set: all layers for exclusion.
+    if (!rules.restricts_layers() || rules.operations.front().exclude)
+        std::fill(selection.layers.begin() + 1, selection.layers.end(), true);
+    const int64_t count = int64_t(layer_count);
+    for (const RuleLayerOperation &operation : rules.operations) {
+        bool any = false;
+        for_each_layer(operation.set, count, object_layers, [&](int64_t layer) {
+            selection.layers[size_t(layer)] = !operation.exclude;
+            any                             = true;
+        });
+        if (!any)
+            selection.diagnostics.push_back({RuleDiagnosticCode::EmptySet, operation.source, operation.element, operation.text});
+    }
+    return selection;
+}
+
+std::vector<size_t> LayerNumbering::numbered_layers() const
+{
+    std::vector<size_t> out;
+    for (size_t number : object_layers)
+        if (number != 0)
+            out.push_back(number);
+    // Numbers grow with the object layers; sorting only guards the contract of select_layers().
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+EffectiveOrder effective_order(const std::vector<RuledModifier> &modifiers)
+{
+    EffectiveOrder order;
+    for (size_t i = 0; i < modifiers.size(); ++i) {
+        const RuledModifier &modifier = modifiers[i];
+        if (modifier.rules->off)
+            continue;
+        const ModelVolumeType type = modifier.effective_type();
+        (is_precise_seam_strong(type) ? order.strong : order.weak).push_back(i);
+        if (type != modifier.actual && !modifier.rules->nowarn)
+            order.type_changed.push_back(i);
+    }
+    // pr1, pr2, ... first, then volumes without priority, then pr-1, pr-2, ...
+    const auto rank = [&modifiers](size_t i) -> std::pair<int, int> {
+        const std::optional<int> &priority = modifiers[i].rules->priority;
+        if (!priority)
+            return {1, 0};
+        return *priority > 0 ? std::pair{0, *priority} : std::pair{2, -*priority};
+    };
+    std::vector<bool> reordered(modifiers.size(), false);
+    for (std::vector<size_t> *group : {&order.strong, &order.weak}) {
+        // The group is collected in input order, so a stable sort breaks ties by the input index.
+        const std::vector<size_t> tree = *group;
+        std::stable_sort(group->begin(), group->end(), [&rank](size_t a, size_t b) { return rank(a) < rank(b); });
+        // A pair whose order differs from the tree reports its members that carry a priority.
+        std::vector<size_t> position(modifiers.size());
+        for (size_t p = 0; p < group->size(); ++p)
+            position[(*group)[p]] = p;
+        for (size_t a = 0; a < tree.size(); ++a)
+            for (size_t b = a + 1; b < tree.size(); ++b)
+                if (position[tree[b]] < position[tree[a]])
+                    for (size_t i : {tree[a], tree[b]})
+                        if (modifiers[i].rules->priority && !modifiers[i].rules->nowarn)
+                            reordered[i] = true;
+    }
+    for (size_t i = 0; i < modifiers.size(); ++i)
+        if (reordered[i])
+            order.reordered.push_back(i);
+    return order;
+}
+
+} // namespace PreciseSeam
+} // namespace Slic3r

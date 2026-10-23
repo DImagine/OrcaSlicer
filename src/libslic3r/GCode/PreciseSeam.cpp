@@ -1,6 +1,7 @@
 // Precise Seam implementation. Design: docs/HLSD/precise-seam.md
 #include "PreciseSeam.hpp"
 #include "PreciseSeamInternal.hpp"
+#include "PreciseSeamRules.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Point.hpp"
@@ -536,31 +537,72 @@ void init_precise_seam_data(
     std::vector<const ModelVolume*>& strong_volumes_out,
     std::vector<const ModelVolume*>& weak_volumes_out,
     bool& has_strong_out,
-    const ModelObject* model_object)
+    const ModelObject* model_object,
+    const LayerNumbering &numbering,
+    EffectiveModifiers &effective_out,
+    std::vector<ModifierDiagnostic> &diagnostics_out)
 {
-    // Clear output vectors
     strong_volumes_out.clear();
     weak_volumes_out.clear();
-
-    if (model_object == nullptr) {
-        has_strong_out = false;
+    effective_out.clear();
+    has_strong_out = false;
+    if (model_object == nullptr)
         return;
-    }
 
-    // Collect and categorize precise seam modifiers
-    for (const ModelVolume* volume : model_object->volumes) {
+    // Rules are parsed once per volume, before the parallel layer processing.
+    std::vector<const ModelVolume*> volumes;
+    std::vector<LayerRules>         rules;
+    for (const ModelVolume* volume : model_object->volumes)
         if (volume->is_precise_seam()) {
-            // Strong (Center/Left/Right) and weak (Enforced/Blocked/Neutral) go to separate lists.
-            if (volume->is_precise_seam_strong())
-                strong_volumes_out.push_back(volume);
-            else
-                weak_volumes_out.push_back(volume);
+            volumes.push_back(volume);
+            rules.push_back(parse_layer_rules(volume->name, volume->precise_seam_rules));
         }
-    }
+    std::vector<RuledModifier> ruled;
+    for (size_t i = 0; i < volumes.size(); ++i)
+        ruled.push_back({volumes[i]->type(), &rules[i]});
+    const EffectiveOrder order = effective_order(ruled);
 
+    // Layers of each volume, with its diagnostics in volume order. An empty row means every layer;
+    // nullopt leaves the volume out: switched off, or its rules exclude every layer of this object.
+    const std::vector<size_t> numbered = numbering.numbered_layers();
+    std::vector<std::optional<std::vector<bool>>> layers(volumes.size());
+    for (size_t i = 0; i < volumes.size(); ++i) {
+        for (const RuleDiagnostic &diagnostic : rules[i].diagnostics)
+            diagnostics_out.push_back({volumes[i], diagnostic});
+        if (rules[i].off)
+            continue;
+        if (!rules[i].restricts_layers()) {
+            layers[i].emplace();
+            continue;
+        }
+        const LayerSelection selection = select_layers(rules[i], numbering.count, numbered);
+        for (const RuleDiagnostic &diagnostic : selection.diagnostics)
+            diagnostics_out.push_back({volumes[i], diagnostic});
+        std::vector<bool> row(numbering.object_layers.size(), false);
+        bool              any = false;
+        for (size_t layer = 0; layer < row.size(); ++layer) {
+            row[layer] = selection.contains(numbering.object_layers[layer]);
+            any        = any || row[layer];
+        }
+        if (any)
+            layers[i] = std::move(row);
+    }
+    for (size_t i : order.type_changed)
+        diagnostics_out.push_back({volumes[i], {RuleDiagnosticCode::TypeDiffersFromTree, {}, 0, {}}});
+    for (size_t i : order.reordered)
+        diagnostics_out.push_back({volumes[i], {RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}}});
+
+    const auto collect = [&](const std::vector<size_t> &group, std::vector<const ModelVolume*> &out) {
+        for (size_t i : group)
+            if (layers[i]) {
+                effective_out.emplace(volumes[i], EffectiveModifier{ruled[i].effective_type(), std::move(*layers[i])});
+                out.push_back(volumes[i]);
+            }
+    };
+    collect(order.strong, strong_volumes_out);
+    collect(order.weak, weak_volumes_out);
     has_strong_out = !strong_volumes_out.empty();
 
-    // Collection already preserves model order, with higher-priority strong modifiers first.
     // Weak modifiers use last-write-wins, so apply the higher-priority ones last.
     std::reverse(weak_volumes_out.begin(), weak_volumes_out.end());
 }
@@ -673,15 +715,31 @@ static void refine_at_vertex(
     }
 }
 
+// Without rules (e.g. in tests) every modifier keeps its own type on every layer.
+static ModelVolumeType effective_type(const EffectiveModifiers *effective, const ModelVolume *modifier)
+{
+    if (effective != nullptr)
+        if (const auto it = effective->find(modifier); it != effective->end())
+            return it->second.type;
+    return modifier->type();
+}
+static bool active_on_layer(const EffectiveModifiers *effective, const ModelVolume *modifier, size_t layer_id)
+{
+    if (effective != nullptr)
+        if (const auto it = effective->find(modifier); it != effective->end())
+            return it->second.active_on(layer_id);
+    return true;
+}
+
 // Records one extraction for the warnings: the type of a modifier with a discarded fragment, the
 // evaluated/reached flags for "had no effect" (a discarded fragment counts as reached, a contact not).
-static void record_extraction(PreciseSeamWarnings *warnings, const ModelVolume *modifier,
+static void record_extraction(PreciseSeamWarnings *warnings, const ModelVolume *modifier, ModelVolumeType type,
                               const SegmentExtraction &extracted)
 {
     if (warnings == nullptr || !extracted.valid)
         return;
     if (extracted.discarded_fragments > 0)
-        PreciseSeamWarnings::mark(warnings->failed_types, modifier->type());
+        PreciseSeamWarnings::mark(warnings->failed_types, type);
     const auto it = warnings->modifier_usage.find(modifier);
     if (it == warnings->modifier_usage.end())
         return;
@@ -698,7 +756,8 @@ std::optional<Point> insert_strong_seam_point(
     const PreparedPerimeter &prepared,
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
-    PreciseSeamWarnings* warnings)
+    PreciseSeamWarnings* warnings,
+    const EffectiveModifiers *effective)
 {
     assert(&prepared.polygon == &polygon);
     if (strong_volumes.empty() || layer == nullptr || !prepared.valid)
@@ -706,22 +765,24 @@ std::optional<Point> insert_strong_seam_point(
     const size_t layer_id = layer->id() - layer->object()->slicing_parameters().raft_layers();
     for (const ModelVolume *modifier : strong_volumes) {
         const auto it = slices_cache.find(modifier);
-        if (it == slices_cache.end() || layer_id >= it->second.size())
+        // Layer rules filter before any usage is recorded: an excluded layer is not "no effect".
+        if (it == slices_cache.end() || layer_id >= it->second.size() || !active_on_layer(effective, modifier, layer_id))
             continue;
+        const ModelVolumeType type = effective_type(effective, modifier);
         const SegmentExtraction extracted = extract_perimeter_segments(
-            prepared, it->second[layer_id], modifier->type(), {layer, modifier, warnings});
-        record_extraction(warnings, modifier, extracted);
+            prepared, it->second[layer_id], type, {layer, modifier, warnings});
+        record_extraction(warnings, modifier, type, extracted);
         // Full containment leaves no intersection to place the point on: skipped with a warning.
         if (extracted.full_containment) {
             if (warnings)
-                PreciseSeamWarnings::mark(warnings->full_containment, modifier->type());
+                PreciseSeamWarnings::mark(warnings->full_containment, type);
             continue;
         }
         // No usable segment, even if all fragments were discarded: pass the turn to the next modifier.
         if (extracted.segments.empty())
             continue;
         if (warnings && extracted.segments.size() > 1)
-            PreciseSeamWarnings::mark(warnings->multiple_intersections, modifier->type());
+            PreciseSeamWarnings::mark(warnings->multiple_intersections, type);
 
         // Lengths are compared exactly: for a symmetric modifier the chosen face may alternate between
         // layers, which is accepted (the user gets the multiple-intersections warning).
@@ -932,7 +993,8 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const PreparedPerimeter &prepared,
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
-    PreciseSeamWarnings* warnings)
+    PreciseSeamWarnings* warnings,
+    const EffectiveModifiers *effective)
 {
     assert(&prepared.polygon == &polygon);
     std::vector<WeakModifierSegment> result;
@@ -944,12 +1006,13 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const size_t layer_id = layer->id() - raft_layers;
     for (const ModelVolume *modifier_volume : weak_volumes) {
         const auto it = slices_cache.find(modifier_volume);
-        if (it == slices_cache.end() || layer_id >= it->second.size())
+        if (it == slices_cache.end() || layer_id >= it->second.size() || !active_on_layer(effective, modifier_volume, layer_id))
             continue;
+        const ModelVolumeType volume_type = effective_type(effective, modifier_volume);
         const ExtractionContext context{layer, modifier_volume, warnings};
-        const SegmentExtraction extracted = extract_perimeter_segments(prepared, it->second[layer_id], modifier_volume->type(), context);
-        record_extraction(warnings, modifier_volume, extracted);
-        const auto type = convert_weak_modifier_type(modifier_volume->type());
+        const SegmentExtraction extracted = extract_perimeter_segments(prepared, it->second[layer_id], volume_type, context);
+        record_extraction(warnings, modifier_volume, volume_type, extracted);
+        const auto type = convert_weak_modifier_type(volume_type);
         // Full containment works like seam painting all round: the whole perimeter takes the type.
         // A perimeter left whole Blocked also gets a warning (see apply_weak_modifiers_to_perimeter()).
         if (extracted.full_containment) {

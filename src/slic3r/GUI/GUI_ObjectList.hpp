@@ -459,6 +459,9 @@ public:
     void instances_to_separated_objects(const int obj_idx);
     void split_instances();
     void rename_item();
+    // Layer rules field of the single selected Precise Seam volume.
+    bool can_edit_precise_seam_rules() const;
+    void edit_precise_seam_rules();
     void fix_through_cgal();
     // Fixes every object on the selected plate, or on all plates.
     void fix_all_through_cgal(bool all_plates);

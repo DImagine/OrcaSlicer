@@ -76,6 +76,7 @@
 #include <wx/chartype.h>
 #include <wx/dataobj.h>
 #include <wx/dnd.h>
+#include <wx/textdlg.h>
 #include <wx/busycursor.h>
 #include <wx/msgdlg.h>
 #include <wx/accel.h>
@@ -1240,6 +1241,9 @@ void ObjectList::update_name_in_model(const wxDataViewItem& item) const
 
     const std::string previous_name = obj->volumes[volume_id]->name;
     obj->volumes[volume_id]->name = name;
+    // The name of a Precise Seam volume may hold layer rules, which the G-code export reads.
+    if (obj->volumes[volume_id]->is_precise_seam())
+        wxGetApp().plater()->schedule_background_process();
 
     LifecycleEventContext ctx;
     ctx.name = name;
@@ -6275,6 +6279,49 @@ void ObjectList::split_instances()
                                     std::set<int>{ inst_idx };
 
     instances_to_separated_object(obj_idx, inst_idxs);
+}
+
+// The single selected volume if it is Precise Seam, otherwise nullptr.
+static ModelVolume *selected_precise_seam_volume(const ObjectList &list, const ObjectDataViewModel &model)
+{
+    const wxDataViewItem item = list.GetSelection();
+    if (!item || !(model.GetItemType(item) & itVolume))
+        return nullptr;
+    const int obj_idx = model.GetObjectIdByItem(item);
+    const int vol_idx = model.GetVolumeIdByItem(item);
+    if (obj_idx < 0 || vol_idx < 0 || size_t(vol_idx) >= list.object(obj_idx)->volumes.size())
+        return nullptr;
+    ModelVolume *volume = list.object(obj_idx)->volumes[vol_idx];
+    return volume->is_precise_seam() ? volume : nullptr;
+}
+
+bool ObjectList::can_edit_precise_seam_rules() const
+{
+    return GetSelectedItemsCount() == 1 && selected_precise_seam_volume(*this, *m_objects_model) != nullptr;
+}
+
+void ObjectList::edit_precise_seam_rules()
+{
+    if (!can_edit_precise_seam_rules())
+        return;
+    ModelVolume *volume = selected_precise_seam_volume(*this, *m_objects_model);
+    // TRN: Help for the Precise Seam layer rules field. Keep the rule keywords untranslated.
+    wxTextEntryDialog dialog(this, _L("Comma-separated rules, applied from left to right:\n"
+                                      "layers: 5, 10-20, 10-20step3, 3x+1, odd, even, top5, all\n"
+                                      "mode: incl (default), excl\n"
+                                      "type: center, left, right, green, red, gray\n"
+                                      "priority: pr1 (highest), pr-1 (lowest); off; nowarn\n"
+                                      "The name may hold more rules between -^ps= and =ps^-."),
+                             _L("Precise Seam Layer Rules"), from_u8(volume->precise_seam_rules));
+    if (dialog.ShowModal() != wxID_OK)
+        return;
+    const std::string rules = into_u8(dialog.GetValue());
+    if (rules == volume->precise_seam_rules)
+        return;
+    take_snapshot(_u8L("Edit Precise Seam Layer Rules"));
+    volume->precise_seam_rules = rules;
+    // Rules change only the seam placement; the export step is invalidated when the print is updated.
+    wxGetApp().plater()->schedule_background_process();
 }
 
 void ObjectList::rename_item()

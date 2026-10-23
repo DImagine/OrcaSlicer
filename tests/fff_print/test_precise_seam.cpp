@@ -1072,7 +1072,12 @@ TEST_CASE("Modifier hierarchy keeps strong order and applies the highest weak pr
     const auto *low = fixture.add(low_type, {rectangle(2, -2, 6, 2)});
     std::vector<const ModelVolume*> strong, weak;
     bool has_strong = false;
-    PreciseSeam::init_precise_seam_data(strong, weak, has_strong, fixture.modifiers.objects.front());
+    // Without layer rules every volume keeps its type and its place in the object.
+    PreciseSeam::EffectiveModifiers effective;
+    std::vector<PreciseSeam::ModifierDiagnostic> diagnostics;
+    PreciseSeam::init_precise_seam_data(strong, weak, has_strong, fixture.modifiers.objects.front(),
+                                        PreciseSeam::LayerNumbering{1, {1}}, effective, diagnostics);
+    CHECK(diagnostics.empty());
     REQUIRE(has_strong);
     CHECK(strong == std::vector<const ModelVolume*>{strong_a, strong_b});
     CHECK(weak == std::vector<const ModelVolume*>{low, high});
@@ -1547,4 +1552,83 @@ TEST_CASE("Belt printers slice Precise Seam modifiers in the frame the object wa
         CHECK(std::abs(modifier_area - object_area) < tolerance);
         CHECK(get_extents(slices[i]).inflated(scale_(0.05)).contains(get_extents(islands)));
     }
+}
+
+namespace {
+// Seam x of a loop lies on the front-face helper (x = 4..6 mm, so -6..-4 relative to the centre).
+bool seam_on_front_helper(const OuterLoop &loop)
+{
+    return loop.seam.x() >= -6.01 && loop.seam.x() <= -3.99 &&
+           std::abs(loop.seam.y() - (loop.bounds.min.y() - loop.bounds.center().y())) < 0.01;
+}
+} // namespace
+
+TEST_CASE("Layer rules limit a modifier to the layers numbered as on the preview slider", "[PreciseSeam][Rules]")
+{
+    // With a raft, its two layers take the slider numbers 1 and 2, so the cube starts at layer 3.
+    const auto [raft_layers, rule] = GENERATE(table<int, std::string>({{0, "1-3"}, {2, "3-5"}}));
+    CAPTURE(raft_layers, rule);
+    ExportFixture fixture("back", raft_layers);
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=" + rule + "=ps^-");
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    for (size_t i = 0; i < loops.size(); ++i) {
+        CAPTURE(i, loops[i].seam.x(), loops[i].seam.y());
+        CHECK(seam_on_front_helper(loops[i]) == (i < 3));
+    }
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("The rules field combines with the name and can retype the modifier", "[PreciseSeam][Rules]")
+{
+    // A Blocked volume relabelled Center by its field acts as a strong modifier on even layers only.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=center=ps^-");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "excl, odd";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    for (size_t i = 0; i < loops.size(); ++i) {
+        CAPTURE(i);
+        CHECK(seam_on_front_helper(loops[i]) == (i % 2 == 1)); // Loop i is layer i + 1.
+    }
+    // The type differs from the object list, which is reported once with the modifier name.
+    CHECK(fixture.warning().find("front -^ps=center=ps^-") != std::string::npos);
+}
+
+TEST_CASE("Changing only the rules updates the exported seam", "[PreciseSeam][Rules]")
+{
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front");
+    const auto all_layers = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(all_layers.size() == 10);
+    CHECK(std::all_of(all_layers.begin(), all_layers.end(), seam_on_front_helper));
+
+    // The geometry is unchanged, so only the export step can pick up the new rules.
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "off";
+    const auto switched_off = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(switched_off.size() == 10);
+    CHECK(std::none_of(switched_off.begin(), switched_off.end(), seam_on_front_helper));
+    // A volume switched off by its rules is not reported as having no effect.
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("Each layer rule problem is a separate export warning", "[PreciseSeam][Rules]")
+{
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=bad, 1-3=ps^-");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "500";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    // "500" selects no layer of ten and is applied: the modifier then acts on layers 1-3 only.
+    for (size_t i = 0; i < loops.size(); ++i)
+        CHECK(seam_on_front_helper(loops[i]) == (i < 3));
+    std::vector<std::string> rule_warnings;
+    for (const auto &warning : fixture.print.step_state_with_warnings(psGCodeExport).warnings)
+        if (warning.message.find("rule \"") != std::string::npos)
+            rule_warnings.push_back(warning.message);
+    REQUIRE(rule_warnings.size() == 2);
+    CHECK(rule_warnings[0].find("\"bad\"") != std::string::npos);
+    CHECK(rule_warnings[1].find("\"500\"") != std::string::npos);
+    for (const std::string &warning : rule_warnings)
+        CHECK(warning.find('\n') == std::string::npos);
 }

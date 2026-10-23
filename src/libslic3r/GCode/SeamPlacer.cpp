@@ -54,6 +54,7 @@
 
 #include "libslic3r/Utils.hpp"
 #include "PreciseSeam.hpp"
+#include "PreciseSeamRules.hpp"
 
 //#define DEBUG_FILES
 
@@ -370,6 +371,8 @@ struct GlobalModelInfo {
 
   // Slice each modifier once; both consumers share structured regions and source provenance.
   PreciseSeam::ModifierRegionsCache precise_seam_slices;
+  // Effective type and active layers of the modifiers above, from their layer rules.
+  PreciseSeam::EffectiveModifiers precise_seam_effective;
 
   bool is_enforced(const Vec3f &position, float radius) const {
     if (enforcers.empty()) {
@@ -694,10 +697,12 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
     const PreciseSeam::PreparedPerimeter prepared(polygon);
     seam_point = PreciseSeam::insert_strong_seam_point(
-        strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
+        strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings,
+        &global_model_info.precise_seam_effective);
     if (!seam_point.has_value())
       weak_segments = PreciseSeam::collect_weak_modifier_segments(
-          weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
+          weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings,
+          &global_model_info.precise_seam_effective);
   }
 
   // Store the inserted point position for marking as central_enforcer later.
@@ -2112,13 +2117,17 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
 
 }
 
-void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_canceled_func) {
+void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_canceled_func,
+                      const PreciseSeamNumbering *numbering) {
   using namespace SeamPlacerImpl;
   m_seam_per_object.clear();
   m_precise_seam_warning.clear();
+  m_precise_seam_rule_warnings.clear();
 
   // Warning flags for Precise Seam processing — shared across all objects
   PreciseSeam::PreciseSeamWarnings precise_seam_warnings;
+  // Layer rule diagnostics of all objects; print objects of one model object repeat them.
+  std::vector<PreciseSeam::ModifierDiagnostic> rule_diagnostics;
 
   for (const PrintObject *po : print.objects()) {
     throw_if_canceled_func();
@@ -2128,11 +2137,24 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
     {
       GlobalModelInfo global_model_info { };
       gather_enforcers_blockers(global_model_info, po);
+      PreciseSeam::LayerNumbering own_layers;
+      const PreciseSeam::LayerNumbering *object_numbering = nullptr;
+      if (numbering != nullptr)
+          if (const auto it = numbering->find(po); it != numbering->end())
+              object_numbering = &it->second;
+      if (object_numbering == nullptr) {
+          own_layers.count = po->layers().size();
+          for (size_t i = 0; i < own_layers.count; ++i)
+              own_layers.object_layers.push_back(i + 1);
+      }
       PreciseSeam::init_precise_seam_data(
           global_model_info.precise_seam_strong_volumes,
           global_model_info.precise_seam_weak_volumes,
           m_seam_per_object[po].has_precise_seam_strong_volumes,
-          po->model_object());
+          po->model_object(),
+          object_numbering != nullptr ? *object_numbering : own_layers,
+          global_model_info.precise_seam_effective,
+          rule_diagnostics);
 
       // Slice each Precise Seam modifier once per object; both consumers read the cache.
       for (const ModelVolume* vol : global_model_info.precise_seam_strong_volumes)
@@ -2316,6 +2338,70 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
           m_precise_seam_warning = std::move(warning_text);
       }
   }
+
+  // Layer rule diagnostics: each one is a separate single-line warning, in object, volume, source and
+  // element order. Print objects of one model object report the same diagnostic once.
+  std::vector<std::string> rule_warnings;
+  for (size_t i = 0; i < rule_diagnostics.size(); ++i) {
+      const PreciseSeam::ModifierDiagnostic &entry = rule_diagnostics[i];
+      const PreciseSeam::RuleDiagnostic     &d     = entry.diagnostic;
+      const bool repeated = std::any_of(rule_diagnostics.begin(), rule_diagnostics.begin() + i,
+          [&entry, &d](const PreciseSeam::ModifierDiagnostic &other) {
+              return other.volume == entry.volume && other.diagnostic.code == d.code && other.diagnostic.source == d.source &&
+                     other.diagnostic.element == d.element;
+          });
+      if (repeated)
+          continue;
+      const std::string &volume = entry.volume->name;
+      const std::string &object = entry.volume->get_object()->name;
+      BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamRules] object=\"" << object << "\" modifier=\"" << volume << "\" code=" << int(d.code)
+          << " source=" << (d.source.field ? std::string("field") : "name block " + std::to_string(d.source.name_block))
+          << " element=" << d.element << " text=\"" << d.text << "\"";
+      using Code = PreciseSeam::RuleDiagnosticCode;
+      std::string message;
+      switch (d.code) {
+      case Code::BrokenMarker:
+          // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name.
+          message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\" has a broken rule block in its name, the block was ignored.")) % volume % object).str();
+          break;
+      case Code::MultipleBlocks:
+          // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name.
+          message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\" has several rule blocks in its name, they are applied in order.")) % volume % object).str();
+          break;
+      case Code::InvalidElement:
+          // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text.
+          message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": rule \"%3%\" is not recognized and was ignored.")) % volume % object % d.text).str();
+          break;
+      case Code::NumberOutOfRange:
+          // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text, %4% the largest allowed number.
+          message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": rule \"%3%\" has a number above %4% and was ignored.")) % volume % object % d.text % PreciseSeam::rule_number_limit).str();
+          break;
+      case Code::TypeConflict:
+          // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text.
+          message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": type \"%3%\" differs from the first type in its rules and was ignored.")) % volume % object % d.text).str();
+          break;
+      case Code::PriorityConflict:
+          // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text.
+          message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": priority \"%3%\" differs from the first priority in its rules and was ignored.")) % volume % object % d.text).str();
+          break;
+      case Code::EmptySet:
+          // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text.
+          message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": rule \"%3%\" selects no existing layer.")) % volume % object % d.text).str();
+          break;
+      case Code::TypeDiffersFromTree:
+          // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name.
+          message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\" acts with the type from its rules, not the one in the object list.")) % volume % object).str();
+          break;
+      case Code::OrderDiffersFromTree:
+          // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name.
+          message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\" acts in the order of its rule priority, not its position in the object list.")) % volume % object).str();
+          break;
+      }
+      // Different diagnostics can produce the same text, e.g. two blocks broken the same way.
+      if (std::find(rule_warnings.begin(), rule_warnings.end(), message) == rule_warnings.end())
+          rule_warnings.push_back(std::move(message));
+  }
+  m_precise_seam_rule_warnings = std::move(rule_warnings);
 }
 
 void SeamPlacer::place_seam(const Layer *layer, ExtrusionLoop &loop,

@@ -87,6 +87,58 @@ there.
 A strong modifier without a usable segment, even one whose fragments were all
 discarded, passes the turn to the next one.
 
+Layer rules can override both the type and the place in this order (see
+[Layer rules](#layer-rules)).
+
+## Layer rules
+
+A short language limits a modifier to some layers and can set its type and
+priority. It is read only from Precise Seam volumes, from two sources: blocks
+between `-^ps=` and `=ps^-` in the volume name, so that a CAD model can carry
+the rules through repeated exports, and the volume's rules field
+(`ModelVolume::precise_seam_rules`). Name blocks apply left to right, then the
+field. The parser is `GCode/PreciseSeamRules.cpp`; it has no dependency on the
+print and is tested on its own.
+
+- **Elements.** Elements are separated by commas; whitespace is removed and
+  ASCII letters are lowered first. Layer sets are `N`, `A-B`, `A-BstepS`,
+  `kx+b` (x from 0), `odd`, `even`, `topK` and `all`. `incl` and `excl` switch
+  between adding and subtracting the following sets, and may prefix one set
+  (`excl129-312`). Labels `center`, `left`, `right`, `green`, `red`,
+  `gray`/`grey` set the type; `prN` and `pr-N` set the priority; `off`
+  disables the modifier and `nowarn` silences the warnings about differences
+  from the object list. One dot may follow any keyword.
+- **Atomic elements.** An element that does not match the grammar as a whole,
+  or has a number above 1 000 000, is dropped with a warning and changes
+  nothing, not even the mode. Numbers are bounded before any arithmetic and a
+  formula is evaluated only over the range of x that lands on existing layers.
+- **Evaluation.** Every source starts in `incl` mode; the accumulated set, the
+  type and the priority carry over. The first valid set picks the initial set:
+  every layer in `excl` mode, none otherwise. Without any valid set the
+  modifier acts on every layer, as a volume without rules does. The first type
+  and the first priority win; a different later one is a warning.
+- **Layer numbers.** Rules count the layers as the preview slider does. When
+  printing by layer, every event of the export plan
+  (`GCode::collect_layers_to_print(const Print&)`) whose tools have extruders,
+  or that is a belt brim apron layer, takes the next number, so support-only
+  events take numbers but have no perimeters. When printing by object, the
+  numbers are the object's own events from 1, the same for all its copies,
+  because the copies share one seam cache; from the second object on they
+  differ from the slider. `topK` picks the top K numbered layers of the object
+  itself. The plan is built once before `SeamPlacer::init()` and the export
+  prints that same plan, since collecting it raises warnings and errors.
+- **Effective order.** Volumes are grouped by their effective type. Within a
+  group the order is `pr1, pr2, ...`, then the volumes without priority in
+  object order, then `pr-1, pr-2, ...`; ties keep the object order. The strong
+  group still precedes the weak one, so a priority acts only within its group.
+  The object list and the stored order are never changed.
+- **Application.** `init_precise_seam_data()` resolves the rules of each object
+  once, before the parallel phase, into the effective type and one active flag
+  per object layer for each volume. Extraction skips a modifier on an inactive
+  layer before recording any usage, so a layer excluded by rules is never
+  reported as "no effect". A volume that is off or active on no layer is left
+  out entirely.
+
 ## Data flow
 
 1. **Invalidation.** `Print::apply()` treats a change of Precise Seam volumes as
@@ -110,7 +162,9 @@ discarded, passes the turn to the next one.
 7. **Selection and restoration.** The configured seam position chooses the
    seams and aligns them. Afterwards the exact strong points are restored.
 8. **Warnings.** After all objects are processed, `SeamPlacer::init()` prepares
-   one combined warning text if any problem was found; G-code export issues it.
+   one combined warning text if any problem was found, and one single-line
+   message per layer rule diagnostic; G-code export issues them, each rule
+   message as its own warning so that the export dialog lists every one.
 
 ## Modifier slices
 
@@ -504,6 +558,12 @@ which has no effect on the print. The current reader restores the keys only when
 the volume ends up as a Precise Seam type, so the settings return when the user
 changes the type back.
 
+The layer rules field is written under `precise_seam_rules` whenever it is not
+empty, whatever the volume type, so that it returns with the Precise Seam type.
+Earlier readers drop the key as an unknown option. A release with Precise Seam
+but without rules opens such a project and applies the stored type on every
+layer in object order, so the seam may differ.
+
 ### Print invalidation
 
 `Print::apply()` compares the Precise Seam volumes of each object by type, ID
@@ -524,6 +584,12 @@ cached.
 Removing the last helper of a single-part object reslices it, as removing any
 last modifier would.
 
+The name and the rules field of a Precise Seam volume hold its layer rules, so a
+change of either invalidates `psGCodeExport` as well
+(`model_precise_seam_rules_changed()`), checked before the new data is copied
+into the print's model. The layer numbers come from the export plan and are
+rebuilt on every export.
+
 ### User interface
 
 - *Add Precise Seam* in the object menu creates a Center modifier from a
@@ -540,6 +606,9 @@ last modifier would.
   Right; green, red and gray for Enforced, Blocked and Neutral. The three strong
   colors are close shades of one orange because all three mark strong
   modifiers; the object list icons tell the modes apart.
+- *Precise Seam Layer Rules* in the part menu of a single Precise Seam volume
+  edits its rules field; renaming such a volume also updates the print, since
+  the name may hold rules.
 - Precise Seam volumes have no filament and cannot be pasted into SLA objects.
   Python plugins see them as `ModelVolumeType` values and through the
   `is_precise_seam*()` methods.

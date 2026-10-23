@@ -382,3 +382,29 @@ TEST_CASE("Seam metadata restores only recognized modes on compatible base types
         CHECK_FALSE(helper.config.has("notes"));
     }
 }
+
+TEST_CASE("The layer rules field survives a 3MF round trip, also on a converted volume", "[PreciseSeam3mf]")
+{
+    const auto backend = GENERATE(Backend::Bbs, Backend::Prusa);
+    CAPTURE(int(backend));
+    Scene source;
+    source.populate(true);
+    auto &volumes = source.model.objects.front()->volumes;
+    // Markup characters check the attribute escaping; the text itself need not be valid rules.
+    const std::string rules = "excl, 1-5, \"odd\" & <red>";
+    volumes[1]->precise_seam_rules = rules;
+    // A volume converted to an ordinary modifier keeps its rules for a later return to Precise Seam.
+    volumes[2]->precise_seam_rules = "pr1";
+    volumes[2]->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    ScopedTemporaryFile file(".3mf");
+    save(file.string(), backend, source);
+    Scene destination;
+    load(file.string(), backend, destination);
+    REQUIRE(destination.model.objects.size() == 1);
+    const auto &loaded = destination.model.objects.front()->volumes;
+    REQUIRE(loaded.size() == volumes.size());
+    CHECK(loaded[1]->precise_seam_rules == rules);
+    CHECK(loaded[2]->type() == ModelVolumeType::PARAMETER_MODIFIER);
+    CHECK(loaded[2]->precise_seam_rules == "pr1");
+    CHECK(loaded[3]->precise_seam_rules.empty());
+}

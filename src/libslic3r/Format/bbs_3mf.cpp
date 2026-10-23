@@ -428,6 +428,8 @@ static constexpr const char* PART_TYPE_KEY = "part_type";
 static constexpr const char* PRECISE_SEAM_TYPE_KEY = "precise_seam_type";
 // Preserve dormant settings without turning an older reader's modifier into an active override.
 static constexpr char PRECISE_SEAM_CONFIG_PREFIX[] = "precise_seam_config:";
+// Layer rules field of a volume; kept for any type, as the volume may become Precise Seam again.
+static constexpr const char* PRECISE_SEAM_RULES_KEY = "precise_seam_rules";
 static constexpr const char* MATRIX_KEY = "matrix";
 static constexpr const char* SOURCE_FILE_KEY = "source_file";
 static constexpr const char* SOURCE_OBJECT_ID_KEY = "source_object_id";
@@ -5435,6 +5437,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     volume->set_type(ModelVolume::type_from_string(metadata.value));
                 else if (metadata.key == PRECISE_SEAM_TYPE_KEY)
                     precise_seam_type = ModelVolume::type_from_string(metadata.value);
+                else if (metadata.key == PRECISE_SEAM_RULES_KEY)
+                    volume->precise_seam_rules = metadata.value;
                 else if (boost::starts_with(metadata.key, PRECISE_SEAM_CONFIG_PREFIX))
                     continue; // Restore dormant settings only after the final volume type is known.
                 else if (metadata.key == SOURCE_FILE_KEY)
@@ -8345,6 +8349,9 @@ bool _BBS_3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive& archiv
                             if (volume->is_precise_seam())
                                 stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRECISE_SEAM_TYPE_KEY << "\" " << VALUE_ATTR << "=\"" <<
                                     ModelVolume::type_to_string(volume->type()) << "\"/>\n";
+                            if (!volume->precise_seam_rules.empty())
+                                stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRECISE_SEAM_RULES_KEY << "\" " << VALUE_ATTR << "=\"" <<
+                                    xml_escape(volume->precise_seam_rules) << "\"/>\n";
                             //stream << "    <" << PART_TAG << " " << ID_ATTR << "=\"" << it->second << "\" " << SUBTYPE_ATTR << "=\"" << ModelVolume::type_to_string(volume->type()) << "\">\n";
 
                             // stores volume's name
