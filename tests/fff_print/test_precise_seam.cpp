@@ -2526,7 +2526,7 @@ TEST_CASE("A magnet takes the point of the perimeter nearest to the modifier, wi
     CHECK(magnet_point(perimeter, Polygons{box}) == mm(10, 0));
     CHECK(magnet_point(perimeter, Polygons{box}, 5.) == mm(10, 0));
     CHECK(magnet_point(perimeter, Polygons{box}, 3.) == mm(10, 0));
-    // The limit allows the snapping tolerance of 1 um, not more.
+    // The limit allows the snapping tolerance of 1000 units, 1 um at the default scale, not more.
     CHECK(magnet_point(perimeter, Polygons{box}, 2.9995) == mm(10, 0));
     CHECK_FALSE(magnet_point(perimeter, Polygons{box}, 2.998).has_value());
     CHECK_FALSE(magnet_point(perimeter, Polygons{box}, 2.).has_value());
@@ -2599,6 +2599,23 @@ TEST_CASE("Equally near magnet points go to the loop centroid, then the perimete
         CHECK(magnet_point(rotated(right_heavy_l(), shift), loops) == mm(17, 0));
         CHECK(magnet_point(rotated(right_heavy_l(), shift), loops, 1.9995) == mm(3, 0));
     }
+}
+
+TEST_CASE("A centroid projection within the limit is found although the tree truncates the query point", "[PreciseSeam][Magnet]")
+{
+    // Coordinates in units. The perimeter edge lies on 2x + 3y = 4164 and the nearest modifier edge on
+    // 2x + 3y = 4164000. The loop centroid (1041, 1041) projects onto the perimeter at (11451, 10410) / 13,
+    // 4159836 / sqrt(13) = 1153730.92 units from the modifier, within the limit plus the 1000-unit tolerance.
+    // Truncated to (880, 800) it is 1153732.03 away, beyond a margin of one unit.
+    Polygon       perimeter(Points{Point(-310218, 208200), Point(0, -100000), Point(314382, -208200)});
+    const Polygon loop(Points{Point(-10410000, 8328000), Point(-4160877, 3123), Point(14574000, -8328000)});
+    const size_t  shift = GENERATE(0, 1, 2);
+    CAPTURE(shift);
+    perimeter = rotated(perimeter, shift);
+    const auto found = PreciseSeam::find_magnet_point(PreciseSeam::PreparedPerimeter(perimeter),
+                                                      PreciseSeam::prepare_modifier_regions(ExPolygons{ExPolygon(loop)}), 1152731.);
+    REQUIRE(found.has_value());
+    CHECK(found->point == Point(881, 801));
 }
 
 TEST_CASE("A strong magnet places the seam where it does not cross the perimeter, and acts by its type where it does", "[PreciseSeam][Magnet]")
@@ -2676,7 +2693,8 @@ TEST_CASE("The rules give a magnet its limit in scaled units, a touch and no lim
     CHECK(init.effective.at(any).magnet);
     CHECK_FALSE(init.effective.at(any).magnet_limit.has_value());
     CHECK(init.effective.at(touch).magnet_limit == 0.);
-    // One nanometre stays a positive limit below one coordinate unit, not a touch and not unlimited.
+    // One nanometre stays a positive limit, not a touch and not unlimited: one coordinate unit at the default
+    // scale, a tenth of one on large beds, where a whole-unit limit would round it to zero.
     REQUIRE(init.effective.at(tiny).magnet_limit.has_value());
     CHECK_THAT(*init.effective.at(tiny).magnet_limit, Catch::Matchers::WithinRel(scale_(0.000001), 1e-9));
     CHECK(*init.effective.at(tiny).magnet_limit > 0.);

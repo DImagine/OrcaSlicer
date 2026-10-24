@@ -626,8 +626,9 @@ std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, 
     if (nearest == infinity || (limit && nearest > *limit + tolerance))
         return std::nullopt;
     const double threshold = std::min(nearest, limit ? *limit : infinity) + tolerance;
-    // Tree queries take a slightly larger radius; every hit is then checked exactly against the threshold.
-    const double search = (threshold + 1.) * (threshold + 1.);
+    // The tree truncates a query point to whole units on both axes, which moves it by up to sqrt(2): queries
+    // take a radius 2 units larger, and every hit is then checked exactly against the threshold.
+    const double search = (threshold + 2.) * (threshold + 2.);
 
     // Stage 2: every point of the minimum, each with the loops it is that near to.
     struct Candidate {

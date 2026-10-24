@@ -217,7 +217,8 @@ print and is tested on its own.
   the usual insertion, whatever its Center, Left or Right type; a weak one is a
   zone of that single point, with boundaries at one vertex, so it types one
   candidate and no edge is subdivided. With `magnetN` a perimeter farther than
-  N, compared with the 1 µm snapping tolerance, is left to the next modifier;
+  N, compared with the snapping tolerance (`TOLERANCE_LINEAR`, 1000 units: 1 µm,
+  10 µm on large beds), is left to the next modifier;
   `magnet0` thus takes a touch, which on an inclined edge computes slightly
   above zero. The modifier still needs a slice on the layer.
   `find_magnet_point()` first finds the minimum distance from vertex queries in
@@ -234,11 +235,14 @@ print and is tested on its own.
   when some candidate has no loop with an area), the distance to the centroid of
   the perimeter, and finally the bed axes, rear then left, exactly as for equal
   strong segments, so far regions of the modifier and the start of the
-  perimeter do not move the point. The cost is two tree builds per perimeter
-  and modifier, the vertex queries, and the hits within the distance, which
-  grow only for nearly equidistant shapes. A magnet counts as reaching a
-  perimeter only where it finds a point, and full containment gives it no
-  warning. Relay groups take magnets as they are: a found point is a win.
+  perimeter do not move the point. Radius queries take 2 units more than the
+  distance, as the tree truncates a query point to whole units, and every hit
+  is checked exactly. The cost is two tree builds per perimeter and modifier,
+  the vertex queries, the hits within the distance in both directions and one
+  check per pair of edge and loop for the centroid projections; the hits grow
+  for nearly equidistant shapes and for many short or repeated boundaries. A
+  magnet reaches a perimeter where it finds a point or, on a crossing, acts by
+  its type; full containment gives it no warning. Relay groups take magnets as they are: a found point is a win.
 - **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
   `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, and runs
