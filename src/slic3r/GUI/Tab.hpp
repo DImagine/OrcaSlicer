@@ -667,6 +667,9 @@ public:
 	TabPrintPart(ParamsPanel* parent);
 	~TabPrintPart();
 	void build() override;
+	void clear_pages() override;
+	void msw_rescale() override;
+	void sys_color_changed() override;
 	PreciseSeamRulesEditor &precise_seam_rules() { return *m_precise_seam_rules; }
 protected:
 	virtual void    notify_changed(ObjectBase * object) override;

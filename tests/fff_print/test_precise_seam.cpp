@@ -2744,7 +2744,7 @@ TEST_CASE("Magnet relay members take the seam in turn", "[PreciseSeam][Rules][Re
 }
 
 // Expected holders come from _myDocs/_relay/26.10.24_ps-seed-ui/relay_seed_oracle.py.
-TEST_CASE("A relay-random seed of any member, even one without layers, changes the holders", "[PreciseSeam][Rules][Relay]")
+TEST_CASE("A strong relay-random group takes the seeds of its members, one without layers included", "[PreciseSeam][Rules][Relay]")
 {
     // A, B and C as in the relay-random test above; D follows C in the queue, and its rules exclude every layer.
     const auto [seeds, expected] = GENERATE(table<std::vector<std::string>, std::vector<int>>({

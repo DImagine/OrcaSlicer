@@ -35,6 +35,8 @@ public:
     // The volume whose rules the fields show; nullptr hides them. A pending edit goes to its own volume first.
     void set_volume(const ModelVolume *volume);
     bool shown() const { return m_volume.valid(); }
+    // Typed text not applied yet; saving and closing must see it as a change.
+    bool pending() const { return m_edited.valid(); }
 
     // Builds one copy of the field; pages build them lazily and destroy them when another page is shown.
     wxSizer *create(wxWindow *parent);
@@ -45,9 +47,12 @@ public:
     void reset_from_model();
     // Shows the accepted text, or the pending edit of the shown volume.
     void refresh();
+    // Height and colours of the live copies after a DPI or a theme change.
+    void rescale();
 
 private:
     void show(const std::string &text);
+    void fit(wxTextCtrl *text) const;
 
     ObjectID                         m_volume;  // Volume shown; invalid when hidden.
     ObjectID                         m_edited;  // Volume of the pending edit; invalid without one.
@@ -59,6 +64,7 @@ private:
 // The editor of the part settings tab, for callers outside the tab; no-ops before the tab exists.
 void commit_precise_seam_rules_edit();
 void reset_precise_seam_rules_edit();
+bool precise_seam_rules_edit_pending();
 
 } // namespace GUI
 } // namespace Slic3r

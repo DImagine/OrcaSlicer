@@ -51,7 +51,7 @@ wxString precise_seam_rules_help()
               "magnet, magnet2.5: where the modifier does not cross a wall, it acts on the point nearest to it; within 2.5 mm if given, magnet0 on a touch\n"
               "idName: a name for scripts; the rules ignore it\n"
               "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
-              "Heights are measured from the bed, as on the slider. Decimals take a point: a comma separates rules.\n"
+              "Heights are measured from the bed by default, as on the slider. Decimals take a point: a comma separates rules.\n"
               "The name may hold more rules between -^ps= and =ps^-; override as the first rule here ignores them.");
 }
 
@@ -74,8 +74,11 @@ bool apply_precise_seam_rules(ObjectID volume_id, const std::string &rules)
 void PreciseSeamRulesEditor::set_volume(const ModelVolume *volume)
 {
     const ObjectID id = volume ? volume->id() : ObjectID();
-    if (id == m_volume)
+    // The same volume may hold other rules now, after undo or redo; refresh() keeps a pending edit.
+    if (id == m_volume) {
+        refresh();
         return;
+    }
     commit_pending();
     m_volume = id;
     refresh();
@@ -84,11 +87,9 @@ void PreciseSeamRulesEditor::set_volume(const ModelVolume *volume)
 wxSizer *PreciseSeamRulesEditor::create(wxWindow *parent)
 {
     auto *text = new wxTextCtrl(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE);
-    // Three lines of the current font: long rules wrap and scroll instead of growing the page.
-    text->SetMinSize(wxSize(-1, 3 * text->GetCharHeight() + parent->FromDIP(10)));
+    fit(text);
     text->SetToolTip(_L("Precise Seam rules of this volume; the group title shows the help. "
                         "They apply when the field loses focus or on Ctrl+Enter."));
-    wxGetApp().UpdateDarkUI(text);
 
     // ChangeValue() sends no text event, so only typing reaches here.
     text->Bind(wxEVT_TEXT, [this, text](wxCommandEvent &) {
@@ -152,6 +153,20 @@ void PreciseSeamRulesEditor::refresh()
     show(volume ? volume->precise_seam_rules : std::string());
 }
 
+void PreciseSeamRulesEditor::rescale()
+{
+    for (wxTextCtrl *field : m_fields)
+        if (field != nullptr)
+            fit(field);
+}
+
+void PreciseSeamRulesEditor::fit(wxTextCtrl *text) const
+{
+    // Three lines of the current font: long rules wrap and scroll instead of growing the page.
+    text->SetMinSize(wxSize(-1, 3 * text->GetCharHeight() + text->FromDIP(10)));
+    wxGetApp().UpdateDarkUI(text);
+}
+
 void PreciseSeamRulesEditor::show(const std::string &text)
 {
     const wxString value = from_u8(text);
@@ -173,6 +188,12 @@ void reset_precise_seam_rules_edit()
 {
     if (PreciseSeamRulesEditor *editor = part_editor())
         editor->reset_from_model();
+}
+
+bool precise_seam_rules_edit_pending()
+{
+    const PreciseSeamRulesEditor *editor = part_editor();
+    return editor != nullptr && editor->pending();
 }
 
 } // namespace GUI

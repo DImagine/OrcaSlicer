@@ -16,7 +16,7 @@
 namespace Slic3r {
 namespace PreciseSeam {
 
-// Every numeric literal must not exceed this value; larger ones invalidate their element.
+// Every numeric literal but a relay-random seed must not exceed this value; larger ones invalidate their element.
 inline constexpr int64_t rule_number_limit = 1000000;
 
 enum class RuleDiagnosticCode {

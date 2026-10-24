@@ -879,6 +879,9 @@ TEST_CASE("The group seed mixes every member seed in queue order", "[PreciseSeam
     CHECK(relay_random_group_seed(0, Seeds{4294967295u, none, none}) == 0x831A81BD93315937ull);
     CHECK(relay_random_group_seed(1, Seeds{none, none, 7}) == 0xCEDF49D26DB06234ull);
     CHECK(relay_random_group_seed(1, Seeds{3, 5, 9}) == 0x379E0E373B6FFD9Full);
+    // seed0 is a seed, also next to another one.
+    CHECK(relay_random_group_seed(0, Seeds{0, 7, none}) == 0x5820D4887C7FA043ull);
+    CHECK(relay_random_group_seed(0, Seeds{none, 7, none}) == 0x588ACF71AB60E0A2ull);
 
     const auto wins = win_table(std::vector<std::string>(12, "111"));
     const auto run  = [&wins](const Seeds &seeds) { return relay_random_holders(wins, 3, relay_random_group_seed(0, seeds)); };
@@ -906,6 +909,8 @@ TEST_CASE("model counts the model layers through their numbers", "[PreciseSeam][
     CHECK(selected(evaluate("model,3")) == Layers{6});
     CHECK(selected(evaluate("model,all")) == Layers{3, 6});
     CHECK(selected(evaluate("model,odd")) == Layers{3, 6});
+    CHECK(selected(evaluate("model,2x+1")) == Layers{3, 6});
+    CHECK(selected(evaluate("model,2-3")) == Layers{6});
     CHECK(selected(evaluate("model,1,bed,6,excl,model,1")) == Layers{6});
     // The bed universe stays: exclusion starts from every number.
     CHECK(selected(evaluate("excl,model,all")) == Layers{1, 2, 4, 5, 7, 8});
@@ -961,6 +966,10 @@ TEST_CASE("model heights start at the bottom of the first model layer", "[Precis
     CHECK(count_code(bed.diagnostics, Code::EmptySet) == 1);
     CHECK(selected(evaluate("model,z0-0.3,bed,z1.7")) == Layers{4, 8});
     CHECK(selected(evaluate("excl,model,z0-0.5")) == Layers{1, 2, 3, 6, 7, 8});
+    // The first model layer may have no number: it still sets the bottom, and selects nothing itself.
+    const std::vector<LayerBand> upper{{4, 1.0, 1.2}, {5, 1.2, 1.4}};
+    CHECK(selected(select_layers(field("model,z0-0.3"), 5, {4, 5}, upper, {0, 4, 5}, 0.8)) == Layers{4});
+    CHECK(selected(select_layers(field("model,z0-0.1"), 5, {4, 5}, upper, {0, 4, 5}, 0.8)).empty());
     // A model bottom of zero makes both origins measure alike.
     CHECK(selected(select_layers(field("model,z0.1-0.3"), 3, {1, 2, 3}, grid(3, 0.2), {1, 2, 3}, 0.)) ==
           selected(select_layers(field("z0.1-0.3"), 3, {1, 2, 3}, grid(3, 0.2), {1, 2, 3}, 0.)));

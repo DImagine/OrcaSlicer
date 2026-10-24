@@ -169,9 +169,9 @@ print and is tested on its own.
   the numbers of the layers above it do not move down. The result then enters
   the usual left-to-right chain over the plan numbers, so exclusion still
   starts from every number, and an empty set is reported after this mapping.
-  `topK` is the same in both origins. Without a raft and with one object both
-  origins agree; other objects and supports with their own heights still give
-  the numbers gaps.
+  `topK` is the same in both origins. Numbers agree only where the map is the
+  identity, heights only where the model bottom is 0: a raft, other objects and
+  supports with their own heights give the map gaps.
 - **Effective order.** Volumes are grouped by their effective type. Within a
   group the order is `pr1, pr2, ...`, then the volumes without priority in
   object order, then `pr-1, pr-2, ...`; ties keep the object order. The strong
@@ -782,10 +782,12 @@ rebuilt on every export.
   hides them for other selections. `PreciseSeamRulesEditor` keeps the shown
   volume and a pending edit by volume ID; typing changes only the draft, which
   is applied to its own volume when the field loses focus, on Ctrl+Enter, when
-  the selection changes, and before saving, slicing
-  and exporting, which may be started by a shortcut while the focus stays in
-  the field. A backup does not apply it. Undo, redo and a new project drop the
-  draft first, so a late focus loss cannot write it back.
+  the selection changes, before the pages of the tab are cleared, and before
+  saving, closing, slicing and exporting, which may be started by a shortcut
+  while the focus stays in the field; Save also counts it as a change. A backup
+  does not apply it. Undo, redo and a new project drop the
+  draft first, so a late focus loss cannot write it back, and the field shows
+  the restored rules after undo and redo, also when the selection stays.
   `apply_precise_seam_rules()` writes the text: one snapshot when it differs,
   then a background update. The group title shows the help of the language as
   its tooltip. The settings search does not find the field.

@@ -4310,6 +4310,26 @@ void TabPrintPart::build()
     }
 }
 
+void TabPrintPart::clear_pages()
+{
+    // The fields go with the pages: their pending edit is applied before, not from their destruction.
+    m_precise_seam_rules->commit_pending();
+    TabPrintModel::clear_pages();
+}
+
+void TabPrintPart::msw_rescale()
+{
+    TabPrintModel::msw_rescale();
+    // The rules field is no option field, which the groups rescale themselves.
+    m_precise_seam_rules->rescale();
+}
+
+void TabPrintPart::sys_color_changed()
+{
+    TabPrintModel::sys_color_changed();
+    m_precise_seam_rules->rescale();
+}
+
 void TabPrintPart::on_model_config_set()
 {
     // The rules field shows for a single Precise Seam volume only.

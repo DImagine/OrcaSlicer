@@ -15572,6 +15572,8 @@ void Plater::priv::update_after_undo_redo(const UndoRedo::Snapshot& snapshot, bo
         this->view3D->get_canvas3d()->get_gizmos_manager().update_after_undo_redo(snapshot);
 
     wxGetApp().obj_list()->update_after_undo_redo();
+    // The rules field shows the restored rules, also when the selection stays.
+    reset_precise_seam_rules_edit();
 
     if (wxGetApp().get_mode() == comSimple && model_has_advanced_features(this->model)) {
         // If the user jumped to a snapshot that require user interface with advanced features, switch to the advanced mode without asking.
@@ -16305,6 +16307,8 @@ void Plater::load_project(wxString const& filename2,
 // BBS: save logic
 int Plater::save_project(bool saveAs)
 {
+    // Save may be a shortcut while the focus stays in the Precise Seam rules field.
+    commit_precise_seam_rules_edit();
     //if (up_to_date(false, false)) // should we always save
     //    return;
     auto filename = get_project_filename(".3mf");
@@ -19208,6 +19212,8 @@ void Plater::reset_with_confirm()
 // BBS: save logic
 int GUI::Plater::close_with_confirm(std::function<bool(bool)> second_check)
 {
+    // Text still in the Precise Seam rules field is a change to save or discard, not to lose silently.
+    commit_precise_seam_rules_edit();
     if (up_to_date(false, false)) {
         if (second_check && !second_check(false)) return wxID_CANCEL;
         model().set_backup_path("");
