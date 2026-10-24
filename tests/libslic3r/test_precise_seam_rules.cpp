@@ -180,16 +180,16 @@ TEST_CASE("Name markers are extracted without case and recovered when broken", "
 TEST_CASE("Whitespace is removed and letters are lowered before parsing", "[PreciseSeam][Rules]")
 {
     CHECK(select({}, " EXCL ,\t1 2 ") == join(range(1, 11), range(13, 400)));
-    CHECK(select({}, "Incl. ODD.") == range(1, 399, 2));
+    CHECK(select({}, "Incl ODD") == range(1, 399, 2));
     CHECK(select({}, ",,5,,") == Layers{5});
 }
 
 TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][Rules]")
 {
-    const std::string text = GENERATE(as<std::string>{}, "0", "0x+5", "3x+-1", "1+2x", "+5", "-5", "pr0", "pr-0", "pr1.", "pr..1",
-                                      "inclred", "inclpr1", "exclexcl1", "red1-5", "incl..", "1.5", "z10", "100step3",
-                                      "100-200step0", "top0", "top-5", "top5.", "incloff", "offjunk", "exclnowarn", "odd..",
-                                      "1-", "-1-5", "1-5step", "\xD0\xB0");
+    const std::string text = GENERATE(as<std::string>{}, "0", "0x+5", "3x+-1", "1+2x", "+5", "-5", "pr0", "pr-0", "pr1.", "pr.1",
+                                      "inclred", "inclpr1", "exclexcl1", "red1-5", "excl.", "incl.odd", "red.", "1.5", "z10",
+                                      "100step3", "100-200step0", "100-200step.3", "top0", "top-5", "top.5", "incloff",
+                                      "offjunk", "exclnowarn", "nowarn.", "odd.", "1-", "-1-5", "1-5step", "\xD0\xB0");
     CAPTURE(text);
     const LayerRules rules = field(text);
     REQUIRE(rules.diagnostics.size() == 1);
@@ -201,14 +201,14 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
     CHECK_FALSE(rules.nowarn);
 }
 
-TEST_CASE("Keywords accept one dot and numbers accept leading zeros", "[PreciseSeam][Rules]")
+TEST_CASE("Numbers accept leading zeros up to the limit", "[PreciseSeam][Rules]")
 {
     CHECK(select({}, "007") == Layers{7});
-    CHECK(select({}, "excl.") == range(1, 400)); // A mode alone is not a set: all layers remain.
-    CHECK(select({}, "excl.,excl.5") == join(range(1, 4), range(6, 400)));
-    CHECK(field("red.").type == ModelVolumeType::PRECISE_SEAM_BLOCKED);
-    CHECK(field("pr.1").priority == 1);
-    CHECK(field("pr.-2").priority == -2);
+    CHECK(select({}, "excl") == range(1, 400)); // A mode alone is not a set: all layers remain.
+    CHECK(select({}, "excl,excl5") == join(range(1, 4), range(6, 400)));
+    CHECK(field("red").type == ModelVolumeType::PRECISE_SEAM_BLOCKED);
+    CHECK(field("pr1").priority == 1);
+    CHECK(field("pr-2").priority == -2);
     CHECK(select({}, "1-1000000") == range(1, 400));
     CHECK(count_code(field("1000001").diagnostics, Code::NumberOutOfRange) == 1);
 }
@@ -216,9 +216,8 @@ TEST_CASE("Keywords accept one dot and numbers accept leading zeros", "[PreciseS
 TEST_CASE("Step, top, all and the flags follow the additional elements", "[PreciseSeam][Rules]")
 {
     CHECK(select({}, "100-200step3") == range(100, 199, 3));
-    CHECK(select({}, "100-200step.3") == range(100, 199, 3));
     CHECK(select({}, "top5") == range(396, 400));
-    CHECK(select({}, "top.500") == range(1, 400));
+    CHECK(select({}, "top500") == range(1, 400));
     CHECK(select({}, "excltop5") == range(1, 395));
     CHECK(select({}, "all") == range(1, 400));
     CHECK(select({}, "excl,all").empty());
@@ -226,7 +225,7 @@ TEST_CASE("Step, top, all and the flags follow the additional elements", "[Preci
     const LayerRules off = field("1-5,off");
     CHECK(off.off);
     CHECK(apply_rules(off).empty());
-    const LayerRules nowarn = parse_layer_rules("-^ps=nowarn=ps^-", "nowarn.");
+    const LayerRules nowarn = parse_layer_rules("-^ps=nowarn=ps^-", "nowarn");
     CHECK(nowarn.nowarn);
     CHECK(nowarn.diagnostics.empty());
 }

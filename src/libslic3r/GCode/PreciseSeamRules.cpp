@@ -113,15 +113,6 @@ public:
         ++m_pos;
         return true;
     }
-    // One optional dot after a keyword.
-    bool eat_keyword(std::string_view word)
-    {
-        if (!eat(word))
-            return false;
-        eat('.');
-        return true;
-    }
-
     // Leading zeros are allowed; the value saturates above the limit, which is remembered.
     std::optional<int64_t> uint()
     {
@@ -148,13 +139,13 @@ private:
 std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
 {
     using Kind = RuleLayerSet::Kind;
-    if (c.eat_keyword("odd"))
+    if (c.eat("odd"))
         return RuleLayerSet{Kind::Odd};
-    if (c.eat_keyword("even"))
+    if (c.eat("even"))
         return RuleLayerSet{Kind::Even};
-    if (c.eat_keyword("all"))
+    if (c.eat("all"))
         return RuleLayerSet{Kind::All};
-    if (c.eat_keyword("top")) {
+    if (c.eat("top")) {
         const std::optional<int64_t> k = c.uint();
         if (!k || *k < 1)
             return std::nullopt;
@@ -190,7 +181,7 @@ std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
         if (!last || *last < set.first)
             return std::nullopt;
         set.last = *last;
-        if (c.eat_keyword("step")) {
+        if (c.eat("step")) {
             const std::optional<int64_t> step = c.uint();
             if (!step || *step < 1)
                 return std::nullopt;
@@ -220,20 +211,20 @@ const std::pair<std::string_view, ModelVolumeType> type_labels[] = {
 std::optional<ParsedElement> parse_element(Cursor &c)
 {
     using Kind = ParsedElement::Kind;
-    const bool incl = c.eat_keyword("incl");
-    if (incl || c.eat_keyword("excl")) {
+    const bool incl = c.eat("incl");
+    if (incl || c.eat("excl")) {
         ParsedElement element{Kind::Mode, !incl};
         if (!c.done() && !(element.set = parse_layer_set(c)))
             return std::nullopt;
         return element;
     }
     for (const auto &[label, type] : type_labels)
-        if (c.eat_keyword(label)) {
+        if (c.eat(label)) {
             ParsedElement element{Kind::Type};
             element.type = type;
             return element;
         }
-    if (c.eat_keyword("pr")) {
+    if (c.eat("pr")) {
         const bool                   negative = c.eat('-');
         const std::optional<int64_t> value    = c.uint();
         if (!value || *value < 1)
@@ -242,9 +233,9 @@ std::optional<ParsedElement> parse_element(Cursor &c)
         element.priority = int(negative ? -*value : *value);
         return element;
     }
-    if (c.eat_keyword("off"))
+    if (c.eat("off"))
         return ParsedElement{Kind::Off};
-    if (c.eat_keyword("nowarn"))
+    if (c.eat("nowarn"))
         return ParsedElement{Kind::Nowarn};
     if (std::optional<RuleLayerSet> set = parse_layer_set(c)) {
         ParsedElement element{Kind::Set};

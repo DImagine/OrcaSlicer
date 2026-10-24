@@ -107,7 +107,8 @@ print and is tested on its own.
   (`excl129-312`). Labels `center`, `left`, `right`, `green`, `red`,
   `gray`/`grey` set the type; `prN` and `pr-N` set the priority; `off`
   disables the modifier and `nowarn` silences the warnings about differences
-  from the object list. One dot may follow any keyword.
+  from the object list. A keyword is followed directly by its number or set:
+  `pr.1` is not an element.
 - **Atomic elements.** An element that does not match the grammar as a whole,
   or has a number above 1 000 000, is dropped with a warning and changes
   nothing, not even the mode. Numbers are bounded before any arithmetic and a
