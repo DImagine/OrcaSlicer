@@ -2749,13 +2749,15 @@ TEST_CASE("A relay-random seed of any member, even one without layers, changes t
     // A, B and C as in the relay-random test above; D follows C in the queue, and its rules exclude every layer.
     const auto [seeds, expected] = GENERATE(table<std::vector<std::string>, std::vector<int>>({
         {{"", "", "", ""}, {0, 1, 2, 1, 2, 0, 2, 1, 2, 0}},
-        {{"seed 7", "", "", ""}, {1, 0, 1, 0, 2, 0, 2, 0, 1, 2}},
+        {{"seed 7", "", "", ""}, {1, 0, 2, 0, 1, 0, 1, 2, 0, 2}},
         {{"", "", "", "seed 7"}, {0, 1, 2, 1, 0, 1, 0, 1, 2, 1}}}));
     CAPTURE(seeds);
     ExportFixture fixture("back");
     const std::vector<double> xs{2., 9., 16., 9.};
     for (size_t i = 0; i < xs.size(); ++i) {
-        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(xs[i], -3, -1), std::string(1, char('A' + i)));
+        // B is Left, so its seam lies on its left edge, as in the test above.
+        fixture.add(i == 1 ? ModelVolumeType::PRECISE_SEAM_LEFT : ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(xs[i], -3, -1),
+                    std::string(1, char('A' + i)));
         fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random " + seeds[i] + (i == 3 ? ", 500" : "");
     }
     const auto loops = outer_wall_loops(fixture.export_gcode());
@@ -2767,7 +2769,7 @@ TEST_CASE("A weak relay-random group takes the seeds of its members", "[PreciseS
 {
     const auto [seeds, expected] = GENERATE(table<std::vector<std::string>, std::vector<int>>({
         {{"", "", "", ""}, {0, 1, 2, 1, 2, 0, 2, 1, 2, 0}},
-        {{"", "seed 7", "", ""}, {2, 1, 0, 1, 2, 0, 1, 2, 0, 1}},
+        {{"", "seed 7", "", ""}, {0, 2, 0, 1, 0, 2, 1, 2, 0, 1}},
         {{"", "", "", "seed 7"}, {0, 1, 2, 1, 0, 1, 0, 1, 2, 1}}}));
     CAPTURE(seeds);
     ExportFixture fixture("back");
