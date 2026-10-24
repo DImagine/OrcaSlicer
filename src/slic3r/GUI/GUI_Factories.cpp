@@ -1566,16 +1566,20 @@ void MenuFactory::append_menu_item_precise_seam_submenu(wxMenu* menu)
 
 void MenuFactory::append_menu_item_precise_seam_rules(wxMenu* menu)
 {
-    const wxString name = _L("Precise Seam Layer Rules");
+    const wxString name = _L("Precise Seam Rules");
     // The part menu is reused, so the item is removed and added again for the current selection.
     const int menu_item_id = menu->FindItem(name);
     if (menu_item_id != wxNOT_FOUND)
         menu->Destroy(menu_item_id);
     if (!obj_list()->can_edit_precise_seam_rules())
         return;
+    // Right under the "Precise Seam Type" submenu, which is added first; at the end if it is missing.
+    const int type_id  = menu->FindItem(_L("Precise Seam Type"));
+    const int type_pos = type_id == wxNOT_FOUND ? wxNOT_FOUND : int(FindPositionById(menu, type_id));
     append_menu_item(menu, wxID_ANY, name, _L("Choose the layers, type and priority of this modifier"),
         [](wxCommandEvent&) { obj_list()->edit_precise_seam_rules(); }, "", nullptr,
-        []() { return obj_list()->can_edit_precise_seam_rules(); }, m_parent);
+        []() { return obj_list()->can_edit_precise_seam_rules(); }, m_parent,
+        type_pos == wxNOT_FOUND ? wxNOT_FOUND : type_pos + 1);
 }
 
 void MenuFactory::append_menu_item_edit_text(wxMenu *menu, size_t pos)

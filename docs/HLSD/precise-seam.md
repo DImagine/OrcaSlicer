@@ -752,8 +752,8 @@ rebuilt on every export.
   Right; green, red and gray for Enforced, Blocked and Neutral. The three strong
   colors are close shades of one orange because all three mark strong
   modifiers; the object list icons tell the modes apart.
-- *Precise Seam Layer Rules* in the part menu of a single Precise Seam volume
-  edits its rules field; renaming such a volume also updates the print, since
+- *Precise Seam Rules*, right under *Precise Seam Type* in the part menu of a
+  single Precise Seam volume, edits its rules field; renaming such a volume also updates the print, since
   the name may hold rules.
 - Precise Seam volumes have no filament and cannot be pasted into SLA objects.
   Python plugins see them as `ModelVolumeType` values and through the

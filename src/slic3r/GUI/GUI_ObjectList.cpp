@@ -6305,7 +6305,7 @@ void ObjectList::edit_precise_seam_rules()
     if (!can_edit_precise_seam_rules())
         return;
     ModelVolume *volume = selected_precise_seam_volume(*this, *m_objects_model);
-    // TRN: Help for the Precise Seam layer rules field. Keep the rule keywords untranslated.
+    // TRN: Help for the Precise Seam rules field. Keep the rule keywords untranslated.
     wxTextEntryDialog dialog(this, _L("Comma-separated rules, applied from left to right:\n"
                                       "layers: 5, 10-20, 10-20step3, 3x+1, odd, even, top5, all\n"
                                       "heights in mm: z12.5-30 (layers that reach into it), zin12.5-30 (layers wholly inside), z12.5\n"
@@ -6319,13 +6319,13 @@ void ObjectList::edit_precise_seam_rules()
                                       "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
                                       "Heights are measured from the bed, as on the slider. Decimals take a point: a comma separates rules.\n"
                                       "The name may hold more rules between -^ps= and =ps^-; override as the first rule here ignores them."),
-                             _L("Precise Seam Layer Rules"), from_u8(volume->precise_seam_rules));
+                             _L("Precise Seam Rules"), from_u8(volume->precise_seam_rules));
     if (dialog.ShowModal() != wxID_OK)
         return;
     const std::string rules = into_u8(dialog.GetValue());
     if (rules == volume->precise_seam_rules)
         return;
-    take_snapshot(_u8L("Edit Precise Seam Layer Rules"));
+    take_snapshot(_u8L("Edit Precise Seam Rules"));
     volume->precise_seam_rules = rules;
     // Rules change only the seam placement; the export step is invalidated when the print is updated.
     wxGetApp().plater()->schedule_background_process();
