@@ -41,6 +41,7 @@ struct RelayOrder {
     struct Group {
         std::vector<const ModelVolume*> members; // Queue order, which is the object list order.
         std::vector<size_t>             holders; // Per object layer: index into members, or no_holder.
+        RelayLabel                      label;   // relay-random groups choose their holders differently.
     };
     // An ordinary strong volume, or the block of groups[group] when volume is null.
     struct Entry {
@@ -74,6 +75,11 @@ void init_precise_seam_data_by_rules(
 // at the first member, the holder is the first winner from the turn on in circular order, and the turn then
 // passes to the member after the holder. A layer without a winner keeps the turn.
 std::vector<size_t> relay_holders(const std::vector<std::vector<uint8_t>> &wins, size_t member_count);
+
+// Holders of a relay-random group from the same table: a pseudo-random winner other than the holder of the
+// last layer with a winner, which holds again only as the only winner. The choice depends on the table, the
+// group number and the object layer index alone, so every export and platform gives the same holders.
+std::vector<size_t> relay_random_holders(const std::vector<std::vector<uint8_t>> &wins, size_t member_count, int64_t group_number);
 
 // Strong volumes to try on object layer `layer`, from the entries before `end`: a block starts at the holder
 // of its group, goes on in queue order and wraps around, without members whose rules exclude the layer;

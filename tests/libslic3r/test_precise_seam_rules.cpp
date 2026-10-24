@@ -700,7 +700,7 @@ TEST_CASE("Name markers and commas bound an id", "[PreciseSeam][Rules]")
 
 namespace {
 // One row per layer, one character per member: '1' where the member wins; an empty row has no winner.
-std::vector<size_t> holders(const std::vector<std::string> &rows, size_t members)
+std::vector<std::vector<uint8_t>> win_table(const std::vector<std::string> &rows)
 {
     std::vector<std::vector<uint8_t>> wins;
     for (const std::string &row : rows) {
@@ -708,7 +708,12 @@ std::vector<size_t> holders(const std::vector<std::string> &rows, size_t members
         for (char c : row)
             wins.back().push_back(c == '1');
     }
-    return relay_holders(wins, members);
+    return wins;
+}
+std::vector<size_t> holders(const std::vector<std::string> &rows, size_t members) { return relay_holders(win_table(rows), members); }
+std::vector<size_t> random_holders(const std::vector<std::string> &rows, size_t members, int64_t group)
+{
+    return relay_random_holders(win_table(rows), members, group);
 }
 constexpr size_t nobody = RelayOrder::no_holder;
 } // namespace
@@ -730,6 +735,28 @@ TEST_CASE("The relay turn passes to the member after each holder", "[PreciseSeam
     std::vector<size_t> expected(50, 0);
     expected.insert(expected.end(), {1, 0, 1, 0});
     CHECK(holders(rows, 2) == expected);
+}
+
+// Expected holders come from an independent model of the hash in SPEC v7 (splitmix64 over the group number and
+// the layer index); they pin the hash, so that a change of it or a platform difference shows up here.
+TEST_CASE("relay-random gives each layer to a winner other than the previous holder", "[PreciseSeam][Rules][Relay]")
+{
+    const std::vector<std::string> all(12, "111");
+    CHECK(random_holders(all, 3, 0) == Layers{0, 1, 2, 1, 2, 0, 2, 1, 2, 0, 2, 1});
+    CHECK(random_holders(all, 3, 1) == Layers{2, 0, 2, 1, 2, 1, 0, 1, 2, 0, 2, 1});
+    CHECK(random_holders(all, 3, 2) == Layers{1, 2, 1, 0, 2, 0, 2, 0, 1, 2, 0, 2});
+    CHECK(random_holders(all, 3, 1) == random_holders(all, 3, 1));
+    // Layers without a winner keep the previous holder, and the hash takes the real layer index. The only
+    // winner holds, the previous holder too (layer 8).
+    CHECK(random_holders({"111", "", "000", "111", "100", "101", "111", "010", "010", "111"}, 3, 1) ==
+          Layers{2, nobody, nobody, 1, 0, 2, 0, 1, 1, 0});
+    // Two members alternate after the first choice.
+    CHECK(random_holders(std::vector<std::string>(6, "11"), 2, 5) == Layers{1, 0, 1, 0, 1, 0});
+    // No holder repeats while another member wins.
+    const Layers four = random_holders(std::vector<std::string>(12, "1111"), 4, 3);
+    CHECK(four == Layers{3, 0, 1, 3, 2, 1, 0, 2, 1, 0, 1, 2});
+    for (size_t layer = 1; layer < four.size(); ++layer)
+        CHECK(four[layer] != four[layer - 1]);
 }
 
 TEST_CASE("A relay block starts at its holder and wraps around in queue order", "[PreciseSeam][Rules][Relay]")

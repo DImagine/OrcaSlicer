@@ -185,6 +185,7 @@ void init_precise_seam_data_by_rules(
         } else if (!blocks[*block].empty()) {
             relay.entries.push_back({nullptr, relay.groups.size()});
             RelayOrder::Group &group = relay.groups.emplace_back();
+            group.label              = *rules[i].relay; // The anchor is a member, even without layers.
             for (size_t member : blocks[*block]) {
                 group.members.push_back(volumes[member]);
                 take_part(member, strong_volumes_out);
@@ -217,6 +218,50 @@ std::vector<size_t> relay_holders(const std::vector<std::vector<uint8_t>> &wins,
                 turn           = (member + 1) % member_count;
                 break;
             }
+    }
+    return holders;
+}
+
+namespace {
+// splitmix64 with its increment, on unsigned 64-bit integers only, so that every platform picks the same.
+uint64_t mix(uint64_t x)
+{
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+} // namespace
+
+std::vector<size_t> relay_random_holders(const std::vector<std::vector<uint8_t>> &wins, size_t member_count, int64_t group_number)
+{
+    std::vector<size_t> holders(wins.size(), RelayOrder::no_holder);
+    size_t              previous = RelayOrder::no_holder; // Holder of the last layer with a winner.
+    const uint64_t      seed     = mix(uint64_t(group_number));
+    for (size_t layer = 0; layer < wins.size(); ++layer) {
+        const std::vector<uint8_t> &row = wins[layer];
+        if (row.empty())
+            continue;
+        assert(row.size() == member_count);
+        size_t winners      = 0;
+        bool   previous_won = false;
+        for (size_t member = 0; member < member_count; ++member)
+            if (row[member] != 0) {
+                ++winners;
+                previous_won = previous_won || member == previous;
+            }
+        if (winners == 0)
+            continue;
+        // The previous holder is left out, unless it is the only winner.
+        const bool   skip_previous = previous_won && winners > 1;
+        const size_t candidates    = winners - (skip_previous ? 1 : 0);
+        size_t       rank          = candidates == 1 ? 0 : size_t(mix(seed ^ uint64_t(layer)) % candidates);
+        for (size_t member = 0; member < member_count; ++member)
+            if (row[member] != 0 && !(skip_previous && member == previous) && rank-- == 0) {
+                holders[layer] = member;
+                break;
+            }
+        previous = holders[layer];
     }
     return holders;
 }
@@ -296,7 +341,8 @@ void schedule_relay(RelayOrder &order, const PrintObject &object, const Effectiv
                 wins[layer] = std::move(row);
             }
         });
-        group.holders = relay_holders(wins, group.members.size());
+        group.holders = group.label.random ? relay_random_holders(wins, group.members.size(), group.label.number) :
+                                             relay_holders(wins, group.members.size());
     }
 }
 

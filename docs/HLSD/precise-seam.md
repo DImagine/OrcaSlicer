@@ -113,7 +113,11 @@ print and is tested on its own.
   replaces the name, so that the behaviour can change without renaming the
   volume: the name is then not parsed and reports nothing. Anywhere else it is
   an invalid element. `relayN` and a bare `relay` put the volume into a relay
-  group (see Relay below).
+  group, `relay-randomN` and `relay-random` into a random one (see Relay
+  below). An element that starts with `id` names the volume for external
+  scripts: it is taken as a whole, with any text after `id`, before the
+  grammar, and changes nothing. The first id keeps its trimmed original text
+  with its case; a later id that differs after normalization is a warning.
 - **Atomic elements.** An element that does not match the grammar as a whole,
   or has a number above 1 000 000, is dropped with a warning and changes
   nothing, not even the mode. Numbers are bounded before any arithmetic and a
@@ -164,7 +168,8 @@ print and is tested on its own.
   left out entirely.
 - **Relay.** Strong volumes of one print object with the same relay label
   (`relay1`, or the bare `relay`, which is a group of its own) take the seam in
-  turn, layer by layer. The group stands as one block at the place of its most
+  turn, layer by layer. `relay1` and `relay-random1` are different groups. The
+  group stands as one block at the place of its most
   senior member in the effective strong order, also when that member acts on no
   layer; the queue inside is the object list order, not the priority. On every
   model layer the holder is the first member, in circular order from the turn,
@@ -181,6 +186,15 @@ print and is tested on its own.
   every member is reported. A group is local to a print object, so the copies
   of an object share one schedule, and a group of one member is that member
   alone.
+- **Random relay.** A `relay-random` group differs only in the choice of the
+  holder, from the same table of winners: a winner other than the holder of
+  the last layer with a winner, unless that holder is the only winner. The
+  choice is `hash % candidates` over the candidates in queue order, where the
+  hash is splitmix64 of the group number mixed with the object layer index. It
+  uses unsigned 64-bit arithmetic only, as the result of a standard library
+  distribution differs between platforms, so every export and platform gives
+  the same seams. The hash ignores the volume IDs, so the schedule survives
+  saving and loading.
 - **Relay pre-pass.** Who wins depends on the geometry, so `schedule_relay()`
   runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, and runs

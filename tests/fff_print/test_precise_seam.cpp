@@ -2081,3 +2081,85 @@ TEST_CASE("A stand-in of a senior group keeps the turn of the junior group", "[P
                                                     {0, 2}, {0, 1}, {0, 3}, {0, 1}, {0, 2}};
     CHECK(island_helpers(loops, {-1., -2.5, 0., 2.5}) == expected);
 }
+
+// Expected holders of relay-random come from an independent model of the hash in SPEC v7.
+TEST_CASE("relay-random members take the seam at random, never twice in a row", "[PreciseSeam][Rules][Relay]")
+{
+    // A, B and C as in the relay test above: -7, -1 and 7 relative to the centre; each wins on every layer.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_LEFT, front_box(), Vec3d(9, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "C -^ps=relay-random=ps^-");
+    const std::vector<double> centres{-7., -1., 7.};
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    CHECK(front_helpers(loops, centres) == std::vector<int>{0, 1, 2, 1, 2, 0, 2, 1, 2, 0});
+    CHECK(fixture.warning().empty());
+    // Nothing is kept between exports: the next one gives the same seams.
+    CHECK(front_helpers(outer_wall_loops(fixture.export_gcode()), centres) == front_helpers(loops, centres));
+}
+
+TEST_CASE("relay1 and relay-random1 are different groups", "[PreciseSeam][Rules][Relay]")
+{
+    // H = relay1 crosses only the left island (H_A, H_B at -1 and 2 relative to its centre), G = relay-random1
+    // only the right one (G_C, G_D, G_E at -2.5, 0 and 2.5). H, the senior group, leaves the right island
+    // free, so both groups show their own order.
+    ExportFixture fixture("back", 0, two_islands());
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "H_A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay1";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(12.5, -3, -1), "G_C");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random1";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(5, -3, -1), "H_B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay1";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(15, -3, -1), "G_D");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random1";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(17.5, -3, -1), "G_E");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random1";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 20);
+    // Indices into {H_A, H_B, G_C, G_D, G_E}: H alternates, G follows its random holders.
+    const std::vector<int> g{4, 2, 4, 3, 4, 3, 2, 3, 4, 2};
+    std::vector<std::pair<int, int>> expected;
+    for (int layer = 1; layer <= 10; ++layer)
+        expected.emplace_back(layer % 2 == 1 ? 0 : 1, g[layer - 1]);
+    CHECK(island_helpers(loops, {-1., 2., -2.5, 0., 2.5}) == expected);
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("A layer that a senior modifier takes keeps the previous relay-random holder", "[PreciseSeam][Rules][Relay]")
+{
+    // X, first in the object list and without relay, acts on layer 3 only (0 relative to the centre); A, B
+    // and C at -7, -3 and 7 win on every other layer.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(9, -3, -1), "X");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "3";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random1";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(6, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random1";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "C");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random1";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    // Holders C, A, -, C, ...: layer 4 leaves out A, the holder of layer 2; had layer 3 cleared it, B would
+    // hold layer 4. Indices into {X, A, B, C}.
+    CHECK(front_helpers(loops, {0., -7., -3., 7.}) == std::vector<int>{3, 1, 0, 3, 2, 3, 1, 2, 3, 1});
+}
+
+TEST_CASE("A relay-random group with a weak member acts without relay and is reported", "[PreciseSeam][Rules][Relay]")
+{
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random,red";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    CHECK(front_helpers(loops, {-7., 7.}) == std::vector<int>(10, 0));
+    const std::vector<std::string> warnings = rule_warnings(fixture);
+    REQUIRE(warnings.size() == 3); // B also acts with the type from its rules.
+    CHECK(warnings[0].find("\"relay-random\" acts without relay") != std::string::npos);
+    CHECK(warnings[2].find("\"relay-random\" acts without relay") != std::string::npos);
+}
