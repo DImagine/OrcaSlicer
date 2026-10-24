@@ -294,6 +294,8 @@ set(lisbslic3r_sources
     GCode/PreciseSeamInternal.hpp
     GCode/PreciseSeamRules.cpp
     GCode/PreciseSeamRules.hpp
+    GCode/PreciseSeamRulesApply.cpp
+    GCode/PreciseSeamRulesApply.hpp
     GCode/SmallAreaInfillFlowCompensator.cpp
     GCode/SmallAreaInfillFlowCompensator.hpp
     GCode/SpiralVase.cpp

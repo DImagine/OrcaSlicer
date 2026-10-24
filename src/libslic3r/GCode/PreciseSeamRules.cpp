@@ -346,6 +346,14 @@ void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<si
 
 } // namespace
 
+bool has_rule_marker(std::string_view volume_name)
+{
+    for (size_t pos = 0; pos < volume_name.size(); ++pos)
+        if (marker_at(volume_name, pos, open_marker) || marker_at(volume_name, pos, close_marker))
+            return true;
+    return false;
+}
+
 LayerRules parse_layer_rules(std::string_view volume_name, std::string_view field)
 {
     LayerRules rules;

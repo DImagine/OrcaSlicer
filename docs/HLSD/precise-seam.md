@@ -127,19 +127,34 @@ print and is tested on its own.
   because the copies share one seam cache; from the second object on they
   differ from the slider. A by-object print with a wipe tower is exported by
   layer and is numbered by layer as well: the plan always follows the export
-  branch. `topK` picks the top K numbered layers of the object itself. The plan is built once before `SeamPlacer::init()` and the export
-  prints that same plan, since collecting it raises warnings and errors.
+  branch. `topK` picks the top K numbered layers of the object itself. When
+  rules are used, the plan is built once before `SeamPlacer::init()` and the
+  export prints that same plan, since collecting it raises warnings and errors:
+  by layer for the whole plate, by object only for the objects with rules.
 - **Effective order.** Volumes are grouped by their effective type. Within a
   group the order is `pr1, pr2, ...`, then the volumes without priority in
   object order, then `pr-1, pr-2, ...`; ties keep the object order. The strong
   group still precedes the weak one, so a priority acts only within its group.
   The object list and the stored order are never changed.
-- **Application.** `init_precise_seam_data()` resolves the rules of each object
-  once, before the parallel phase, into the effective type and one active flag
-  per object layer for each volume. Extraction skips a modifier on an inactive
-  layer before recording any usage, so a layer excluded by rules is never
-  reported as "no effect". A volume that is off or active on no layer is left
-  out entirely.
+- **Application.** `init_precise_seam_data_by_rules()` resolves the rules of
+  each object once, before the parallel phase, into the effective type and one
+  active flag per object layer for each volume. Extraction skips a modifier on
+  an inactive layer before recording any usage, so a layer excluded by rules is
+  never reported as "no effect". A volume that is off or active on no layer is
+  left out entirely.
+- **Isolation.** Few prints use rules, so the language is a separate branch
+  (`GCode/PreciseSeamRulesApply.cpp`): the path without rules runs no code of
+  the language and its export stages stay in their usual order. The branch is
+  taken per object when a Precise Seam volume has a non-empty rules field or a
+  block marker in its name; the check reads the raw text and parses nothing, and
+  broken rules still take the branch so that they are reported. Without rules
+  there is no early plan or numbering, no parsing and no rule messages, and
+  `init_precise_seam_data()` collects the volumes as before. The one cost left
+  in the shared code is that the strong and weak loops take an optional
+  `EffectiveModifiers` and skip its lookup when it is null. The price is a
+  second collection of the volumes in the branch; a test checks that rules
+  which keep every layer and type give the seams of no rules. Dependencies go
+  one way: the geometric core (`PreciseSeam.hpp`) does not include the language.
 
 ## Data flow
 
@@ -164,8 +179,8 @@ print and is tested on its own.
 7. **Selection and restoration.** The configured seam position chooses the
    seams and aligns them. Afterwards the exact strong points are restored.
 8. **Warnings.** After all objects are processed, `SeamPlacer::init()` prepares
-   one combined warning text if any problem was found, and one single-line
-   message per layer rule diagnostic; G-code export issues them, each rule
+   one combined warning text if any problem was found, and the rules branch one
+   single-line message per layer rule diagnostic; G-code export issues them, each rule
    message as its own warning so that the export dialog lists every one. A rule
    message names the element's source and position, escapes control characters
    of the user's text, and counts equal texts (equal names) instead of dropping

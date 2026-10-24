@@ -1,7 +1,6 @@
 // Precise Seam implementation. Design: docs/HLSD/precise-seam.md
 #include "PreciseSeam.hpp"
 #include "PreciseSeamInternal.hpp"
-#include "PreciseSeamRules.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Point.hpp"
@@ -15,13 +14,11 @@
 #include <algorithm>
 #include <atomic>
 #include <boost/log/trivial.hpp>
-#include <limits>
 #include <optional>
 #include <cstddef>
 #include <string>
 #include <cassert>
 #include <cmath>
-#include <iterator>
 #include <tbb/parallel_for.h>
 #include <vector>
 #include <utility>
@@ -539,88 +536,31 @@ void init_precise_seam_data(
     std::vector<const ModelVolume*>& strong_volumes_out,
     std::vector<const ModelVolume*>& weak_volumes_out,
     bool& has_strong_out,
-    const ModelObject* model_object,
-    const LayerNumbering &numbering,
-    EffectiveModifiers &effective_out,
-    std::vector<ModifierDiagnostic> &diagnostics_out)
+    const ModelObject* model_object)
 {
+    // Clear output vectors
     strong_volumes_out.clear();
     weak_volumes_out.clear();
-    effective_out.clear();
-    has_strong_out = false;
-    if (model_object == nullptr)
+
+    if (model_object == nullptr) {
+        has_strong_out = false;
         return;
-
-    // Rules are parsed once per volume, before the parallel layer processing.
-    std::vector<const ModelVolume*> volumes;
-    std::vector<LayerRules>         rules;
-    for (const ModelVolume* volume : model_object->volumes)
-        if (volume->is_precise_seam()) {
-            volumes.push_back(volume);
-            rules.push_back(parse_layer_rules(volume->name, volume->precise_seam_rules));
-        }
-    if (volumes.empty())
-        return;
-    std::vector<RuledModifier> ruled;
-    for (size_t i = 0; i < volumes.size(); ++i)
-        ruled.push_back({volumes[i]->type(), &rules[i]});
-    const EffectiveOrder order = effective_order(ruled);
-
-    // Diagnostics of one volume in source order (the name as a whole, its blocks, then the field) and
-    // element order; parsing and empty-set diagnostics of one element keep their order.
-    const auto source_rank = [](const RuleDiagnostic &d) {
-        return std::pair<size_t, size_t>(d.source.field ? std::numeric_limits<size_t>::max() : d.source.name_block, d.element);
-    };
-    const auto contains = [](const std::vector<size_t> &list, size_t i) { return std::find(list.begin(), list.end(), i) != list.end(); };
-
-    // Layers of each volume, with its diagnostics in volume order. An empty row means every layer;
-    // nullopt leaves the volume out: switched off, or its rules exclude every layer of this object.
-    const std::vector<size_t> numbered = numbering.numbered_layers();
-    std::vector<std::optional<std::vector<bool>>> layers(volumes.size());
-    for (size_t i = 0; i < volumes.size(); ++i) {
-        // Nothing reads the diagnostics of the rules after this point.
-        std::vector<RuleDiagnostic> own = std::move(rules[i].diagnostics);
-        if (!rules[i].off && !rules[i].restricts_layers())
-            layers[i].emplace();
-        else if (!rules[i].off) {
-            LayerSelection selection = select_layers(rules[i], numbering.count, numbered);
-            own.insert(own.end(), std::make_move_iterator(selection.diagnostics.begin()), std::make_move_iterator(selection.diagnostics.end()));
-            std::vector<bool> row(numbering.object_layers.size(), false);
-            bool              any = false;
-            for (size_t layer = 0; layer < row.size(); ++layer) {
-                row[layer] = selection.contains(numbering.object_layers[layer]);
-                any        = any || row[layer];
-            }
-            if (any)
-                layers[i] = std::move(row);
-        }
-        std::stable_sort(own.begin(), own.end(),
-                         [&source_rank](const RuleDiagnostic &a, const RuleDiagnostic &b) { return source_rank(a) < source_rank(b); });
-        // Differences from the object list concern the volume as a whole and follow its own diagnostics.
-        if (contains(order.type_changed, i))
-            own.push_back({RuleDiagnosticCode::TypeDiffersFromTree, {}, 0, {}});
-        if (contains(order.reordered, i))
-            own.push_back({RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}});
-        for (RuleDiagnostic &diagnostic : own)
-            diagnostics_out.push_back({volumes[i], std::move(diagnostic)});
-        // nowarn hides the differences from the user, not from the log.
-        if (contains(order.suppressed, i))
-            // IDs only: names may hold line breaks, and the rule warnings of SeamPlacer name them escaped.
-            BOOST_LOG_TRIVIAL(info) << "[PreciseSeamRules] nowarn: object_id=" << model_object->id().id
-                                    << " volume_id=" << volumes[i]->id().id << " type or order differs from the object list";
     }
 
-    const auto collect = [&](const std::vector<size_t> &group, std::vector<const ModelVolume*> &out) {
-        for (size_t i : group)
-            if (layers[i]) {
-                effective_out.emplace(volumes[i], EffectiveModifier{ruled[i].effective_type(), std::move(*layers[i])});
-                out.push_back(volumes[i]);
-            }
-    };
-    collect(order.strong, strong_volumes_out);
-    collect(order.weak, weak_volumes_out);
+    // Collect and categorize precise seam modifiers
+    for (const ModelVolume* volume : model_object->volumes) {
+        if (volume->is_precise_seam()) {
+            // Strong (Center/Left/Right) and weak (Enforced/Blocked/Neutral) go to separate lists.
+            if (volume->is_precise_seam_strong())
+                strong_volumes_out.push_back(volume);
+            else
+                weak_volumes_out.push_back(volume);
+        }
+    }
+
     has_strong_out = !strong_volumes_out.empty();
 
+    // Collection already preserves model order, with higher-priority strong modifiers first.
     // Weak modifiers use last-write-wins, so apply the higher-priority ones last.
     std::reverse(weak_volumes_out.begin(), weak_volumes_out.end());
 }
@@ -734,7 +674,7 @@ static void refine_at_vertex(
 }
 
 // The type to apply on this layer, or nullopt where the rules exclude the layer. Without rules
-// (e.g. in tests) every modifier keeps its own type on every layer.
+// (`effective` is null) every modifier keeps its own type on every layer.
 static std::optional<ModelVolumeType> active_type(const EffectiveModifiers *effective, const ModelVolume *modifier, size_t layer_id)
 {
     if (effective != nullptr)

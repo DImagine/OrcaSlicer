@@ -1072,12 +1072,7 @@ TEST_CASE("Modifier hierarchy keeps strong order and applies the highest weak pr
     const auto *low = fixture.add(low_type, {rectangle(2, -2, 6, 2)});
     std::vector<const ModelVolume*> strong, weak;
     bool has_strong = false;
-    // Without layer rules every volume keeps its type and its place in the object.
-    PreciseSeam::EffectiveModifiers effective;
-    std::vector<PreciseSeam::ModifierDiagnostic> diagnostics;
-    PreciseSeam::init_precise_seam_data(strong, weak, has_strong, fixture.modifiers.objects.front(),
-                                        PreciseSeam::LayerNumbering{1, {1}}, effective, diagnostics);
-    CHECK(diagnostics.empty());
+    PreciseSeam::init_precise_seam_data(strong, weak, has_strong, fixture.modifiers.objects.front());
     REQUIRE(has_strong);
     CHECK(strong == std::vector<const ModelVolume*>{strong_a, strong_b});
     CHECK(weak == std::vector<const ModelVolume*>{low, high});
@@ -1610,6 +1605,38 @@ TEST_CASE("Changing only the rules updates the exported seam", "[PreciseSeam][Ru
     CHECK(std::none_of(switched_off.begin(), switched_off.end(), seam_on_front_helper));
     // A volume switched off by its rules is not reported as having no effect.
     CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("Rules that keep every layer and type give the seams of no rules", "[PreciseSeam][Rules]")
+{
+    // Objects with rules take their own branch; rules that change nothing must match the branch without them.
+    const auto [strong_rules, weak_rules] = GENERATE(table<std::string, std::string>({{"all", "all"}, {"center, all", "green"}}));
+    CAPTURE(strong_rules, weak_rules);
+    // A strong helper on the front face of the lower layers, an enforcer on the right face of all layers.
+    const auto export_loops = [](const std::string &strong, const std::string &weak) {
+        ExportFixture fixture("back");
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 2), Vec3d(4, -3, -1), "front");
+        fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(6, 2, 4), Vec3d(17, 4, -1), "right");
+        const ModelVolumePtrs &volumes = fixture.model.objects.front()->volumes;
+        volumes[1]->precise_seam_rules = strong;
+        volumes[2]->precise_seam_rules = weak;
+        std::vector<OuterLoop> loops = outer_wall_loops(fixture.export_gcode());
+        CHECK(fixture.warning().empty());
+        return loops;
+    };
+    const std::vector<OuterLoop> without_rules = export_loops({}, {});
+    REQUIRE(without_rules.size() == 10);
+    // The strong helper acts on the lower layers only, so both kinds of helper take part.
+    CHECK(seam_on_front_helper(without_rules.front()));
+    CHECK_FALSE(seam_on_front_helper(without_rules.back()));
+
+    const std::vector<OuterLoop> with_rules = export_loops(strong_rules, weak_rules);
+    REQUIRE(with_rules.size() == without_rules.size());
+    for (size_t i = 0; i < with_rules.size(); ++i) {
+        CAPTURE(i);
+        CHECK(with_rules[i].seam.x() == without_rules[i].seam.x());
+        CHECK(with_rules[i].seam.y() == without_rules[i].seam.y());
+    }
 }
 
 TEST_CASE("Each layer rule problem is a separate export warning", "[PreciseSeam][Rules]")

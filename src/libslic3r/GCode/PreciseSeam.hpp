@@ -15,7 +15,6 @@
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Model.hpp"
 #include "SeamPlacer.hpp"
-#include "PreciseSeamRules.hpp"
 
 // Precise Seam: helper volumes that decide where the seam goes on external perimeters.
 // Design: docs/HLSD/precise-seam.md
@@ -153,7 +152,8 @@ struct WeakModifierSegment {
     const ModelVolume *modifier = nullptr; // Source modifier, for the warnings.
 };
 
-// One Precise Seam modifier as it acts on one print object after its layer rules.
+// One Precise Seam modifier as it acts on one print object, set by its layer rules
+// (PreciseSeamRulesApply.hpp).
 struct EffectiveModifier {
     ModelVolumeType   type;   // Rule label, or the type in the object list.
     std::vector<bool> layers; // Active object layers by index without raft; empty means every layer.
@@ -163,26 +163,17 @@ struct EffectiveModifier {
 // Modifiers missing here act with their own type on every layer.
 using EffectiveModifiers = std::unordered_map<const ModelVolume*, EffectiveModifier>;
 
-// A rule diagnostic tied to its volume, for the export warnings.
-struct ModifierDiagnostic {
-    const ModelVolume *volume;
-    RuleDiagnostic     diagnostic;
-};
-
-// Collects the object's Precise Seam volumes after their layer rules: strong ones in priority order, weak
-// ones in application order, with their effective type and layers. Volumes switched off or excluded from
-// every layer are left out. Call once per object in SeamPlacer::init() before gathering candidates.
+// Collects the object's Precise Seam volumes: strong ones in priority order, weak ones in application
+// order. Call once per object in SeamPlacer::init() before gathering candidates.
 void init_precise_seam_data(
     std::vector<const ModelVolume*>& strong_volumes_out,
     std::vector<const ModelVolume*>& weak_volumes_out,
     bool& has_strong_out,
-    const ModelObject* model_object,
-    const LayerNumbering &numbering,
-    EffectiveModifiers &effective_out,
-    std::vector<ModifierDiagnostic> &diagnostics_out);
+    const ModelObject* model_object);
 
 // Inserts the seam point of the first strong modifier with a usable segment on this perimeter and returns
-// it, or nullopt. `prepared` must describe `polygon` before any change.
+// it, or nullopt. `prepared` must describe `polygon` before any change. Only objects with layer rules
+// pass `effective`; without it every modifier acts with its own type on every layer.
 std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
@@ -193,7 +184,8 @@ std::optional<Point> insert_strong_seam_point(
     const EffectiveModifiers *effective = nullptr);
 
 // Collects weak zones, inserts their boundaries into `polygon` and subdivides enforced edges. Pass
-// modifiers lowest priority first; `prepared` must describe the unchanged `polygon`.
+// modifiers lowest priority first; `prepared` must describe the unchanged `polygon`. `effective` as for
+// insert_strong_seam_point().
 std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,

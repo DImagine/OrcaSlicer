@@ -1,7 +1,6 @@
 #ifndef slic3r_PreciseSeamRules_hpp_
 #define slic3r_PreciseSeamRules_hpp_
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -77,6 +76,9 @@ struct LayerRules {
     bool restricts_layers() const { return !operations.empty(); }
 };
 
+// Whether the name holds a block marker in either direction, in any letter case, whole block or not.
+bool has_rule_marker(std::string_view volume_name);
+
 // Parses the name blocks, then the field, of one Precise Seam volume.
 LayerRules parse_layer_rules(std::string_view volume_name, std::string_view field);
 
@@ -100,13 +102,6 @@ struct LayerNumbering {
     // Numbered layers of the object in ascending order, as select_layers() takes them.
     std::vector<size_t> numbered_layers() const;
 };
-
-// Layer numbering is needed only when the plate has Precise Seam volumes: by object, only for those
-// objects; by layer, for the whole plate.
-inline bool has_precise_seam_volumes(const ModelObject &object)
-{
-    return std::any_of(object.volumes.begin(), object.volumes.end(), [](const ModelVolume *volume) { return volume->is_precise_seam(); });
-}
 
 // One Precise Seam volume of an object, in ModelObject::volumes order.
 struct RuledModifier {

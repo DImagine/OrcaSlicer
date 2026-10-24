@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/GCode/PreciseSeamRules.hpp"
+#include "libslic3r/GCode/PreciseSeamRulesApply.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
@@ -366,4 +367,28 @@ TEST_CASE("Unit conversion keeps the rules field of every volume", "[PreciseSeam
     CHECK(converted.front()->volumes[2]->precise_seam_rules == "excl,1-5");
     // The model owns and deletes them; ModelObject has no public destructor.
     model.objects.insert(model.objects.end(), converted.begin(), converted.end());
+}
+
+TEST_CASE("Only rules text on a Precise Seam volume selects the rules branch", "[PreciseSeam][Rules]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10, 10, 10))->name = "part";
+    ModelVolume *helper = object->add_volume(make_cube(2, 2, 2));
+    helper->set_type(ModelVolumeType::PRECISE_SEAM_CENTER);
+    helper->name = "helper odd relay1"; // Rule words outside a block are plain text.
+    CHECK_FALSE(uses_precise_seam_rules(*object));
+    // A broken block in any letter case still takes the branch, so that it is reported.
+    for (const std::string name : {"helper -^PS=odd", "helper odd=Ps^-", "-^ps==ps^-"}) {
+        CAPTURE(name);
+        helper->name = name;
+        CHECK(uses_precise_seam_rules(*object));
+    }
+    helper->name = "helper";
+    helper->precise_seam_rules = " "; // Any field text counts, even one that parses to nothing.
+    CHECK(uses_precise_seam_rules(*object));
+    // A volume that is not Precise Seam keeps its field dormant.
+    helper->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    helper->name = "helper -^ps=odd=ps^-";
+    CHECK_FALSE(uses_precise_seam_rules(*object));
 }
