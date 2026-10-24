@@ -58,7 +58,9 @@ struct RelayOrder {
 // layer are left out. Diagnostics are appended to `diagnostics_out` in volume, source and element order.
 // `model_layers` are the layers of the print object that `numbering` numbers, in the same order.
 // A relay group stands in `strong_volumes_out` at the place of its most senior member, its members in queue
-// order. `relay_out` is set, without holders, only when some group has two members or more.
+// order. `relay_out` is set, without holders, only when some strong group has two members or more. A weak
+// group stands likewise in `weak_volumes_out`, and its holders are set here: each member keeps the layers
+// it holds.
 void init_precise_seam_data_by_rules(
     std::vector<const ModelVolume*> &strong_volumes_out,
     std::vector<const ModelVolume*> &weak_volumes_out,

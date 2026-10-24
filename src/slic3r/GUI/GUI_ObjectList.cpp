@@ -6312,7 +6312,7 @@ void ObjectList::edit_precise_seam_rules()
                                       "mode: incl (default), excl\n"
                                       "type: center, left, right, green, red, gray\n"
                                       "priority: pr1 (highest), pr-1 (lowest); off; nowarn\n"
-                                      "relay, relay1: Center, Left and Right modifiers of one group take the seam in turn, layer by layer\n"
+                                      "relay, relay1: modifiers of one group act in turn, layer by layer: all center, left, right, or all green, red, gray\n"
                                       "relay-random, relay-random1: the same, but each layer goes to a random member, not the previous one when another can\n"
                                       "idName: a name for scripts; the rules ignore it\n"
                                       "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"

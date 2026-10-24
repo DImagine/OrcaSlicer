@@ -8,6 +8,8 @@
 #include "test_helpers.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/GCode/PreciseSeam.hpp"
+#include "libslic3r/GCode/PreciseSeamRules.hpp"
+#include "libslic3r/GCode/PreciseSeamRulesApply.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 
@@ -18,6 +20,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include <vector>
+#include <optional>
 #include <utility>
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/GCode/SeamPlacer.hpp"
@@ -2017,7 +2020,7 @@ TEST_CASE("Relay members on different islands each place their seam on every lay
     CHECK(island_helpers(loops, {-1., 2.}) == std::vector<std::pair<int, int>>(10, {0, 1}));
 }
 
-TEST_CASE("A relay group with a weak member acts without relay and is reported", "[PreciseSeam][Rules][Relay]")
+TEST_CASE("A relay group that mixes strong and weak members acts without relay and is reported", "[PreciseSeam][Rules][Relay]")
 {
     ExportFixture fixture("back");
     fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
@@ -2148,7 +2151,7 @@ TEST_CASE("A layer that a senior modifier takes keeps the previous relay-random 
     CHECK(front_helpers(loops, {0., -7., -3., 7.}) == std::vector<int>{3, 1, 0, 3, 2, 3, 1, 2, 3, 1});
 }
 
-TEST_CASE("A relay-random group with a weak member acts without relay and is reported", "[PreciseSeam][Rules][Relay]")
+TEST_CASE("A relay-random group that mixes strong and weak members acts without relay and is reported", "[PreciseSeam][Rules][Relay]")
 {
     ExportFixture fixture("back");
     fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
@@ -2191,4 +2194,287 @@ TEST_CASE("A stand-in of a senior group leaves the relay-random group no holder 
     for (int layer = 1; layer <= 10; ++layer)
         expected.emplace_back(0, right[layer - 1]);
     CHECK(island_helpers(loops, {1.5, -3., -1., 1., 3.}) == expected);
+}
+
+namespace {
+// Index of the front-face zone 2 mm wide from `lefts[i]` mm along the cube that holds the seam, or -1.
+int front_zone(const OuterLoop &loop, const std::vector<double> &lefts)
+{
+    if (std::abs(loop.seam.y() - (loop.bounds.min.y() - loop.bounds.center().y())) >= 0.01)
+        return -1;
+    for (size_t i = 0; i < lefts.size(); ++i)
+        if (loop.seam.x() >= lefts[i] - 10.01 && loop.seam.x() <= lefts[i] - 7.99)
+            return int(i);
+    return -1;
+}
+
+std::vector<int> front_zones(const std::vector<OuterLoop> &loops, const std::vector<double> &lefts)
+{
+    std::vector<int> out;
+    for (const OuterLoop &loop : loops)
+        out.push_back(front_zone(loop, lefts));
+    return out;
+}
+
+// A back seam lies on the rear face (y = 20 mm), 10 mm behind the centre.
+bool seam_at_back(const OuterLoop &loop) { return loop.seam.y() > 7.; }
+} // namespace
+
+TEST_CASE("Weak relay members act in turn, layer by layer", "[PreciseSeam][Rules][Relay]")
+{
+    // Enforced zones at x = 2, 9 and 16 mm on the front face; the back seam would lie on the rear face.
+    const std::string label = GENERATE(as<std::string>{}, "relay", "relay-random");
+    CAPTURE(label);
+    ExportFixture fixture("back");
+    for (double x : {2., 9., 16.}) {
+        fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(x, -3, -1));
+        fixture.model.objects.front()->volumes.back()->precise_seam_rules = label;
+    }
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    // relay-random takes the holders of the strong relay-random test: every member acts on every layer.
+    CHECK(front_zones(loops, {2., 9., 16.}) ==
+          (label == "relay" ? std::vector<int>{0, 1, 2, 0, 1, 2, 0, 1, 2, 0} : std::vector<int>{0, 1, 2, 1, 2, 0, 2, 1, 2, 0}));
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("A weak relay member keeps its turn where its zone ends, and nobody stands in", "[PreciseSeam][Rules][Relay]")
+{
+    // A at x = 2 mm crosses every layer; B at x = 16 mm ends 1 mm above the bottom, so layers 1-5 only.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(1.), Vec3d(16, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    // B holds the even layers; above its zone the seam stays at the back, not in A.
+    CHECK(front_zones(loops, {2., 16.}) == std::vector<int>{0, 1, 0, 1, 0, -1, 0, -1, 0, -1});
+    for (size_t i : {5, 7, 9})
+        CHECK(seam_at_back(loops[i]));
+}
+
+TEST_CASE("Layers where only one weak relay member acts go to it", "[PreciseSeam][Rules][Relay]")
+{
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(16, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay,6-10";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    CHECK(front_zones(loops, {2., 16.}) == std::vector<int>{0, 0, 0, 0, 0, 1, 0, 1, 0, 1});
+}
+
+TEST_CASE("A layer that a strong modifier takes spends the weak relay turn", "[PreciseSeam][Rules][Relay]")
+{
+    // X, Center at x = 9..11 mm on layer 3 only; A and B, Enforced at x = 2 and 16 mm, in a relay.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(9, -3, -1), "X");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "3";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(16, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    // Layer 3 is the turn of A, so layer 4 goes to B, as without X. Indices into {A, X, B}.
+    CHECK(front_zones(loops, {2., 9., 16.}) == std::vector<int>{0, 2, 1, 2, 0, 2, 0, 2, 0, 2});
+}
+
+TEST_CASE("A weak relay group acts at the place of its most senior member", "[PreciseSeam][Rules][Relay]")
+{
+    // Object list A, X, B: A and B Enforced in a relay at x = 2 and 16 mm, X Blocked over the zone of B. The block
+    // {A, B} stands at A, above X, so B wins over X on its layers; at its own place below X it would not.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, make_cube(6, 6, 4), Vec3d(14, -3, -1), "X");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(16, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    CHECK(front_zones(loops, {2., 16.}) == std::vector<int>{0, 1, 0, 1, 0, 1, 0, 1, 0, 1});
+}
+
+TEST_CASE("A weak relay group may mix Enforced, Blocked and Neutral members", "[PreciseSeam][Rules][Relay]")
+{
+    // A, Enforced at x = 2 mm, and B over everything from y = 17 mm back, in a relay. Blocked B moves the seam
+    // off the back on its layers; Neutral B, the control, leaves it there.
+    const auto type = GENERATE(ModelVolumeType::PRECISE_SEAM_BLOCKED, ModelVolumeType::PRECISE_SEAM_NEUTRAL);
+    CAPTURE(int(type));
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(type, make_cube(30, 6, 4), Vec3d(-5, 17, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    for (size_t i = 0; i < loops.size(); ++i) {
+        CAPTURE(i, loops[i].seam.x(), loops[i].seam.y());
+        if (i % 2 == 0)
+            CHECK(front_zone(loops[i], {2.}) == 0);
+        else
+            CHECK(seam_at_back(loops[i]) == (type == ModelVolumeType::PRECISE_SEAM_NEUTRAL));
+    }
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("A Neutral weak relay holder clears a junior zone on its layers", "[PreciseSeam][Rules][Relay]")
+{
+    // Object list A, G, X: A Enforced and G Neutral in a relay, X Enforced without one; A and X at x = 9 mm, G
+    // over both. The block {A, G} applies after X, so G clears X on its layers and the seam goes back.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(9, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, make_cube(4, 6, 4), Vec3d(8, -3, -1), "G");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(9, -3, -1), "X");
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    for (size_t i = 0; i < loops.size(); ++i) {
+        CAPTURE(i, loops[i].seam.x(), loops[i].seam.y());
+        if (i % 2 == 0)
+            CHECK(front_zone(loops[i], {9.}) == 0);
+        else
+            CHECK(seam_at_back(loops[i]));
+    }
+}
+
+namespace {
+using RuleCode = PreciseSeam::RuleDiagnosticCode;
+
+// Weak volumes of the fixture object initialized on `count` layers numbered from 1, in application order.
+// No rule here selects by height, so the layers of the print object are not read.
+struct WeakInit {
+    std::vector<const ModelVolume*>              weak;
+    PreciseSeam::EffectiveModifiers              effective;
+    std::optional<PreciseSeam::RelayOrder>       relay;
+    std::vector<PreciseSeam::ModifierDiagnostic> diagnostics;
+
+    WeakInit(const ExportFixture &fixture, size_t count)
+    {
+        PreciseSeam::LayerNumbering numbering;
+        numbering.count = count;
+        for (size_t i = 1; i <= count; ++i)
+            numbering.object_layers.push_back(i);
+        std::vector<const ModelVolume*> strong;
+        bool                            has_strong = false;
+        PreciseSeam::init_precise_seam_data_by_rules(strong, weak, has_strong, *fixture.model.objects.front(), numbering,
+                                                     fixture.print.objects().front()->layers(), effective, relay, diagnostics);
+    }
+
+    // Layers of the volume as '1' where it acts; empty when it acts on every layer.
+    std::string row(const ModelVolume *volume) const
+    {
+        std::string out;
+        for (bool active : effective.at(volume).layers)
+            out += active ? '1' : '0';
+        return out;
+    }
+
+    size_t reports(RuleCode code) const
+    {
+        return size_t(std::count_if(diagnostics.begin(), diagnostics.end(),
+                                    [code](const PreciseSeam::ModifierDiagnostic &d) { return d.diagnostic.code == code; }));
+    }
+};
+
+// A Precise Seam volume of the fixture object with the given rules field; its place does not matter here.
+const ModelVolume *add_modifier(ExportFixture &fixture, ModelVolumeType type, const std::string &rules)
+{
+    ModelVolume *volume = fixture.model.objects.front()->add_volume(make_cube(2, 2, 2));
+    volume->set_type(type);
+    volume->precise_seam_rules = rules;
+    return volume;
+}
+constexpr ModelVolumeType green = ModelVolumeType::PRECISE_SEAM_ENFORCED;
+} // namespace
+
+TEST_CASE("A weak relay group stands at its most senior member, and each member keeps the layers it holds", "[PreciseSeam][Rules][Relay]")
+{
+    using Volumes = std::vector<const ModelVolume*>;
+    ExportFixture fixture("back");
+    SECTION("pr1 moves the anchor, the queue stays in the object list order")
+    {
+        const ModelVolume *A = add_modifier(fixture, green, "relay");
+        const ModelVolume *X = add_modifier(fixture, ModelVolumeType::PRECISE_SEAM_BLOCKED, "");
+        const ModelVolume *B = add_modifier(fixture, green, "relay,pr1");
+        const WeakInit init(fixture, 4);
+        // Priority order B, A, X becomes the block {A, B} and X; weak ones apply in reverse.
+        CHECK(init.weak == Volumes{X, B, A});
+        CHECK(init.row(A) == "1010");
+        CHECK(init.row(B) == "0101");
+        CHECK(init.row(X).empty());
+        CHECK_FALSE(init.relay.has_value()); // The schedule of weak groups needs no pre-pass.
+    }
+    SECTION("An anchor without layers keeps the place of the group")
+    {
+        add_modifier(fixture, green, "relay,pr1,500"); // 500 selects no layer of four.
+        const ModelVolume *X = add_modifier(fixture, ModelVolumeType::PRECISE_SEAM_BLOCKED, "");
+        const ModelVolume *B = add_modifier(fixture, green, "relay");
+        const ModelVolume *C = add_modifier(fixture, green, "relay");
+        const WeakInit init(fixture, 4);
+        CHECK(init.weak == Volumes{X, C, B});
+        CHECK(init.row(B) == "1010");
+        CHECK(init.row(C) == "0101");
+    }
+    SECTION("An off member does not make the group mixed")
+    {
+        const ModelVolume *A = add_modifier(fixture, green, "relay");
+        add_modifier(fixture, ModelVolumeType::PRECISE_SEAM_CENTER, "relay,off");
+        const ModelVolume *C = add_modifier(fixture, ModelVolumeType::PRECISE_SEAM_NEUTRAL, "relay");
+        const WeakInit init(fixture, 4);
+        CHECK(init.weak == Volumes{C, A});
+        CHECK(init.row(A) == "1010");
+        CHECK(init.row(C) == "0101");
+        CHECK(init.reports(RuleCode::RelayGroupMixed) == 0);
+    }
+    SECTION("A strong member makes the group mixed: every member acts on its own and is reported")
+    {
+        const ModelVolume *A = add_modifier(fixture, green, "relay");
+        add_modifier(fixture, ModelVolumeType::PRECISE_SEAM_CENTER, "relay");
+        const ModelVolume *C = add_modifier(fixture, green, "relay");
+        const WeakInit init(fixture, 4);
+        CHECK(init.weak == Volumes{C, A});
+        CHECK(init.row(A).empty());
+        CHECK(init.row(C).empty());
+        CHECK(init.reports(RuleCode::RelayGroupMixed) == 3);
+    }
+    SECTION("A single member that takes part acts on its own; none leaves the group out")
+    {
+        const ModelVolume *A = add_modifier(fixture, green, "relay");
+        const ModelVolume *B = add_modifier(fixture, green, "relay,500");
+        add_modifier(fixture, green, "relay1,500");
+        add_modifier(fixture, green, "relay1,500");
+        const WeakInit init(fixture, 4);
+        CHECK(init.weak == Volumes{A});
+        CHECK(init.row(A).empty());
+        CHECK(init.effective.count(B) == 0);
+    }
+    SECTION("A member that holds no layer is left out")
+    {
+        const ModelVolume *A = add_modifier(fixture, green, "relay");
+        add_modifier(fixture, green, "relay,1");
+        add_modifier(fixture, green, "relay,1");
+        const WeakInit init(fixture, 4);
+        // A holds layer 1 and then is the only member left; the others never get the turn.
+        CHECK(init.weak == Volumes{A});
+        CHECK(init.row(A) == "1111");
+    }
+}
+
+// Expected holders come from the independent model of the SPEC v7 hash, over the full table of the active
+// members: [2, 0, -, 0, 2, 1, 0, 1, 2, 0]. A table without layer 3 would give other holders from layer 7 on.
+TEST_CASE("A weak relay-random group hashes the real layer index and keeps the only active member", "[PreciseSeam][Rules][Relay]")
+{
+    ExportFixture      fixture("back");
+    const ModelVolume *A = add_modifier(fixture, green, "relay-random1,1-2,4-10");
+    const ModelVolume *B = add_modifier(fixture, green, "relay-random1,1-2,5-10");
+    const ModelVolume *C = add_modifier(fixture, green, "relay-random1,1-2,5-10");
+    const WeakInit     init(fixture, 10);
+    // No member acts on layer 3; A alone acts on layer 4 and holds it after holding layer 2.
+    CHECK(init.row(A) == "0101001001");
+    CHECK(init.row(B) == "0000010100");
+    CHECK(init.row(C) == "1000100010");
 }

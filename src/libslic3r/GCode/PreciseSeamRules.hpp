@@ -30,7 +30,7 @@ enum class RuleDiagnosticCode {
     TypeDiffersFromTree, // Effective type differs from the volume type in the object list.
     OrderDiffersFromTree, // Effective order of the volume differs from its position in the object list.
     RelayConflict,       // A later relay label differs from the first one, which stays in effect.
-    RelayGroupNotStrong, // The relay group of the volume has a weak member, so the group acts without relay.
+    RelayGroupMixed,     // The relay group of the volume mixes strong and weak members, so it acts without relay.
     IdConflict           // A later id differs from the first one, which stays in effect.
 };
 

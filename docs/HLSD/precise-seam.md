@@ -181,11 +181,20 @@ print and is tested on its own.
   where the holder cannot, without spending the turn; the volumes after the
   block follow it. A stand-in never changes the holder: the block starts with
   the holder on every perimeter and tries a stand-in only where the holder
-  fails. Members whose rules exclude the layer neither hold nor stand in. Relay
-  takes strong types only: a group with a weak member acts without relay, and
-  every member is reported. A group is local to a print object, so the copies
-  of an object share one schedule, and a group of one member is that member
-  alone.
+  fails. Members whose rules exclude the layer neither hold nor stand in. A
+  group that mixes strong and weak members acts without relay, and every
+  member is reported. A group is local to a print object, so the copies of an
+  object share one schedule, and a group of one member is that member alone.
+- **Weak relay.** A group of weak volumes has no winners: the turn passes over
+  the layers where some member's rules keep the layer, whatever its zone meets,
+  with the holder chosen as above from these members (`relay-random` too).
+  The holders depend on the layer sets only, so
+  `init_precise_seam_data_by_rules()` sets them at once: the block stands at
+  the place of its most senior member in the effective weak order, and every
+  member keeps just the layers it holds. Only the holder's zone acts, there is
+  no stand-in, and a turn is spent also where the zone misses the perimeters
+  or a strong modifier takes them. The relay pre-pass and the main pass do not
+  see weak groups.
 - **Random relay.** A `relay-random` group differs only in the choice of the
   holder, from the same table of winners: a winner other than the holder of
   the last layer with a winner, unless that holder is the only winner. The
