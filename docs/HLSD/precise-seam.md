@@ -141,7 +141,10 @@ print and is tested on its own.
   takes the layers whose band meets `[A, B]`, `zinA-B` those wholly inside it;
   a single height `zA` is `zA-A`, the layer that holds that level, and `zinA` is
   always empty. A level on the border of two layers belongs to the lower one.
-  The comparisons allow `EPSILON`; heights are parsed exactly, in nanometres,
+  The intersection is `print_z >= A - EPSILON` and `bottom_z < B - EPSILON`,
+  so both its bounds lean towards the lower layer (`z10.00005` takes the layer
+  that ends at 10.0); the inclusion is `bottom_z >= A - EPSILON` and
+  `print_z <= B + EPSILON`. Heights are parsed exactly, in nanometres,
   with at most six decimals. Bands come from the object's own layers, not from
   the plan events, so the grid of another object never moves them; support-only
   events have no band and are never selected by height. The selected layers
