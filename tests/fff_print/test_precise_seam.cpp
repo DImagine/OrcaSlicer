@@ -2184,8 +2184,8 @@ TEST_CASE("A stand-in of a senior group leaves the relay-random group no holder 
     REQUIRE(loops.size() == 20);
     // H_B takes the right island on odd layers, as a stand-in where H_A holds, so G wins only on even layers
     // and keeps its previous holder over the odd ones: G_D, G_E, G_D, G_C, G_D. Had the seniors of G held
-    // only the holder of H, G would take layer 1; had an odd layer cleared the previous holder, layer 4 would
-    // go to G_D. Indices into {H_A, H_B, G_C, G_D, G_E}.
+    // only the holder of H, the pre-pass would give layer 1 to G and layer 2 would go to G_C; had an odd layer
+    // cleared the previous holder, layer 4 would go to G_D. Indices into {H_A, H_B, G_C, G_D, G_E}.
     const std::vector<int> right{1, 3, 1, 4, 1, 3, 1, 2, 1, 3};
     std::vector<std::pair<int, int>> expected;
     for (int layer = 1; layer <= 10; ++layer)
