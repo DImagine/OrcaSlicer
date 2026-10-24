@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include <wx/string.h>
 #include <wx/weakref.h>
 
 #include "libslic3r/ObjectID.hpp"
@@ -19,6 +20,9 @@ class wxWindow;
 namespace Slic3r {
 class ModelVolume;
 namespace GUI {
+
+// Help of the rules language, for the part menu dialog and the title of the settings group.
+wxString precise_seam_rules_help();
 
 // Writes raw rules to the volume with `volume_id` in the current model: when the text differs, one undo
 // snapshot, then a background update. False when that volume is gone or no longer Precise Seam.

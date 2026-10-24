@@ -35,6 +35,26 @@ PreciseSeamRulesEditor *part_editor()
 }
 } // namespace
 
+wxString precise_seam_rules_help()
+{
+    // TRN: Help for the Precise Seam rules field. Keep the rule keywords untranslated.
+    return _L("Comma-separated rules, applied from left to right:\n"
+              "layers: 5, 10-20, 10-20step3, 3x+1, odd, even, top5, all\n"
+              "heights in mm: z12.5-30 (layers that reach into it), zin12.5-30 (layers wholly inside), z12.5\n"
+              "model, bed: the layers and heights after it count from the model, above a raft, or from the bed (default)\n"
+              "mode: incl (default), excl\n"
+              "type: center, left, right, green, red, gray\n"
+              "priority: pr1 (highest), pr-1 (lowest); off; nowarn\n"
+              "relay, relay1: modifiers of one group act in turn, layer by layer: all center, left, right, or all green, red, gray\n"
+              "relay-random, relay-random1: the same, but each layer goes to a random member, not the previous one when another can; "
+              "relay-random1 seed 7 takes another draw, which may still give the same members\n"
+              "magnet, magnet2.5: where the modifier does not cross a wall, it acts on the point nearest to it; within 2.5 mm if given, magnet0 on a touch\n"
+              "idName: a name for scripts; the rules ignore it\n"
+              "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
+              "Heights are measured from the bed, as on the slider. Decimals take a point: a comma separates rules.\n"
+              "The name may hold more rules between -^ps= and =ps^-; override as the first rule here ignores them.");
+}
+
 bool apply_precise_seam_rules(ObjectID volume_id, const std::string &rules)
 {
     ModelVolume *volume = find_volume(volume_id);

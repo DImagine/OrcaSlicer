@@ -789,7 +789,8 @@ rebuilt on every export.
   the field. A backup does not apply it. Undo, redo and a new project drop the
   draft first, so a late focus loss cannot write it back. The dialog and the
   field share `apply_precise_seam_rules()`: one snapshot when the text differs,
-  then a background update. The settings search does not find the field.
+  then a background update. The group title shows the help of the dialog as
+  its tooltip. The settings search does not find the field.
 - Precise Seam volumes have no filament and cannot be pasted into SLA objects.
   Python plugins see them as `ModelVolumeType` values and through the
   `is_precise_seam*()` methods.

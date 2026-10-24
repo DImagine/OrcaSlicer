@@ -4300,7 +4300,12 @@ void TabPrintPart::build()
         optgroup->visibility_condition = [this] { return m_precise_seam_rules->shown(); };
         Line line{"", ""};
         line.full_width = 1;
-        line.widget     = [this](wxWindow *parent) { return m_precise_seam_rules->create(parent); };
+        line.widget     = [this, group = optgroup.get()](wxWindow *parent) {
+            // The group title, built just before the field, shows the whole help, as the menu dialog does.
+            if (group->stb != nullptr)
+                group->stb->SetToolTip(precise_seam_rules_help());
+            return m_precise_seam_rules->create(parent);
+        };
         optgroup->append_line(line);
     }
 }
