@@ -619,7 +619,7 @@ std::vector<size_t> holders(const std::vector<std::string> &rows, size_t members
     }
     return relay_holders(wins, members);
 }
-constexpr size_t none = RelayOrder::no_holder;
+constexpr size_t nobody = RelayOrder::no_holder;
 } // namespace
 
 TEST_CASE("The relay turn passes to the member after each holder", "[PreciseSeam][Rules][Relay]")
@@ -628,8 +628,8 @@ TEST_CASE("The relay turn passes to the member after each holder", "[PreciseSeam
     // B cannot on layer 2: A holds again, and the turn stays with B.
     CHECK(holders({"11", "10", "11", "11"}, 2) == Layers{0, 0, 1, 0});
     // Nobody wins on layer 2, or the layer has nothing to win: the turn is kept.
-    CHECK(holders({"11", "00", "11", "11"}, 2) == Layers{0, none, 1, 0});
-    CHECK(holders({"11", "", "11"}, 2) == Layers{0, none, 1});
+    CHECK(holders({"11", "00", "11", "11"}, 2) == Layers{0, nobody, 1, 0});
+    CHECK(holders({"11", "", "11"}, 2) == Layers{0, nobody, 1});
     // The first member cannot first; several in a row cannot.
     CHECK(holders({"01", "11", "11"}, 2) == Layers{1, 0, 1});
     CHECK(holders({"001", "111", "111"}, 3) == Layers{2, 0, 1});
@@ -651,7 +651,7 @@ TEST_CASE("A relay block starts at its holder and wraps around in queue order", 
     const ModelVolume *A = v[0], *B = v[1], *C = v[2], *X = v[3];
     RelayOrder order;
     order.entries = {{nullptr, 0}, {X}};
-    order.groups  = {{{A, B, C}, {0, 1, 2, none}}};
+    order.groups  = {{{A, B, C}, {0, 1, 2, nobody}}};
     EffectiveModifiers effective;
     for (const ModelVolume *volume : v)
         effective.emplace(volume, EffectiveModifier{ModelVolumeType::PRECISE_SEAM_CENTER, {}});

@@ -3,10 +3,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Polygon.hpp"
 #include "PreciseSeam.hpp"
 #include "PreciseSeamRules.hpp"
 
@@ -16,6 +18,8 @@
 
 namespace Slic3r {
 class ConstLayerPtrsAdaptor;
+class Layer;
+class PrintObject;
 namespace PreciseSeam {
 
 // Whether any Precise Seam volume of the object uses the rules language: a non-empty rules field, or a
@@ -76,6 +80,16 @@ std::vector<size_t> relay_holders(const std::vector<std::vector<uint8_t>> &wins,
 // a block without a holder is left out. The holders of these groups must be known. Clears `out` first.
 void relay_strong_volumes(const RelayOrder &order, const EffectiveModifiers &effective, size_t layer, size_t end,
                           std::vector<const ModelVolume*> &out);
+
+// Outer perimeters of one object layer, as the seam placer gives them to Precise Seam.
+using LayerPerimeters = std::function<Polygons(const Layer &layer)>;
+
+// Fills the holders of every group, in block order: a pre-pass, parallel over the layers, finds the members
+// that win on each layer against the senior modifiers and the blocks of the senior groups; then the queue
+// runs from the bottom layer up. Probes run the strong driver quietly on fresh copies of the perimeters.
+void schedule_relay(RelayOrder &order, const PrintObject &object, const EffectiveModifiers &effective,
+                    const ModifierRegionsCache &slices, const LayerPerimeters &perimeters,
+                    const std::function<void()> &throw_if_canceled);
 
 // Single-line export warnings for the diagnostics of all print objects, in their order. A diagnostic that
 // print objects of one model object repeat is reported once; equal texts of different volumes are merged

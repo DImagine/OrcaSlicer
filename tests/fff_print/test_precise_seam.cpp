@@ -1281,14 +1281,15 @@ TEST_CASE("Weak zones type painting's oversampled candidates between their bound
 }
 
 namespace {
-// A 20 x 20 x 2 mm cube sliced at 0.2 mm, so ten layers, each with one outer wall loop.
+// A 20 x 20 x 2 mm cube sliced at 0.2 mm, so ten layers, each with one outer wall loop. Another object mesh
+// takes the place of the cube.
 struct ExportFixture {
     Model model;
     Print print;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     Vec3d cube_min;
 
-    explicit ExportFixture(const std::string &seam_position, int raft_layers = 0)
+    explicit ExportFixture(const std::string &seam_position, int raft_layers = 0, TriangleMesh object = make_cube(20, 20, 2))
     {
         config.set_deserialize_strict("seam_position", seam_position);
         config.set_deserialize_strict("seam_slope_type", "none"); // The loop then starts exactly at the seam.
@@ -1297,7 +1298,7 @@ struct ExportFixture {
         config.set_deserialize_strict("outer_wall_line_width", "0.4");
         config.set_deserialize_strict("initial_layer_line_width", "0.4");
         config.set_deserialize_strict("raft_layers", std::to_string(raft_layers));
-        Test::init_print({make_cube(20, 20, 2)}, print, model, config);
+        Test::init_print({std::move(object)}, print, model, config);
         const ModelVolume *cube = model.objects.front()->volumes.front();
         cube_min = cube->mesh().transformed_bounding_box(cube->get_matrix()).min;
     }
@@ -1866,4 +1867,172 @@ TEST_CASE("override in the field replaces the name rules of the exported seam", 
         CAPTURE(i);
         CHECK(seam_on_front_helper(restored[i]) == (i < 3));
     }
+}
+
+namespace {
+// Index of the front-face helper whose centre x (relative to the loop centre) holds the seam, or -1.
+int front_helper(const OuterLoop &loop, const std::vector<double> &centres)
+{
+    if (std::abs(loop.seam.y() - (loop.bounds.min.y() - loop.bounds.center().y())) >= 0.01)
+        return -1;
+    for (size_t i = 0; i < centres.size(); ++i)
+        if (std::abs(loop.seam.x() - centres[i]) < 0.01)
+            return int(i);
+    return -1;
+}
+
+std::vector<int> front_helpers(const std::vector<OuterLoop> &loops, const std::vector<double> &centres)
+{
+    std::vector<int> out;
+    for (const OuterLoop &loop : loops)
+        out.push_back(front_helper(loop, centres));
+    return out;
+}
+
+// Front-face helper 2 x 6 mm that ends `top` mm above the bottom of the object; placed 1 mm below it.
+TriangleMesh front_box(double top = 3.) { return make_cube(2, 6, top + 1.); }
+
+// Two 8 x 20 x 2 mm islands of one object, L at x = 0..8 and R at x = 12..20; each layer has both loops.
+TriangleMesh two_islands()
+{
+    TriangleMesh mesh  = make_cube(8, 20, 2);
+    TriangleMesh right = make_cube(8, 20, 2);
+    right.translate(12., 0., 0.);
+    mesh.merge(right);
+    return mesh;
+}
+
+// Seam helpers of the L and R loops per layer, the left island first.
+std::vector<std::pair<int, int>> island_helpers(const std::vector<OuterLoop> &loops, const std::vector<double> &centres)
+{
+    std::vector<std::pair<int, int>> out;
+    for (size_t i = 0; i + 1 < loops.size(); i += 2) {
+        const bool       left_first = loops[i].bounds.center().x() < loops[i + 1].bounds.center().x();
+        const OuterLoop &left = loops[left_first ? i : i + 1], &right = loops[left_first ? i + 1 : i];
+        out.emplace_back(front_helper(left, centres), front_helper(right, centres));
+    }
+    return out;
+}
+} // namespace
+
+TEST_CASE("Relay members take the seam in turn, layer by layer", "[PreciseSeam][Rules][Relay]")
+{
+    // A and C are Center at x = 3 and 17 mm, B is Left at x = 9 mm: -7, -1 and 7 relative to the centre.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_LEFT, front_box(), Vec3d(9, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "C -^ps=relay=ps^-");
+    const std::vector<double> centres{-7., -1., 7.};
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    CHECK(front_helpers(loops, centres) == std::vector<int>{0, 1, 2, 0, 1, 2, 0, 1, 2, 0});
+    CHECK(fixture.warning().empty());
+    // The schedule is rebuilt for every export and comes out the same.
+    CHECK(front_helpers(outer_wall_loops(fixture.export_gcode()), centres) == front_helpers(loops, centres));
+}
+
+TEST_CASE("A relay member that cannot leaves the turn with it", "[PreciseSeam][Rules][Relay]")
+{
+    // B reaches layers 1-5 only by geometry, or acts on layers 6-10 only by its rules.
+    const auto [top, rules, expected] = GENERATE(table<double, std::string, std::vector<int>>({
+        {1., "relay", {0, 1, 0, 1, 0, 0, 0, 0, 0, 0}},
+        {3., "relay,6-10", {0, 0, 0, 0, 0, 1, 0, 1, 0, 1}}}));
+    CAPTURE(rules);
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(top), Vec3d(16, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = rules;
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    CHECK(front_helpers(loops, {-7., 7.}) == expected);
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("A senior modifier takes the layer without spending the relay turn", "[PreciseSeam][Rules][Relay]")
+{
+    // X, first in the object list and without relay, reaches layer 1 only; A then takes the first turn.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(0.2), Vec3d(9, -3, -1), "X");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay1";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay1";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    CHECK(front_helpers(loops, {0., -7., 7.}) == std::vector<int>{0, 1, 2, 1, 2, 1, 2, 1, 2, 1});
+}
+
+TEST_CASE("A relay group acts at the place of its most senior member", "[PreciseSeam][Rules][Relay]")
+{
+    // A, X, B in the object list: the block of A and B stands before X, so X never takes the seam.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay2";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(9, -3, -1), "X");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay2";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    CHECK(front_helpers(loops, {-7., 0., 7.}) == std::vector<int>{0, 2, 0, 2, 0, 2, 0, 2, 0, 2});
+    // X was never evaluated, so it is not reported as having no effect.
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("Another relay member stands in where the holder cannot, without taking the turn", "[PreciseSeam][Rules][Relay]")
+{
+    // M crosses the front of both islands (x = 3 and 15 mm), N only the left one (x = 6 mm). Relative to the
+    // island centres (x = 4 and 16 mm) these are -1 and 2.
+    ExportFixture fixture("back", 0, two_islands());
+    TriangleMesh  both = front_box(), right = front_box();
+    right.translate(12., 0., 0.);
+    both.merge(right);
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, std::move(both), Vec3d(2, -3, -1), "M");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(5, -3, -1), "N");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 20);
+    // On even layers N holds the turn on the left island, and M stands in on the right one.
+    std::vector<std::pair<int, int>> expected;
+    for (int layer = 1; layer <= 10; ++layer)
+        expected.emplace_back(layer % 2 == 1 ? 0 : 1, 0);
+    CHECK(island_helpers(loops, {-1., 2.}) == expected);
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("Relay members on different islands each place their seam on every layer", "[PreciseSeam][Rules][Relay]")
+{
+    // A crosses only the left island (x = 3 mm), B only the right one (x = 18 mm): -1 and 2 relative to the
+    // island centres. One group covers both, as each member stands in for the other.
+    ExportFixture fixture("back", 0, two_islands());
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(17, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 20);
+    CHECK(island_helpers(loops, {-1., 2.}) == std::vector<std::pair<int, int>>(10, {0, 1}));
+}
+
+TEST_CASE("A relay group with a weak member acts without relay and is reported", "[PreciseSeam][Rules][Relay]")
+{
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay1";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay1,red";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    // A acts as an ordinary strong modifier on every layer.
+    CHECK(front_helpers(loops, {-7., 7.}) == std::vector<int>(10, 0));
+    const std::vector<std::string> warnings = rule_warnings(fixture);
+    REQUIRE(warnings.size() == 3); // B also acts with the type from its rules.
+    CHECK(warnings[0].find("\"A\"") != std::string::npos);
+    CHECK(warnings[0].find("\"relay1\" acts without relay") != std::string::npos);
+    CHECK(warnings[1].find("\"B\"") != std::string::npos);
+    CHECK(warnings[2].find("\"B\"") != std::string::npos);
+    CHECK(warnings[2].find("\"relay1\" acts without relay") != std::string::npos);
 }

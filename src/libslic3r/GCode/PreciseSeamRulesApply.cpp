@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <iterator>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -14,9 +15,12 @@
 #include <vector>
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 #include "libslic3r/I18N.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
 #include "PreciseSeam.hpp"
 #include "PreciseSeamRules.hpp"
@@ -237,6 +241,63 @@ void relay_strong_volumes(const RelayOrder &order, const EffectiveModifiers &eff
         for (size_t k = 0; k < group.members.size(); ++k)
             if (const ModelVolume *member = group.members[(holder + k) % group.members.size()]; effective.at(member).active_on(layer))
                 out.push_back(member);
+    }
+}
+
+void schedule_relay(RelayOrder &order, const PrintObject &object, const EffectiveModifiers &effective,
+                    const ModifierRegionsCache &slices, const LayerPerimeters &perimeters,
+                    const std::function<void()> &throw_if_canceled)
+{
+    const size_t layer_count = object.layers().size();
+    // Groups one after another: the seniors of a group include the blocks of the groups before it.
+    for (size_t end = 0; end < order.entries.size(); ++end) {
+        if (order.entries[end].volume != nullptr)
+            continue;
+        RelayOrder::Group                &group = order.groups[order.entries[end].group];
+        std::vector<std::vector<uint8_t>> wins(layer_count);
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, layer_count), [&](const tbb::blocked_range<size_t> &range) {
+            std::vector<const ModelVolume*> seniors;
+            std::vector<const ModelVolume*> member(1);
+            for (size_t layer = range.begin(); layer < range.end(); ++layer) {
+                throw_if_canceled();
+                // Members whose rules keep this layer and that have not won on it yet.
+                std::vector<size_t> waiting;
+                for (size_t m = 0; m < group.members.size(); ++m)
+                    if (effective.at(group.members[m]).active_on(layer))
+                        waiting.push_back(m);
+                if (waiting.empty())
+                    continue;
+                const Layer &model_layer = *object.layers()[layer];
+                relay_strong_volumes(order, effective, layer, end, seniors);
+                std::vector<uint8_t> row(group.members.size(), 0);
+                for (const Polygon &perimeter : perimeters(model_layer)) {
+                    // Each run takes a fresh counterclockwise copy, as the main pass does, since a placed seam
+                    // changes the polygon.
+                    const auto places = [&](const std::vector<const ModelVolume*> &volumes) {
+                        Polygon polygon = perimeter;
+                        polygon.make_counter_clockwise();
+                        const PreparedPerimeter prepared(polygon);
+                        return insert_strong_seam_point(volumes, polygon, prepared, &model_layer, slices, nullptr, &effective, true)
+                            .has_value();
+                    };
+                    // A perimeter that the seniors take is no win for any member.
+                    if (!seniors.empty() && places(seniors))
+                        continue;
+                    for (auto it = waiting.begin(); it != waiting.end();) {
+                        member.front() = group.members[*it];
+                        if (places(member)) {
+                            row[*it] = 1;
+                            it       = waiting.erase(it);
+                        } else
+                            ++it;
+                    }
+                    if (waiting.empty())
+                        break;
+                }
+                wins[layer] = std::move(row);
+            }
+        });
+        group.holders = relay_holders(wins, group.members.size());
     }
 }
 

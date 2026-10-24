@@ -112,7 +112,8 @@ print and is tested on its own.
   `pr.1` is not an element. `override` as the first element of the field
   replaces the name, so that the behaviour can change without renaming the
   volume: the name is then not parsed and reports nothing. Anywhere else it is
-  an invalid element.
+  an invalid element. `relayN` and a bare `relay` put the volume into a relay
+  group (see Relay below).
 - **Atomic elements.** An element that does not match the grammar as a whole,
   or has a number above 1 000 000, is dropped with a warning and changes
   nothing, not even the mode. Numbers are bounded before any arithmetic and a
@@ -121,7 +122,8 @@ print and is tested on its own.
   type and the priority carry over. The first valid set picks the initial set:
   every layer in `excl` mode, none otherwise. Without any valid set the
   modifier acts on every layer, as a volume without rules does. The first type
-  and the first priority win; a different later one is a warning.
+  and the first priority win; a different later one is a warning. The same
+  holds for the relay label.
 - **Layer numbers.** Rules count the layers as the preview slider does. When
   printing by layer, every event of the export plan
   (`GCode::collect_layers_to_print(const Print&)`) whose tools have extruders,
@@ -160,6 +162,40 @@ print and is tested on its own.
   an inactive layer before recording any usage, so a layer excluded by rules is
   never reported as "no effect". A volume that is off or active on no layer is
   left out entirely.
+- **Relay.** Strong volumes of one print object with the same relay label
+  (`relay1`, or the bare `relay`, which is a group of its own) take the seam in
+  turn, layer by layer. The group stands as one block at the place of its most
+  senior member in the effective strong order, also when that member acts on no
+  layer; the queue inside is the object list order, not the priority. On every
+  model layer the holder is the first member, in circular order from the turn,
+  that wins: places a seam on an outer perimeter that its seniors leave free.
+  The seniors are the strong volumes before the block and the blocks of senior
+  groups, each turned to its own holder. The turn then passes to the member
+  after the holder; a layer without a winner keeps it. On every perimeter the
+  block is tried from the holder round the queue, so another member stands in
+  where the holder cannot, without spending the turn; the volumes after the
+  block follow it. A stand-in never changes the holder: the block starts with
+  the holder on every perimeter and tries a stand-in only where the holder
+  fails. Members whose rules exclude the layer neither hold nor stand in. Relay
+  takes strong types only: a group with a weak member acts without relay, and
+  every member is reported. A group is local to a print object, so the copies
+  of an object share one schedule, and a group of one member is that member
+  alone.
+- **Relay pre-pass.** Who wins depends on the geometry, so `schedule_relay()`
+  runs before the main pass, group by group in block order. In parallel over
+  the layers it takes the perimeters as the main pass extracts them, and runs
+  the strong driver on a fresh copy of each, first with the seniors, then on a
+  free perimeter with each member alone until it wins. These probes are quiet:
+  no log, no counters, no usage flags, so the real pass reports everything once.
+  The queue then runs sequentially from the bottom layer up. One function,
+  `relay_strong_volumes()`, builds both the seniors of a probe and the strong
+  order of a layer in the main pass, where each worker rebuilds one list per
+  layer, so both passes see the same occupation. This rests on the contract of
+  the strong driver: the first success ends a perimeter, and weak modifiers act
+  only without a strong result. Without a group of two or more members nothing
+  of this runs. With groups, perimeters are extracted again and clipping
+  repeats for the members and their seniors, an ordinary senior up to once per
+  group.
 - **Isolation.** Few prints use rules, so the language is a separate branch
   (`GCode/PreciseSeamRulesApply.cpp`) and the export stages of a print without
   rules stay in their usual order. The branch is taken per object when a
@@ -185,7 +221,8 @@ print and is tested on its own.
    resliced (see [Print invalidation](#print-invalidation)).
 2. **Modifier slices.** `SeamPlacer::init()` collects each object's Precise Seam
    volumes once, slices every volume separately and caches its regions with
-   their bounding boxes.
+   their bounding boxes. An object with relay groups then gets their schedule
+   from the relay pre-pass.
 3. **Perimeters.** Seam candidates are gathered in parallel over the layers.
    For objects with Precise Seam volumes, each external perimeter polygon is
    normalized and prepared once for all modifiers.

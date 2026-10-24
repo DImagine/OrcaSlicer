@@ -6312,6 +6312,7 @@ void ObjectList::edit_precise_seam_rules()
                                       "mode: incl (default), excl\n"
                                       "type: center, left, right, green, red, gray\n"
                                       "priority: pr1 (highest), pr-1 (lowest); off; nowarn\n"
+                                      "relay, relay1: Center, Left and Right modifiers of one group take the seam in turn, layer by layer\n"
                                       "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
                                       "Heights are measured from the bed, as on the slider. Decimals take a point: a comma separates rules.\n"
                                       "The name may hold more rules between -^ps= and =ps^-; override as the first rule here ignores them."),

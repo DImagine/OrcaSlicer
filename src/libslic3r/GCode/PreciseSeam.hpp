@@ -91,6 +91,7 @@ struct ExtractionContext {
     const Layer *layer = nullptr;
     const ModelVolume *modifier = nullptr;
     PreciseSeamWarnings *warnings = nullptr;
+    bool quiet = false; // A probe: nothing is logged or counted, the real pass reports.
 };
 
 // Borrows the source polygon; use only until insertion/refinement changes that polygon.
@@ -173,7 +174,8 @@ void init_precise_seam_data(
 
 // Inserts the seam point of the first strong modifier with a usable segment on this perimeter and returns
 // it, or nullopt. `prepared` must describe `polygon` before any change. Only objects with layer rules
-// pass `effective`; without it every modifier acts with its own type on every layer.
+// pass `effective`; without it every modifier acts with its own type on every layer. A `quiet` call is a
+// probe of the relay pre-pass: it logs nothing and takes no `warnings`.
 std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
@@ -181,7 +183,8 @@ std::optional<Point> insert_strong_seam_point(
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings = nullptr,
-    const EffectiveModifiers *effective = nullptr);
+    const EffectiveModifiers *effective = nullptr,
+    bool quiet = false);
 
 // Collects weak zones, inserts their boundaries into `polygon` and subdivides enforced edges. Pass
 // modifiers lowest priority first; `prepared` must describe the unchanged `polygon`. `effective` as for

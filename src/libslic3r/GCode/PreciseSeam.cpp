@@ -343,8 +343,8 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
         outcome = "contact";
     if (outcome != nullptr) {
         // Same log budget as failures, counted separately; SeamPlacer::init() reports the total.
-        if (context.warnings == nullptr ||
-            context.warnings->recovered_fragments.fetch_add(1, std::memory_order_relaxed) < failed_fragment_log_limit)
+        if (!context.quiet && (context.warnings == nullptr ||
+            context.warnings->recovered_fragments.fetch_add(1, std::memory_order_relaxed) < failed_fragment_log_limit))
             BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamFragmentRecovered] Rare case resolved after a binding failure"
                 << " outcome=" << outcome << fragment_location(context, fragment_index)
                 << " original_pair=" << failure.pair_index << " original_reason=" << failure.reason
@@ -352,6 +352,8 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
                 << " perimeter_points=" << perimeter.size();
         return true;
     }
+    if (context.quiet)
+        return false;
     // Reserve a log slot atomically before formatting; callers without shared state log every failure.
     if (context.warnings &&
         context.warnings->failed_fragments.fetch_add(1, std::memory_order_relaxed) >= failed_fragment_log_limit)
@@ -709,9 +711,12 @@ std::optional<Point> insert_strong_seam_point(
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings,
-    const EffectiveModifiers *effective)
+    const EffectiveModifiers *effective,
+    bool quiet)
 {
     assert(&prepared.polygon == &polygon);
+    // A probe records nothing: the usage flags and warning masks belong to the real pass.
+    assert(!quiet || warnings == nullptr);
     if (strong_volumes.empty() || layer == nullptr || !prepared.valid)
         return std::nullopt;
     const size_t layer_id = layer->id() - layer->object()->slicing_parameters().raft_layers();
@@ -725,7 +730,7 @@ std::optional<Point> insert_strong_seam_point(
             continue;
         const ModelVolumeType type = *active;
         const SegmentExtraction extracted = extract_perimeter_segments(
-            prepared, it->second[layer_id], type, {layer, modifier, warnings});
+            prepared, it->second[layer_id], type, {layer, modifier, warnings, quiet});
         record_extraction(warnings, modifier, type, extracted);
         // Full containment leaves no intersection to place the point on: skipped with a warning.
         if (extracted.full_containment) {
