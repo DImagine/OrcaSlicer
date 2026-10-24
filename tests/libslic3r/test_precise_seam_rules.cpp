@@ -570,11 +570,16 @@ TEST_CASE("A height step selects the layer of each level", "[PreciseSeam][Rules]
     CHECK(heights("z0-80step10") == range(50, 400, 50));
     CHECK(heights(" Z 0 - 80 STEP 10 ") == range(50, 400, 50));
     // A single level is zA, also at the tolerance.
-    for (const std::string level : {"12.5", "12.6", "10.00005", "10.0002", "0.00005", "0", "80"}) {
+    for (const std::string level : {"12.5", "12.6", "10.00005", "10.0002", "0.00005", "0", "80", "10.000099", "10.0001",
+                                    "10.000101"}) {
         CAPTURE(level);
         CHECK(heights("z" + level + "-" + level + "step3") == heights("z" + level));
     }
-    // A billion levels take no time per level.
+    // So is the largest literal.
+    const std::vector<LayerBand> highest{{1, 999999.8, 1000000.}};
+    CHECK(selected(select_layers(field("z1000000-1000000step1"), 1, {1}, highest)) == Layers{1});
+    CHECK(selected(select_layers(field("z1000000"), 1, {1}, highest)) == Layers{1});
+    // Eighty million levels take no time per level.
     CHECK(heights("z0-80step0.000001") == range(1, 400));
     Layers rest;
     for (size_t layer = 1; layer <= 400; ++layer)
@@ -582,6 +587,10 @@ TEST_CASE("A height step selects the layer of each level", "[PreciseSeam][Rules]
             rest.push_back(layer);
     CHECK(heights("excl,z0-80step10") == rest);
     CHECK(heights("exclz0-80step10,excl,odd") == heights("excl,z0-80step10,excl,odd"));
+    // A broken prefixed set does not switch the mode for the sets after it.
+    const LayerRules broken = field("incl,exclz0-1step0,2");
+    CHECK(count_code(broken.diagnostics, Code::InvalidElement) == 1);
+    CHECK(apply_rules(broken) == Layers{2});
     const LayerRules rules = field("z0-1step0.25");
     REQUIRE(rules.operations.size() == 1);
     CHECK(rules.operations.front().set.step == 250000);
@@ -644,6 +653,23 @@ TEST_CASE("Height steps and formulas match the levels listed one by one", "[Prec
                     levels.push_back(level);
                 CHECK(evaluate(text) == levels_oracle(levels, bands));
             }
+    // Bands with a gap, of variable height and thinner than twice the tolerance.
+    const std::vector<LayerBand> uneven{{1, 0., 0.2}, {2, 0.5, 0.7}, {3, 0.7, 0.75}, {4, 1., 1.00005}, {5, 1.00005, 1.6}};
+    const auto evaluate_uneven = [&](const std::string &text) { return selected(select_layers(field(text), 5, object_layers(5), uneven)); };
+    for (const int64_t k : {50000, -50000, 100000, 300000, 1000})
+        for (const int64_t b : {0, 25000, 1000000, 1600000, -300000}) {
+            const std::string text = formula_text(k, b);
+            CAPTURE(text);
+            CHECK(evaluate_uneven(text) == levels_oracle(formula_levels(k, b, 2000000), uneven));
+        }
+    for (const int64_t step : {1000, 50000, 100000, 350000}) {
+        const std::string text = "z0-1.6step" + mm_text(step);
+        CAPTURE(text);
+        std::vector<int64_t> levels;
+        for (int64_t level = 0; level <= 1600000; level += step)
+            levels.push_back(level);
+        CHECK(evaluate_uneven(text) == levels_oracle(levels, uneven));
+    }
     // Steps of one nanometre on bands of one micrometre around zero.
     const std::vector<LayerBand> fine = grid(5, 0.001, -0.002);
     for (const int64_t k : {1, -1})
@@ -665,6 +691,9 @@ TEST_CASE("Height formulas reach the top of their representation", "[PreciseSeam
     CHECK(selected(select_layers(field("zx"), 1, {1}, {{1, 9.2e12 - 1., 9.2e12}})) == Layers{1});
     CHECK(selected(select_layers(field("z1000000x"), 1, {1}, {{1, 9.e12 - 0.5, 9.e12 + 0.5}})) == Layers{1});
     CHECK(selected(select_layers(field("zx"), 1, {1}, {{1, 9.3e12, 9.3e12 + 1.}})).empty());
+    // One nanometre steps up there round several levels to one double, and still find the band.
+    CHECK(selected(select_layers(field("z0.000001x"), 1, {1}, {{1, 9.2e12 - 0.01, 9.2e12}})) == Layers{1});
+    CHECK(selected(select_layers(field("z0.000001x"), 1, {1}, {{1, 9.3e12, 9.3e12 + 1.}})).empty());
     CHECK(selected(select_layers(field("z0.000001x-1000000"), 1, {1}, {{1, 0., 1.}})) == Layers{1});
 }
 

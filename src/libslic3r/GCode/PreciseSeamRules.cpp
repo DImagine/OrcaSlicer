@@ -494,8 +494,9 @@ std::string leading_element(std::string_view source_text)
 }
 
 // Calls `visit` for every layer of the set within [1, count]. With literals up to rule_number_limit, every
-// value below stays within +-(count + 3 * rule_number_limit): a formula starts at b or within one step k
-// of 1 or count, and every loop stops at most one step past its bound.
+// layer value of the numbered sets stays within +-(count + 3 * rule_number_limit): a formula starts at b or
+// within one step k of 1 or count, and every loop stops at most one step past its bound. Height levels have
+// their own bounds, below.
 template<class Visit>
 void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<size_t> &object_layers, const std::vector<LayerBand> &bands,
                     Visit &&visit)

@@ -161,8 +161,8 @@ print and is tested on its own.
   nanometres). k and b take a sign, k is 1 when omitted (`zx`); `zin` takes
   neither a step nor a formula. A formula without a level above zero is a valid
   empty set. The selection takes no time per level: for each band a binary
-  search finds the first level above its bottom, and only that level can reach
-  into the band. Bands come from the object's own layers, not from
+  search finds the first level above its bottom, and checking that level is
+  sufficient: if it is above the band's top, all later levels are too. Bands come from the object's own layers, not from
   the plan events, so the grid of another object never moves them; support-only
   events have no band and are never selected by height. The selected layers
   then act as a set of their numbers.
