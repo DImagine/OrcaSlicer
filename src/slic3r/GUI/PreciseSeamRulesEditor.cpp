@@ -86,7 +86,7 @@ wxSizer *PreciseSeamRulesEditor::create(wxWindow *parent)
     auto *text = new wxTextCtrl(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE);
     // Three lines of the current font: long rules wrap and scroll instead of growing the page.
     text->SetMinSize(wxSize(-1, 3 * text->GetCharHeight() + parent->FromDIP(10)));
-    text->SetToolTip(_L("Precise Seam rules of this volume, as in the part menu dialog, which also shows the help. "
+    text->SetToolTip(_L("Precise Seam rules of this volume; the group title shows the help. "
                         "They apply when the field loses focus or on Ctrl+Enter."));
     wxGetApp().UpdateDarkUI(text);
 

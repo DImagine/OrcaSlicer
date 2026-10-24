@@ -774,22 +774,20 @@ rebuilt on every export.
   Right; green, red and gray for Enforced, Blocked and Neutral. The three strong
   colors are close shades of one orange because all three mark strong
   modifiers; the object list icons tell the modes apart.
-- *Precise Seam Rules*, right under *Precise Seam Type* in the part menu of a
-  single Precise Seam volume, edits its rules field; renaming such a volume also
-  updates the print, since the name may hold rules.
-- The part settings show the same field, three lines high, in a *Precise Seam
-  Rules* group on the Frequent and the Others page, for a single selected
-  Precise Seam volume only. The field is no config option: the part tab adds
+- The part settings edit the rules field of a Precise Seam volume, three lines
+  high, in a *Precise Seam Rules* group on the Frequent and the Others page, for
+  a single selected Precise Seam volume only; there is no separate menu item.
+  Renaming such a volume also updates the print, since the name may hold rules. The field is no config option: the part tab adds
   the groups after its option filter, and a visibility condition of the group
   hides them for other selections. `PreciseSeamRulesEditor` keeps the shown
   volume and a pending edit by volume ID; typing changes only the draft, which
   is applied to its own volume when the field loses focus, on Ctrl+Enter, when
-  the selection changes, before the dialog opens, and before saving, slicing
+  the selection changes, and before saving, slicing
   and exporting, which may be started by a shortcut while the focus stays in
   the field. A backup does not apply it. Undo, redo and a new project drop the
-  draft first, so a late focus loss cannot write it back. The dialog and the
-  field share `apply_precise_seam_rules()`: one snapshot when the text differs,
-  then a background update. The group title shows the help of the dialog as
+  draft first, so a late focus loss cannot write it back.
+  `apply_precise_seam_rules()` writes the text: one snapshot when it differs,
+  then a background update. The group title shows the help of the language as
   its tooltip. The settings search does not find the field.
 - Precise Seam volumes have no filament and cannot be pasted into SLA objects.
   Python plugins see them as `ModelVolumeType` values and through the

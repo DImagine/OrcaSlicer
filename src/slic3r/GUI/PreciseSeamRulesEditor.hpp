@@ -14,14 +14,15 @@ class wxTextCtrl;
 class wxWindow;
 
 // Precise Seam rules field of the part settings: a copy on the Frequent and the Others page of the part
-// tab, shown for a single selected Precise Seam volume. The volume holds the only accepted text.
+// tab, shown for a single selected Precise Seam volume. Besides the volume name, it is the only editor of
+// the rules; the volume holds the only accepted text.
 // Design: docs/HLSD/precise-seam.md
 
 namespace Slic3r {
 class ModelVolume;
 namespace GUI {
 
-// Help of the rules language, for the part menu dialog and the title of the settings group.
+// Help of the rules language, shown on the title of the settings group.
 wxString precise_seam_rules_help();
 
 // Writes raw rules to the volume with `volume_id` in the current model: when the text differs, one undo

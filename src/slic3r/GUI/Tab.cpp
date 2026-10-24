@@ -4301,7 +4301,7 @@ void TabPrintPart::build()
         Line line{"", ""};
         line.full_width = 1;
         line.widget     = [this, group = optgroup.get()](wxWindow *parent) {
-            // The group title, built just before the field, shows the whole help, as the menu dialog does.
+            // The group title, built just before the field, shows the whole help of the rules.
             if (group->stb != nullptr)
                 group->stb->SetToolTip(precise_seam_rules_help());
             return m_precise_seam_rules->create(parent);

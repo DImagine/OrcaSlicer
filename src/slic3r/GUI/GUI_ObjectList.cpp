@@ -15,7 +15,6 @@
 
 #include "OptionsGroup.hpp"
 #include "Tab.hpp"
-#include "PreciseSeamRulesEditor.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
 #include "GLCanvas3D.hpp"
@@ -6280,38 +6279,6 @@ void ObjectList::split_instances()
                                     std::set<int>{ inst_idx };
 
     instances_to_separated_object(obj_idx, inst_idxs);
-}
-
-// The single selected volume if it is Precise Seam, otherwise nullptr.
-static ModelVolume *selected_precise_seam_volume(const ObjectList &list, const ObjectDataViewModel &model)
-{
-    const wxDataViewItem item = list.GetSelection();
-    if (!item || !(model.GetItemType(item) & itVolume))
-        return nullptr;
-    const int obj_idx = model.GetObjectIdByItem(item);
-    const int vol_idx = model.GetVolumeIdByItem(item);
-    if (obj_idx < 0 || vol_idx < 0 || size_t(vol_idx) >= list.object(obj_idx)->volumes.size())
-        return nullptr;
-    ModelVolume *volume = list.object(obj_idx)->volumes[vol_idx];
-    return volume->is_precise_seam() ? volume : nullptr;
-}
-
-bool ObjectList::can_edit_precise_seam_rules() const
-{
-    return GetSelectedItemsCount() == 1 && selected_precise_seam_volume(*this, *m_objects_model) != nullptr;
-}
-
-void ObjectList::edit_precise_seam_rules()
-{
-    if (!can_edit_precise_seam_rules())
-        return;
-    // A pending edit of the settings field is applied first, so that the dialog starts from it.
-    commit_precise_seam_rules_edit();
-    ModelVolume *volume = selected_precise_seam_volume(*this, *m_objects_model);
-    wxTextEntryDialog dialog(this, precise_seam_rules_help(), _L("Precise Seam Rules"), from_u8(volume->precise_seam_rules));
-    if (dialog.ShowModal() != wxID_OK)
-        return;
-    apply_precise_seam_rules(volume->id(), into_u8(dialog.GetValue()));
 }
 
 void ObjectList::rename_item()
