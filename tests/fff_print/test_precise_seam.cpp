@@ -2479,3 +2479,248 @@ TEST_CASE("A weak relay-random group hashes the real layer index and keeps the o
     CHECK(init.row(B) == "0000010100");
     CHECK(init.row(C) == "1000100010");
 }
+
+namespace {
+// Magnet point of the perimeter to the given modifier regions; the limit is in mm.
+std::optional<Point> magnet_point(const Polygon &perimeter, ExPolygons regions, std::optional<double> limit = std::nullopt)
+{
+    const std::optional<PreciseSeam::MagnetPoint> found = PreciseSeam::find_magnet_point(
+        PreciseSeam::PreparedPerimeter(perimeter), PreciseSeam::prepare_modifier_regions(std::move(regions)),
+        limit ? std::optional<double>(scale_(*limit)) : std::nullopt);
+    return found ? std::optional<Point>(found->point) : std::nullopt;
+}
+std::optional<Point> magnet_point(const Polygon &perimeter, const Polygons &loops, std::optional<double> limit = std::nullopt)
+{
+    ExPolygons regions;
+    for (const Polygon &loop : loops)
+        regions.emplace_back(loop);
+    return magnet_point(perimeter, std::move(regions), limit);
+}
+
+// The same contour starting at another vertex.
+Polygon rotated(Polygon polygon, size_t shift)
+{
+    std::rotate(polygon.points.begin(), polygon.points.begin() + shift, polygon.points.end());
+    return polygon;
+}
+
+// An L of 20 x 20 mm whose mass lies on the right: its centroid is at (11.67, 8.33).
+Polygon right_heavy_l() { return Polygon(Points{mm(0, 0), mm(20, 0), mm(20, 20), mm(10, 20), mm(10, 10), mm(0, 10)}); }
+
+// The effective rules of a magnet modifier, as init_precise_seam_data_by_rules() sets them.
+PreciseSeam::EffectiveModifier magnet_rule(ModelVolumeType type, std::optional<double> limit = std::nullopt)
+{
+    PreciseSeam::EffectiveModifier rule{type, {}};
+    rule.magnet = true;
+    if (limit)
+        rule.magnet_limit = scale_(*limit);
+    return rule;
+}
+} // namespace
+
+TEST_CASE("A magnet takes the point of the perimeter nearest to the modifier, within its limit", "[PreciseSeam][Magnet]")
+{
+    const Polygon perimeter = rectangle(0, 0, 20, 20);
+    // 3 mm in front of the front face; the parallel edges meet at the projection of the loop centroid.
+    const Polygon box = rectangle(8, -5, 12, -3);
+    CHECK(magnet_point(perimeter, Polygons{box}) == mm(10, 0));
+    CHECK(magnet_point(perimeter, Polygons{box}, 5.) == mm(10, 0));
+    CHECK(magnet_point(perimeter, Polygons{box}, 3.) == mm(10, 0));
+    // The limit allows the snapping tolerance of 1 um, not more.
+    CHECK(magnet_point(perimeter, Polygons{box}, 2.9995) == mm(10, 0));
+    CHECK_FALSE(magnet_point(perimeter, Polygons{box}, 2.998).has_value());
+    CHECK_FALSE(magnet_point(perimeter, Polygons{box}, 2.).has_value());
+    // Nested either way, the boundaries decide: a modifier inside the body, and a body inside the modifier.
+    CHECK(magnet_point(perimeter, Polygons{rectangle(2, 3, 6, 7)}) == mm(0, 5));
+    CHECK(magnet_point(perimeter, Polygons{rectangle(-3, -2, 25, 30)}) == mm(11, 0));
+    // A ring around the body: its hole is the nearest boundary.
+    ExPolygon ring(rectangle(-10, -10, 30, 30));
+    Polygon   hole = rectangle(-2, -3, 23, 25);
+    hole.reverse();
+    ring.holes.push_back(hole);
+    CHECK(magnet_point(perimeter, ExPolygons{ring}) == mm(0, 11));
+    CHECK_FALSE(magnet_point(perimeter, ExPolygons{}).has_value());
+}
+
+TEST_CASE("magnet0 takes a touch only", "[PreciseSeam][Magnet]")
+{
+    const Polygon perimeter = rectangle(0, 0, 20, 20);
+    // A vertex on the front face, and a vertex on an inclined edge, which computes slightly above zero.
+    CHECK(magnet_point(perimeter, Polygons{Polygon(Points{mm(10, 0), mm(8, -2), mm(12, -2)})}, 0.) == mm(10, 0));
+    const Polygon triangle(Points{mm(0, 0), mm(20, 0), mm(0, 20)});
+    const auto    touch = magnet_point(triangle, Polygons{Polygon(Points{mm(10, 10), mm(14, 12), mm(12, 14)})}, 0.);
+    REQUIRE(touch.has_value());
+    CHECK((*touch - mm(10, 10)).cast<double>().norm() < 2.);
+    // 2 um away is no touch.
+    CHECK_FALSE(magnet_point(perimeter, Polygons{Polygon(Points{mm(10, -0.002), mm(8, -2), mm(12, -2)})}, 0.).has_value());
+}
+
+TEST_CASE("Equally near magnet points go to the loop centroid, then the perimeter centroid, then rear and left", "[PreciseSeam][Magnet]")
+{
+    const Polygon perimeter = rectangle(0, 0, 20, 20);
+    const size_t  shift     = GENERATE(0, 1, 3);
+    CAPTURE(shift);
+    SECTION("A vertex at one distance from two edges: its loop centroid picks one, whichever the tree returns")
+    {
+        // The vertex (2, 2) is 2 mm from the left and the front face; the centroid (4.67, 3.33) is nearer (2, 0).
+        const Polygon triangle(Points{mm(2, 2), mm(9, 3), mm(3, 5)});
+        CHECK(magnet_point(rotated(perimeter, shift), Polygons{triangle}) == mm(2, 0));
+        Polygon mirrored = triangle;
+        for (Point &p : mirrored.points)
+            p = Point(p.y(), p.x());
+        mirrored.reverse();
+        CHECK(magnet_point(rotated(perimeter, shift), Polygons{mirrored}) == mm(0, 2));
+    }
+    SECTION("Each candidate measures to its own loop, so a far region does not move the choice")
+    {
+        // Equal loops 2 mm in front give (5, 0) and (15, 0); equal for the perimeter centroid too, so the left one.
+        const Polygons loops{rectangle(4, -3, 6, -2), rectangle(14, -3, 16, -2)};
+        CHECK(magnet_point(rotated(perimeter, shift), loops) == mm(5, 0));
+        CHECK(magnet_point(rotated(perimeter, shift), Polygons{loops[0], loops[1], rectangle(40, -30, 60, -20)}) == mm(5, 0));
+    }
+    SECTION("The perimeter centroid breaks a tie of the loop centroids")
+    {
+        const Polygons loops{rectangle(2, -3, 4, -2), rectangle(16, -3, 18, -2)};
+        CHECK(magnet_point(rotated(right_heavy_l(), shift), loops) == mm(17, 0));
+    }
+    SECTION("A full symmetry goes to the rear point")
+    {
+        CHECK(magnet_point(rotated(perimeter, shift), Polygons{rectangle(8, 8, 12, 12)}) == mm(10, 20));
+    }
+    SECTION("A loop without area has no centroid: the perimeter centroid decides")
+    {
+        // The flat loop runs 3 mm in front; of the projections of its vertices, x = 9 mm is nearest (10, 10).
+        CHECK(magnet_point(rotated(perimeter, shift), Polygons{Polygon(Points{mm(6, -3), mm(12, -3), mm(9, -3)})}) == mm(9, 0));
+    }
+    SECTION("A candidate within the tolerance of the minimum but beyond the limit is left out")
+    {
+        // B is 0.8 um farther than A, so both are minima; the perimeter centroid prefers B, the limit only A.
+        const Polygons loops{rectangle(2, -3, 4, -2), rectangle(16, -3.0008, 18, -2.0008)};
+        CHECK(magnet_point(rotated(right_heavy_l(), shift), loops) == mm(17, 0));
+        CHECK(magnet_point(rotated(right_heavy_l(), shift), loops, 1.9995) == mm(3, 0));
+    }
+}
+
+TEST_CASE("A strong magnet places the seam where it does not cross the perimeter, and acts by its type where it does", "[PreciseSeam][Magnet]")
+{
+    SeamFixture                     fixture;
+    PreciseSeam::PreciseSeamWarnings warnings;
+    PreciseSeam::EffectiveModifiers effective;
+    const auto add = [&](ModelVolumeType type, Polygon slice, std::optional<double> limit = std::nullopt) {
+        const ModelVolume *volume = fixture.add(type, {std::move(slice)});
+        effective.emplace(volume, magnet_rule(type, limit));
+        warnings.modifier_usage.try_emplace(volume);
+        return volume;
+    };
+    const auto seam = [&](const std::vector<const ModelVolume*> &volumes) {
+        Polygon perimeter = rectangle(0, 0, 20, 20);
+        return PreciseSeam::insert_strong_seam_point(volumes, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
+                                                     fixture.cache, &warnings, &effective);
+    };
+    // Left is the start of the crossing on the counterclockwise front face, and means nothing to a magnet.
+    CHECK(seam({add(ModelVolumeType::PRECISE_SEAM_LEFT, rectangle(8, -5, 12, -3))}) == mm(10, 0));
+    CHECK(seam({add(ModelVolumeType::PRECISE_SEAM_LEFT, rectangle(8, -2, 12, 2))}) == mm(8, 0));
+    // Full containment is no crossing: the nearest point instead of a skip, without its warning.
+    const ModelVolume *around = add(ModelVolumeType::PRECISE_SEAM_CENTER, rectangle(-3, -2, 25, 30));
+    CHECK(seam({around}) == mm(11, 0));
+    CHECK(warnings.full_containment.load() == 0);
+    CHECK(warnings.modifier_usage.at(around).reached.load());
+    // Beyond its limit the magnet passes the perimeter on, and has not reached it.
+    const ModelVolume *far = add(ModelVolumeType::PRECISE_SEAM_CENTER, rectangle(8, -5, 12, -3), 2.);
+    const ModelVolume *junior = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {rectangle(14, -2, 16, 2)});
+    CHECK(seam({far, junior}) == mm(15, 0));
+    CHECK(warnings.modifier_usage.at(far).checked.load());
+    CHECK_FALSE(warnings.modifier_usage.at(far).reached.load());
+    // A limited ring around the body is too far as well: full containment does not count as reached.
+    const ModelVolume *wide = add(ModelVolumeType::PRECISE_SEAM_CENTER, rectangle(-5, -5, 25, 25), 2.);
+    CHECK_FALSE(seam({wide}).has_value());
+    CHECK_FALSE(warnings.modifier_usage.at(wide).reached.load());
+    // A senior magnet takes the perimeter from a junior ordinary modifier.
+    CHECK(seam({add(ModelVolumeType::PRECISE_SEAM_CENTER, rectangle(8, -5, 12, -3)), junior}) == mm(10, 0));
+}
+
+TEST_CASE("A weak magnet types its point only", "[PreciseSeam][Magnet]")
+{
+    using Seam = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    const auto [type, painted, typed] = GENERATE(table<ModelVolumeType, Seam, Seam>({
+        {ModelVolumeType::PRECISE_SEAM_ENFORCED, Seam::Blocked, Seam::Enforced},
+        {ModelVolumeType::PRECISE_SEAM_BLOCKED, Seam::Enforced, Seam::Blocked},
+        {ModelVolumeType::PRECISE_SEAM_NEUTRAL, Seam::Enforced, Seam::Neutral}}));
+    // In front of the body, and around it: full containment is no crossing, so one point either way.
+    const auto [slice, point] = GENERATE(table<Polygon, Point>({{rectangle(8, -5, 12, -3), mm(10, 0)}, {rectangle(-3, -2, 25, 30), mm(11, 0)}}));
+    SeamFixture                     fixture;
+    PreciseSeam::EffectiveModifiers effective;
+    const ModelVolume              *volume = fixture.add(type, {slice});
+    effective.emplace(volume, magnet_rule(type));
+    Polygon    perimeter = rectangle(0, 0, 20, 20);
+    const auto segments  = PreciseSeam::collect_weak_modifier_segments({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter),
+                                                                       fixture.layer, fixture.cache, nullptr, &effective);
+    REQUIRE(segments.size() == 1);
+    CHECK_FALSE(segments.front().whole_perimeter);
+    const auto types = weak_candidate_types(perimeter, segments, [painted = painted](const Point &) { return painted; });
+    REQUIRE(types.size() == perimeter.size());
+    for (size_t i = 0; i < perimeter.size(); ++i) {
+        CAPTURE(i, perimeter[i].x(), perimeter[i].y());
+        CHECK(types[i] == (perimeter[i] == point ? typed : painted));
+    }
+}
+
+TEST_CASE("The rules give a magnet its limit in scaled units, a touch and no limit apart", "[PreciseSeam][Rules][Magnet]")
+{
+    ExportFixture      fixture("back");
+    const ModelVolume *any   = add_modifier(fixture, green, "magnet");
+    const ModelVolume *touch = add_modifier(fixture, green, "magnet0");
+    const ModelVolume *tiny  = add_modifier(fixture, green, "magnet0.000001");
+    const ModelVolume *plain = add_modifier(fixture, green, "");
+    const WeakInit     init(fixture, 10);
+    CHECK(init.effective.at(any).magnet);
+    CHECK_FALSE(init.effective.at(any).magnet_limit.has_value());
+    CHECK(init.effective.at(touch).magnet_limit == 0.);
+    // One nanometre stays a positive limit below one coordinate unit, not a touch and not unlimited.
+    REQUIRE(init.effective.at(tiny).magnet_limit.has_value());
+    CHECK_THAT(*init.effective.at(tiny).magnet_limit, Catch::Matchers::WithinRel(scale_(0.000001), 1e-9));
+    CHECK(*init.effective.at(tiny).magnet_limit > 0.);
+    CHECK_FALSE(init.effective.at(plain).magnet);
+}
+
+TEST_CASE("A magnet modifier draws the exported seam to the nearest point of the wall", "[PreciseSeam][Rules][Magnet]")
+{
+    // The helper stands 3 mm in front of the front face, around x = 10 mm: the seam goes to the face centre.
+    const auto [type, rules, drawn] = GENERATE(table<ModelVolumeType, std::string, bool>({
+        {ModelVolumeType::PRECISE_SEAM_CENTER, "magnet", true},
+        {ModelVolumeType::PRECISE_SEAM_CENTER, "magnet5", true},
+        {ModelVolumeType::PRECISE_SEAM_CENTER, "magnet2", false},
+        {ModelVolumeType::PRECISE_SEAM_ENFORCED, "magnet", true}}));
+    CAPTURE(rules);
+    ExportFixture fixture("back");
+    fixture.add(type, make_cube(2, 2, 4), Vec3d(9, -5, -1));
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = rules;
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    for (const OuterLoop &loop : loops) {
+        CAPTURE(loop.seam.x(), loop.seam.y());
+        if (drawn)
+            CHECK(front_helper(loop, {0.}) == 0);
+        else
+            CHECK(seam_at_back(loop));
+    }
+    // A magnet beyond its limit on every layer had no effect, which is reported.
+    CHECK(fixture.warning().empty() == drawn);
+}
+
+TEST_CASE("Magnet relay members take the seam in turn", "[PreciseSeam][Rules][Relay][Magnet]")
+{
+    // A and B stand 3 mm in front around x = 5 and 15 mm; B's limit of 2 mm keeps it from every layer.
+    const bool limited = GENERATE(false, true);
+    CAPTURE(limited);
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 2, 4), Vec3d(4, -5, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "magnet,relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 2, 4), Vec3d(14, -5, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = limited ? "magnet2,relay" : "magnet,relay";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    // Where B cannot, A stands in on every layer.
+    CHECK(front_helpers(loops, {-5., 5.}) ==
+          (limited ? std::vector<int>(10, 0) : std::vector<int>{0, 1, 0, 1, 0, 1, 0, 1, 0, 1}));
+}

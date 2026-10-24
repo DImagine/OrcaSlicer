@@ -31,7 +31,8 @@ enum class RuleDiagnosticCode {
     OrderDiffersFromTree, // Effective order of the volume differs from its position in the object list.
     RelayConflict,       // A later relay label differs from the first one, which stays in effect.
     RelayGroupMixed,     // The relay group of the volume mixes strong and weak members, so it acts without relay.
-    IdConflict           // A later id differs from the first one, which stays in effect.
+    IdConflict,          // A later id differs from the first one, which stays in effect.
+    MagnetConflict       // A later magnet differs from the first one, which stays in effect.
 };
 
 // Relay group label. The four spaces relay, relayN, relay-random and relay-randomN never share a group.
@@ -46,6 +47,14 @@ struct RelayLabel {
 
 // The label as it is written after normalization, e.g. "relay2" or "relay-random".
 std::string relay_label_text(const RelayLabel &label);
+
+// magnet: the modifier acts on the point of a perimeter nearest to it where it does not cross the perimeter.
+struct MagnetRule {
+    std::optional<int64_t> limit; // Largest distance in nanometres; none acts at any distance, 0 on a touch only.
+
+    bool operator==(const MagnetRule &rhs) const { return limit == rhs.limit; }
+    bool operator!=(const MagnetRule &rhs) const { return !(*this == rhs); }
+};
 
 // Name blocks are numbered from 1 in name order; the field always comes after them.
 struct RuleSource {
@@ -90,6 +99,7 @@ struct LayerRules {
     std::optional<int>              priority;   // First priority over all sources: N for prN, -N for pr-N.
     std::optional<RelayLabel>       relay;      // First relay label over all sources.
     std::optional<std::string>      id;         // Trimmed original text of the first id element; the language ignores it.
+    std::optional<MagnetRule>       magnet;     // First magnet over all sources.
     bool                            off             = false;
     bool                            nowarn          = false;
     bool                            name_overridden = false; // override first in the field: the name took no part.

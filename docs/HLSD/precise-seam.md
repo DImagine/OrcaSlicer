@@ -114,6 +114,8 @@ print and is tested on its own.
   volume: the name is then not parsed and reports nothing. Anywhere else it is
   an invalid element. `relayN` and a bare `relay` put the volume into a relay
   group, `relay-randomN` and `relay-random` into a random one (see Relay
+  below). `magnet` and `magnetN` (N in mm, a decimal as for heights) draw the
+  modifier to the nearest point of a perimeter it does not cross (see Magnet
   below). An element that starts with `id` names the volume for external
   scripts: it is taken as a whole, with any text after `id`, before the
   grammar, and changes nothing. The first id keeps its trimmed original text
@@ -127,7 +129,7 @@ print and is tested on its own.
   every layer in `excl` mode, none otherwise. Without any valid set the
   modifier acts on every layer, as a volume without rules does. The first type
   and the first priority win; a different later one is a warning. The same
-  holds for the relay label.
+  holds for the relay label and the magnet, whose distances compare as numbers.
 - **Layer numbers.** Rules count the layers as the preview slider does. When
   printing by layer, every event of the export plan
   (`GCode::collect_layers_to_print(const Print&)`) whose tools have extruders,
@@ -205,6 +207,38 @@ print and is tested on its own.
   distribution differs between platforms, so every export and platform gives
   the same seams. The hash ignores the volume IDs, so the schedule survives
   saving and loading.
+- **Magnet.** On a perimeter whose boundary the modifier's slice does not cross
+  (no segment and no discarded fragment, or full containment, which comes first
+  as it keeps a closed segment), a magnet acts on one point: the point of the
+  perimeter nearest to the boundaries of the slice, contours and holes alike.
+  Nesting either way is therefore no crossing. Where the boundary is crossed,
+  the type acts as usual; where only discarded fragments remain, the modifier
+  does not act, as before. A strong magnet puts the seam at that point through
+  the usual insertion, whatever its Center, Left or Right type; a weak one is a
+  zone of that single point, with boundaries at one vertex, so it types one
+  candidate and no edge is subdivided. With `magnetN` a perimeter farther than
+  N, compared with the 1 µm snapping tolerance, is left to the next modifier;
+  `magnet0` thus takes a touch, which on an inclined edge computes slightly
+  above zero. The modifier still needs a slice on the layer.
+  `find_magnet_point()` first finds the minimum distance from vertex queries in
+  two AABB trees of lines, as a nearest pair always has a vertex of one
+  contour. It then collects every point of the minimum: the perimeter vertices
+  that near, with all loops within that distance; the projections of the
+  modifier vertices that near onto all perimeter edges within it, not just the
+  tree's one answer; and, on the edges of these candidates, the projection of
+  each candidate loop's centroid where it is that near to the same loop, which
+  is the best point of an interval of parallel edges. The tolerance only
+  equates computed distances; points of the continuous band within it are not
+  candidates. Each rule then keeps the candidates within the tolerance of its
+  fixed best: the distance to the centroid of the candidate's own loop (skipped
+  when some candidate has no loop with an area), the distance to the centroid of
+  the perimeter, and finally the bed axes, rear then left, exactly as for equal
+  strong segments, so far regions of the modifier and the start of the
+  perimeter do not move the point. The cost is two tree builds per perimeter
+  and modifier, the vertex queries, and the hits within the distance, which
+  grow only for nearly equidistant shapes. A magnet counts as reaching a
+  perimeter only where it finds a point, and full containment gives it no
+  warning. Relay groups take magnets as they are: a found point is a win.
 - **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
   `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, and runs
@@ -404,6 +438,9 @@ follows seam painting, where a whole perimeter can be painted in either color:
 - **Seam Center, Left and Right** are skipped with the full-containment warning:
   there is no intersection to place the point on.
 
+A magnet (see [Layer rules](#layer-rules)) treats full containment as no
+crossing and acts on its nearest point instead, without the warning.
+
 Enforced, Neutral and Blocked take part in the usual priority order (see
 [Weak modifiers](#weak-modifiers)).
 
@@ -444,6 +481,7 @@ Arc length is the sum of Euclidean edge lengths, not the chord or a vertex count
 `insert_strong_seam_point()` selects the longest segment of the first modifier
 that has one. Exactly equal lengths are resolved by the prepared target points:
 greater bed Y first, then smaller X; a complete tie keeps the first segment.
+The same order (`rear_then_left()`) settles the last tie of a magnet point.
 Slice coordinates already include instance rotation and have the bed axes;
 centering and XY translation do not change this order. Nearly equal lengths are
 not treated as equal, so exact ties occur mainly on axis-aligned geometry.
@@ -752,7 +790,9 @@ rebuilt on every export.
   zones over painting's oversampled candidates, the warning type masks, usage
   tracking for the "had no effect" and whole-perimeter Blocked warnings, volume
   sorting of strong and weak groups, restoration of strong points after
-  alignment, raft layer indexing and structured slices. End-to-end tests slice
+  alignment, raft layer indexing and structured slices; magnet points with
+  their limit, touch, nesting, holes and every tie-break rule, and the strong
+  and weak magnet paths. End-to-end tests slice
   a real object with Precise Seam
   volumes and check the outer wall starts in the exported G-code: every strong
   mode under several seam positions and with a raft, Enforced and Blocked zones,

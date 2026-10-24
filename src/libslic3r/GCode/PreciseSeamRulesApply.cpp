@@ -22,6 +22,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/libslic3r.h"
 #include "PreciseSeam.hpp"
 #include "PreciseSeamRules.hpp"
 
@@ -151,7 +152,14 @@ void init_precise_seam_data_by_rules(
     }
 
     const auto take_part = [&](size_t i, std::vector<const ModelVolume*> &out) {
-        effective_out.emplace(volumes[i], EffectiveModifier{ruled[i].effective_type(), std::move(*layers[i])});
+        EffectiveModifier modifier{ruled[i].effective_type(), std::move(*layers[i])};
+        if (rules[i].magnet) {
+            modifier.magnet = true;
+            // Kept in scaled units as a double: a limit below one unit must not round to a touch or to none.
+            if (rules[i].magnet->limit)
+                modifier.magnet_limit = scale_(double(*rules[i].magnet->limit) / nanometres_per_mm);
+        }
+        effective_out.emplace(volumes[i], std::move(modifier));
         out.push_back(volumes[i]);
     };
     // A group stands at the place of its most senior member, even one whose rules exclude every layer.
@@ -473,6 +481,10 @@ std::vector<std::string> rule_warnings(const std::vector<ModifierDiagnostic> &di
         case Code::IdConflict:
             // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text, %4% its place, e.g. "rules field, element 2". Do not translate "id".
             message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": id \"%3%\" (%4%) differs from the first id in its rules and was ignored.")) % volume % object % text % location(d)).str();
+            break;
+        case Code::MagnetConflict:
+            // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text, %4% its place, e.g. "rules field, element 2". Do not translate "magnet".
+            message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": magnet \"%3%\" (%4%) differs from the first magnet in its rules and was ignored.")) % volume % object % text % location(d)).str();
             break;
         }
         // Equal texts also come from two blocks broken the same way, or equal rules in a source.

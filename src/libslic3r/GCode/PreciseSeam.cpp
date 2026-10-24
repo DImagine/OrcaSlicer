@@ -11,11 +11,14 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/AABBTreeLines.hpp"
+#include "libslic3r/Line.hpp"
 #include <algorithm>
 #include <atomic>
 #include <boost/log/trivial.hpp>
 #include <optional>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <cassert>
 #include <cmath>
@@ -534,6 +537,202 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     return result;
 }
 
+// A rear point goes first, then a left one: the last tie-break of strong segments and magnet points.
+// Slice coordinates already include object rotation and retain bed axes; centering and instance
+// translation cannot change this order.
+static bool rear_then_left(const Point &a, const Point &b)
+{
+    return a.y() > b.y() || (a.y() == b.y() && a.x() < b.x());
+}
+
+// The nearest point of segment [a, b] to `point` and its parameter on the segment.
+static std::pair<Vec2d, double> project_on_segment(const Vec2d &point, const Vec2d &a, const Vec2d &b)
+{
+    const Vec2d  ab     = b - a;
+    const double length = ab.squaredNorm();
+    const double t      = length > 0. ? std::clamp((point - a).dot(ab) / length, 0., 1.) : 0.;
+    return {a + t * ab, t};
+}
+
+std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
+                                             std::optional<double> limit)
+{
+    if (!prepared.valid)
+        return std::nullopt;
+    const Polygon &perimeter = prepared.polygon;
+    const size_t   count     = perimeter.size();
+    static constexpr double infinity = std::numeric_limits<double>::infinity(); // Static: lambdas use it uncaptured.
+    // Distances within the snapping radius count as equal. The limit takes the same margin, so that a touch
+    // on an inclined edge, which computes slightly above zero, still counts for magnet0.
+    const double tolerance = double(TOLERANCE_LINEAR);
+
+    // Loops are the contours and holes of the regions in reach; each line remembers its loop.
+    std::vector<const Polygon*> loops;
+    for (const ModifierRegion &region : modifier) {
+        if (region.polygon.empty())
+            continue;
+        if (limit) {
+            const BoundingBox &a = prepared.bounds;
+            const BoundingBox &b = region.bounds;
+            // The boxes are at least as far apart as their gap along either axis.
+            const double gap_x = std::max({0., double(b.min.x() - a.max.x()), double(a.min.x() - b.max.x())});
+            const double gap_y = std::max({0., double(b.min.y() - a.max.y()), double(a.min.y() - b.max.y())});
+            if (std::max(gap_x, gap_y) > *limit + tolerance)
+                continue;
+        }
+        loops.push_back(&region.polygon.contour);
+        for (const Polygon &hole : region.polygon.holes)
+            loops.push_back(&hole);
+    }
+    Lines               modifier_lines;
+    std::vector<size_t> line_loop;
+    for (size_t loop = 0; loop < loops.size(); ++loop)
+        for (const Line &line : to_lines(*loops[loop])) {
+            modifier_lines.push_back(line);
+            line_loop.push_back(loop);
+        }
+    if (modifier_lines.empty())
+        return std::nullopt;
+    const Lines perimeter_lines = to_lines(perimeter); // Edge i runs from vertex i to vertex i + 1.
+    const auto  modifier_tree   = AABBTreeLines::build_aabb_tree_over_indexed_lines(modifier_lines);
+    const auto  perimeter_tree  = AABBTreeLines::build_aabb_tree_over_indexed_lines(perimeter_lines);
+    const auto  distance_to     = [](const Lines &lines, const auto &tree, const Vec2d &point) {
+        size_t      line = 0;
+        Vec2d       nearest;
+        const double squared = AABBTreeLines::squared_distance_to_indexed_lines(lines, tree, point, line, nearest);
+        return squared < 0. ? infinity : std::sqrt(squared);
+    };
+
+    // Stage 1: the nearest pair has a vertex of one contour, so vertex queries give the minimum distance.
+    std::vector<double> vertex_distance(count);
+    double              nearest = infinity;
+    for (size_t k = 0; k < count; ++k) {
+        vertex_distance[k] = distance_to(modifier_lines, modifier_tree, perimeter[k].cast<double>());
+        nearest            = std::min(nearest, vertex_distance[k]);
+    }
+    struct ModifierVertex {
+        Vec2d  point;
+        size_t loop;
+        double distance;
+    };
+    std::vector<ModifierVertex> modifier_vertices;
+    for (size_t loop = 0; loop < loops.size(); ++loop)
+        for (const Point &point : loops[loop]->points) {
+            const Vec2d  p        = point.cast<double>();
+            const double distance = distance_to(perimeter_lines, perimeter_tree, p);
+            modifier_vertices.push_back({p, loop, distance});
+            nearest = std::min(nearest, distance);
+        }
+    if (nearest == infinity || (limit && nearest > *limit + tolerance))
+        return std::nullopt;
+    const double threshold = std::min(nearest, limit ? *limit : infinity) + tolerance;
+    // Tree queries take a slightly larger radius; every hit is then checked exactly against the threshold.
+    const double search = (threshold + 1.) * (threshold + 1.);
+
+    // Stage 2: every point of the minimum, each with the loops it is that near to.
+    struct Candidate {
+        Vec2d               point;
+        size_t              edge;
+        double              parameter;
+        std::vector<size_t> loops;
+    };
+    std::vector<Candidate> candidates;
+    const auto modifier_line_distance = [&](size_t line, const Vec2d &point) {
+        return (project_on_segment(point, modifier_lines[line].a.cast<double>(), modifier_lines[line].b.cast<double>()).first - point).norm();
+    };
+    // (i) Perimeter vertices, with every loop within the threshold, not only the tree's single answer.
+    for (size_t k = 0; k < count; ++k)
+        if (vertex_distance[k] <= threshold) {
+            const Vec2d         point = perimeter[k].cast<double>();
+            std::vector<size_t> near;
+            for (size_t line : AABBTreeLines::all_lines_in_radius(modifier_lines, modifier_tree, point, search))
+                if (modifier_line_distance(line, point) <= threshold)
+                    near.push_back(line_loop[line]);
+            std::sort(near.begin(), near.end());
+            near.erase(std::unique(near.begin(), near.end()), near.end());
+            candidates.push_back({point, k, 0., std::move(near)});
+        }
+    // (ii) Projections of modifier vertices on every perimeter edge within the threshold.
+    for (const ModifierVertex &vertex : modifier_vertices)
+        if (vertex.distance <= threshold)
+            for (size_t edge : AABBTreeLines::all_lines_in_radius(perimeter_lines, perimeter_tree, vertex.point, search)) {
+                const auto [point, parameter] = project_on_segment(vertex.point, perimeter_lines[edge].a.cast<double>(),
+                                                                   perimeter_lines[edge].b.cast<double>());
+                if ((point - vertex.point).norm() <= threshold)
+                    candidates.push_back({point, edge, parameter, {vertex.loop}});
+            }
+    // (iii) On parallel edges the minimum is an interval: add the projection of each loop centroid on the
+    // edges of its candidates, where it is that near to the same loop.
+    std::vector<std::optional<Vec2d>> centroids(loops.size());
+    for (size_t loop = 0; loop < loops.size(); ++loop)
+        if (loops[loop]->area() != 0.)
+            centroids[loop] = loops[loop]->centroid().cast<double>();
+    std::vector<std::pair<size_t, size_t>> edge_loops;
+    for (const Candidate &candidate : candidates)
+        for (size_t loop : candidate.loops) {
+            edge_loops.emplace_back(candidate.edge, loop);
+            // A candidate at a vertex also lies on the edge before it.
+            if (candidate.parameter == 0.)
+                edge_loops.emplace_back((candidate.edge + count - 1) % count, loop);
+            else if (candidate.parameter == 1.)
+                edge_loops.emplace_back((candidate.edge + 1) % count, loop);
+        }
+    std::sort(edge_loops.begin(), edge_loops.end());
+    edge_loops.erase(std::unique(edge_loops.begin(), edge_loops.end()), edge_loops.end());
+    for (const auto &[edge, loop] : edge_loops) {
+        if (!centroids[loop])
+            continue;
+        const auto [point, parameter] = project_on_segment(*centroids[loop], perimeter_lines[edge].a.cast<double>(),
+                                                           perimeter_lines[edge].b.cast<double>());
+        // Measured to the lines of this loop only: another loop must not confirm a foreign centroid.
+        const auto lines = AABBTreeLines::all_lines_in_radius(modifier_lines, modifier_tree, point, search);
+        if (std::any_of(lines.begin(), lines.end(), [&, loop = loop, point = point](size_t line) {
+                return line_loop[line] == loop && modifier_line_distance(line, point) <= threshold;
+            }))
+            candidates.push_back({point, edge, parameter, {loop}});
+    }
+    if (candidates.empty())
+        return std::nullopt;
+
+    // Each rule keeps the candidates within the tolerance of its best value, fixed before filtering.
+    const auto keep_nearest = [&candidates, tolerance](const auto &value) {
+        double best = infinity;
+        for (const Candidate &candidate : candidates)
+            best = std::min(best, value(candidate));
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                        [&](const Candidate &candidate) { return value(candidate) > best + tolerance; }),
+                         candidates.end());
+    };
+    // The centroid of the candidate's own loop; skipped when some candidate has no loop with an area.
+    const auto loop_centroid_distance = [&centroids](const Candidate &candidate) {
+        double distance = infinity;
+        for (size_t loop : candidate.loops)
+            if (centroids[loop])
+                distance = std::min(distance, (candidate.point - *centroids[loop]).norm());
+        return distance;
+    };
+    if (std::all_of(candidates.begin(), candidates.end(),
+                    [&](const Candidate &candidate) { return loop_centroid_distance(candidate) < infinity; }))
+        keep_nearest(loop_centroid_distance);
+    if (perimeter.area() != 0.) {
+        const Vec2d centre = perimeter.centroid().cast<double>();
+        keep_nearest([&centre](const Candidate &candidate) { return (candidate.point - centre).norm(); });
+    }
+    // Two different points always differ here; a repeat of one point keeps the first.
+    const Candidate *best = nullptr;
+    Point            best_point;
+    for (const Candidate &candidate : candidates) {
+        const Point point(candidate.point);
+        if (best == nullptr || rear_then_left(point, best_point)) {
+            best       = &candidate;
+            best_point = point;
+        }
+    }
+    const PerimeterPosition position = best->parameter == 1. ? PerimeterPosition{(best->edge + 1) % count, 0.} :
+                                                               PerimeterPosition{best->edge, best->parameter};
+    return MagnetPoint{best_point, position};
+}
+
 void init_precise_seam_data(
     std::vector<const ModelVolume*>& strong_volumes_out,
     std::vector<const ModelVolume*>& weak_volumes_out,
@@ -685,10 +884,27 @@ static std::optional<ModelVolumeType> active_type(const EffectiveModifiers *effe
     return modifier->type();
 }
 
+// The magnet of a modifier with layer rules, or null.
+static const EffectiveModifier *magnet_of(const EffectiveModifiers *effective, const ModelVolume *modifier)
+{
+    if (effective != nullptr)
+        if (const auto it = effective->find(modifier); it != effective->end() && it->second.magnet)
+            return &it->second;
+    return nullptr;
+}
+
+// Whether a magnet acts instead of the type: the modifier does not cross the perimeter. Full containment
+// comes first, as it keeps its closed segment; only discarded fragments still count as a crossing.
+static bool magnet_acts(const SegmentExtraction &extracted)
+{
+    return extracted.valid && (extracted.full_containment || (extracted.segments.empty() && extracted.discarded_fragments == 0));
+}
+
 // Records one extraction for the warnings: the type of a modifier with a discarded fragment, the
 // evaluated/reached flags for "had no effect" (a discarded fragment counts as reached, a contact not).
+// `magnet` is set where a magnet acts instead of the type: then only a found point counts as reached.
 static void record_extraction(PreciseSeamWarnings *warnings, const ModelVolume *modifier, ModelVolumeType type,
-                              const SegmentExtraction &extracted)
+                              const SegmentExtraction &extracted, std::optional<bool> magnet = std::nullopt)
 {
     if (warnings == nullptr || !extracted.valid)
         return;
@@ -699,7 +915,7 @@ static void record_extraction(PreciseSeamWarnings *warnings, const ModelVolume *
         return;
     PreciseSeamWarnings::ModifierUsage &usage = it->second;
     PreciseSeamWarnings::set(usage.checked);
-    if (!extracted.segments.empty() || extracted.full_containment || extracted.discarded_fragments > 0)
+    if (magnet ? *magnet : (!extracted.segments.empty() || extracted.full_containment || extracted.discarded_fragments > 0))
         PreciseSeamWarnings::set(usage.reached);
 }
 
@@ -731,6 +947,17 @@ std::optional<Point> insert_strong_seam_point(
         const ModelVolumeType type = *active;
         const SegmentExtraction extracted = extract_perimeter_segments(
             prepared, it->second[layer_id], type, {layer, modifier, warnings, quiet});
+        // A magnet that does not cross the perimeter puts the seam at the nearest point, whatever the type.
+        if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet_acts(extracted)) {
+            const std::optional<MagnetPoint> point = find_magnet_point(prepared, it->second[layer_id], magnet->magnet_limit);
+            record_extraction(warnings, modifier, type, extracted, point.has_value());
+            if (!point)
+                continue;
+            const auto [seam_point, seam_index] = insert_point_into_perimeter(point->point, point->position.edge_index, polygon);
+            refine_at_vertex(seam_index, +1, polygon);
+            refine_at_vertex(seam_index, -1, polygon);
+            return seam_point;
+        }
         record_extraction(warnings, modifier, type, extracted);
         // Full containment leaves no intersection to place the point on: skipped with a warning.
         if (extracted.full_containment) {
@@ -751,10 +978,7 @@ std::optional<Point> insert_strong_seam_point(
         for (const PerimeterSegment &segment : extracted.segments) {
             assert(segment.strong_target.has_value());
             const StrongSeamTarget &candidate = *segment.strong_target;
-            // Slice coordinates already include object rotation and retain bed axes.
-            // Centering/instance translation cannot change rear (+Y), then left (-X) ordering.
-            const bool farther_or_left = candidate.point.y() > target.point.y() ||
-                (candidate.point.y() == target.point.y() && candidate.point.x() < target.point.x());
+            const bool farther_or_left = rear_then_left(candidate.point, target.point);
             if (segment.length > longest || (segment.length == longest && farther_or_left)) {
                 longest = segment.length;
                 target = candidate;
@@ -974,8 +1198,16 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         const ModelVolumeType volume_type = *active;
         const ExtractionContext context{layer, modifier_volume, warnings};
         const SegmentExtraction extracted = extract_perimeter_segments(prepared, it->second[layer_id], volume_type, context);
-        record_extraction(warnings, modifier_volume, volume_type, extracted);
         const auto type = convert_weak_modifier_type(volume_type);
+        // A magnet that does not cross the perimeter types its nearest point only: a zone of one point.
+        if (const EffectiveModifier *magnet = magnet_of(effective, modifier_volume); magnet != nullptr && magnet_acts(extracted)) {
+            const std::optional<MagnetPoint> point = find_magnet_point(prepared, it->second[layer_id], magnet->magnet_limit);
+            record_extraction(warnings, modifier_volume, volume_type, extracted, point.has_value());
+            if (point)
+                result.push_back({type, point->point, point->position, point->point, point->position, false, modifier_volume});
+            continue;
+        }
+        record_extraction(warnings, modifier_volume, volume_type, extracted);
         // Full containment works like seam painting all round: the whole perimeter takes the type.
         // A perimeter left whole Blocked also gets a warning (see apply_weak_modifiers_to_perimeter()).
         if (extracted.full_containment) {

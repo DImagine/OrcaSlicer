@@ -6314,6 +6314,7 @@ void ObjectList::edit_precise_seam_rules()
                                       "priority: pr1 (highest), pr-1 (lowest); off; nowarn\n"
                                       "relay, relay1: modifiers of one group act in turn, layer by layer: all center, left, right, or all green, red, gray\n"
                                       "relay-random, relay-random1: the same, but each layer goes to a random member, not the previous one when another can\n"
+                                      "magnet, magnet2.5: where the modifier does not cross a wall, it acts on the point nearest to it; within 2.5 mm if given, magnet0 on a touch\n"
                                       "idName: a name for scripts; the rules ignore it\n"
                                       "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
                                       "Heights are measured from the bed, as on the slider. Decimals take a point: a comma separates rules.\n"

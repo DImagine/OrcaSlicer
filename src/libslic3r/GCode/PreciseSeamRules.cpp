@@ -234,13 +234,14 @@ std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
 }
 
 struct ParsedElement {
-    enum class Kind { Mode, Set, Type, Priority, Off, Nowarn, Override, Relay };
+    enum class Kind { Mode, Set, Type, Priority, Off, Nowarn, Override, Relay, Magnet };
     Kind                        kind;
     bool                        exclude = false; // Mode only.
     std::optional<RuleLayerSet> set;             // Mode with a prefixed set, or Set.
     ModelVolumeType             type     = ModelVolumeType::INVALID;
     int                         priority = 0;
     RelayLabel                  relay;
+    MagnetRule                  magnet;
 };
 
 const std::pair<std::string_view, ModelVolumeType> type_labels[] = {
@@ -294,6 +295,13 @@ std::optional<ParsedElement> parse_element(Cursor &c)
                 return std::nullopt;
             element.relay.number = *group;
         }
+        return element;
+    }
+    // magnet = "magnet" [decimal]; the distance in mm is kept in nanometres, 0 means a touch.
+    if (c.eat("magnet")) {
+        ParsedElement element{Kind::Magnet};
+        if (!c.done() && !(element.magnet.limit = c.nanometres()))
+            return std::nullopt;
         return element;
     }
     if (std::optional<RuleLayerSet> set = parse_layer_set(c)) {
@@ -375,6 +383,13 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
                 rules.relay = element->relay;
             else if (*rules.relay != element->relay)
                 rules.diagnostics.push_back({RuleDiagnosticCode::RelayConflict, source, element_index, std::string(raw)});
+            break;
+        case ParsedElement::Kind::Magnet:
+            // Distances compare as numbers: magnet2.5 repeats magnet02.500000.
+            if (!rules.magnet)
+                rules.magnet = element->magnet;
+            else if (*rules.magnet != element->magnet)
+                rules.diagnostics.push_back({RuleDiagnosticCode::MagnetConflict, source, element_index, std::string(raw)});
             break;
         }
     }

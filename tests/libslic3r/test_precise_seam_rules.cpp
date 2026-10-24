@@ -196,7 +196,9 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
                                       "incloverride", "overridered", "overrideoff", "relay0", "relay-1", "relay.1", "relay=1",
                                       "relay1-5", "relay1junk", "inclrelay1", "exclrelay1", "relay1red", "relay-", "relayrandom",
                                       "relay-rand", "relay-random0", "relay-random-1", "relay-random.1", "relay-randomjunk",
-                                      "relay-random1-5", "inclrelay-random", "relay-random1red", "inclida", "exclidx");
+                                      "relay-random1-5", "inclrelay-random", "relay-random1red", "inclida", "exclidx",
+                                      "magnet.5", "magnet2.", "magnet-2", "magnet2-3", "magnetx", "inclmagnet", "exclmagnet2",
+                                      "magnet2red", "magnetz2", "magnet1.2.3");
     CAPTURE(text);
     const LayerRules rules = field(text);
     REQUIRE(rules.diagnostics.size() == 1);
@@ -206,6 +208,7 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
     CHECK_FALSE(rules.priority.has_value());
     CHECK_FALSE(rules.relay.has_value());
     CHECK_FALSE(rules.id.has_value());
+    CHECK_FALSE(rules.magnet.has_value());
     CHECK_FALSE(rules.off);
     CHECK_FALSE(rules.nowarn);
 }
@@ -628,6 +631,47 @@ TEST_CASE("relay-random labels a group apart from the relay groups", "[PreciseSe
     CHECK(relay_label_text({false, 3}) == "relay3");
     CHECK(relay_label_text({true, 0}) == "relay-random");
     CHECK(relay_label_text({true, 12}) == "relay-random12");
+}
+
+TEST_CASE("magnet takes an optional distance in mm, and the first one stays in effect", "[PreciseSeam][Rules][Magnet]")
+{
+    CHECK(field("magnet").magnet == MagnetRule{});
+    CHECK(field("magnet2.5").magnet == MagnetRule{2500000});
+    CHECK(field("Magnet 2.5").magnet == MagnetRule{2500000});
+    CHECK(field("magnet0.000001").magnet == MagnetRule{1});
+    // Zero is a limit of its own, a touch, not the absence of one.
+    CHECK(field("magnet0").magnet == MagnetRule{0});
+    CHECK(field("magnet0.0").magnet == MagnetRule{0});
+    CHECK(field("magnet1000000").magnet == MagnetRule{1000000 * nanometres_per_mm});
+    CHECK(count_code(field("magnet1000001").diagnostics, Code::NumberOutOfRange) == 1);
+    CHECK(count_code(field("magnet1.0000001").diagnostics, Code::NumberOutOfRange) == 1);
+    // Repeats compare as numbers.
+    CHECK(field("magnet2.5,magnet02.500000").diagnostics.empty());
+    CHECK(field("magnet0,magnet00.000000").diagnostics.empty());
+    CHECK(field("magnet,magnet").diagnostics.empty());
+    for (const std::string text : {"magnet2,magnet3", "magnet,magnet2", "magnet2,magnet", "magnet0,magnet"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(rules.magnet == field(text.substr(0, text.find(','))).magnet);
+        REQUIRE(rules.diagnostics.size() == 1);
+        CHECK(rules.diagnostics.front().code == Code::MagnetConflict);
+        CHECK(rules.diagnostics.front().element == 2);
+    }
+    // An invalid element does not take the place of the first magnet.
+    const LayerRules late = field("magnet.5,magnet3");
+    CHECK(late.magnet == MagnetRule{3000000});
+    CHECK(count_code(late.diagnostics, Code::InvalidElement) == 1);
+    CHECK(count_code(late.diagnostics, Code::MagnetConflict) == 0);
+    // It keeps the mode and the sets, and carries over from the name to the field; nowarn keeps the conflict.
+    CHECK(select({}, "excl,magnet,odd") == range(2, 400, 2));
+    const LayerRules both = parse_layer_rules("-^ps=magnet2=ps^-", "magnet3,nowarn");
+    CHECK(both.magnet == MagnetRule{2000000});
+    REQUIRE(both.diagnostics.size() == 1);
+    CHECK(both.diagnostics.front().code == Code::MagnetConflict);
+    CHECK(both.diagnostics.front().source == RuleSource{true, 0});
+    const LayerRules overridden = parse_layer_rules("-^ps=magnet2=ps^-", "override,magnet3");
+    CHECK(overridden.magnet == MagnetRule{3000000});
+    CHECK(overridden.diagnostics.empty());
 }
 
 TEST_CASE("id names a volume for scripts and changes nothing else", "[PreciseSeam][Rules]")
