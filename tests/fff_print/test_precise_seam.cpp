@@ -2163,3 +2163,32 @@ TEST_CASE("A relay-random group with a weak member acts without relay and is rep
     CHECK(warnings[0].find("\"relay-random\" acts without relay") != std::string::npos);
     CHECK(warnings[2].find("\"relay-random\" acts without relay") != std::string::npos);
 }
+
+TEST_CASE("A stand-in of a senior group leaves the relay-random group no holder on its layers", "[PreciseSeam][Rules][Relay]")
+{
+    // Object list H_A, G_C, H_B, G_D, G_E: H = relay1 (anchor H_A), G = relay-random1 (anchor G_C). H_A crosses
+    // only the left island (1.5 relative to its centre); H_B, G_C, G_D and G_E, 1 mm wide, only the right one
+    // (-3, -1, 1 and 3), H_B on odd layers by its rules.
+    ExportFixture fixture("back", 0, two_islands());
+    const auto add = [&fixture](TriangleMesh mesh, double x, const char *name, const char *rules) {
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, std::move(mesh), Vec3d(x, -3, -1), name);
+        fixture.model.objects.front()->volumes.back()->precise_seam_rules = rules;
+    };
+    const TriangleMesh narrow = make_cube(1, 6, 4);
+    add(front_box(), 4.5, "H_A", "relay1");
+    add(narrow, 14.5, "G_C", "relay-random1");
+    add(narrow, 12.5, "H_B", "relay1,odd");
+    add(narrow, 16.5, "G_D", "relay-random1");
+    add(narrow, 18.5, "G_E", "relay-random1");
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 20);
+    // H_B takes the right island on odd layers, as a stand-in where H_A holds, so G wins only on even layers
+    // and keeps its previous holder over the odd ones: G_D, G_E, G_D, G_C, G_D. Had the seniors of G held
+    // only the holder of H, G would take layer 1; had an odd layer cleared the previous holder, layer 4 would
+    // go to G_D. Indices into {H_A, H_B, G_C, G_D, G_E}.
+    const std::vector<int> right{1, 3, 1, 4, 1, 3, 1, 2, 1, 3};
+    std::vector<std::pair<int, int>> expected;
+    for (int layer = 1; layer <= 10; ++layer)
+        expected.emplace_back(0, right[layer - 1]);
+    CHECK(island_helpers(loops, {1.5, -3., -1., 1., 3.}) == expected);
+}
