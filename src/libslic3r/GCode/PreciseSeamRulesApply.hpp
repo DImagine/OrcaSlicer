@@ -42,6 +42,7 @@ struct RelayOrder {
         std::vector<const ModelVolume*> members; // Queue order, which is the object list order.
         std::vector<size_t>             holders; // Per object layer: index into members, or no_holder.
         RelayLabel                      label;   // relay-random groups choose their holders differently.
+        uint64_t                        seed = 0; // relay-random: relay_random_group_seed() of the group.
     };
     // An ordinary strong volume, or the block of groups[group] when volume is null.
     struct Entry {
@@ -78,10 +79,15 @@ void init_precise_seam_data_by_rules(
 // passes to the member after the holder. A layer without a winner keeps the turn.
 std::vector<size_t> relay_holders(const std::vector<std::vector<uint8_t>> &wins, size_t member_count);
 
+// Seed of a relay-random group from its number and the seeds of all its members in queue order, those whose
+// rules exclude every layer included; `seeds` holds nullopt for a member without one. Without any seed it
+// depends on the number alone, as before seeds; otherwise every seed and its place in the queue take part.
+uint64_t relay_random_group_seed(int64_t group_number, const std::vector<std::optional<uint32_t>> &seeds);
+
 // Holders of a relay-random group from the same table: a pseudo-random winner other than the holder of the
 // last layer with a winner, which holds again only as the only winner. The choice depends on the table, the
-// group number and the object layer index alone, so every export and platform gives the same holders.
-std::vector<size_t> relay_random_holders(const std::vector<std::vector<uint8_t>> &wins, size_t member_count, int64_t group_number);
+// group seed and the object layer index alone, so every export and platform gives the same holders.
+std::vector<size_t> relay_random_holders(const std::vector<std::vector<uint8_t>> &wins, size_t member_count, uint64_t group_seed);
 
 // Strong volumes to try on object layer `layer`, from the entries before `end`: a block starts at the holder
 // of its group, goes on in queue order and wraps around, without members whose rules exclude the layer;

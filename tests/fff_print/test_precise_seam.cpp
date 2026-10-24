@@ -2742,3 +2742,67 @@ TEST_CASE("Magnet relay members take the seam in turn", "[PreciseSeam][Rules][Re
     CHECK(front_helpers(loops, {-5., 5.}) ==
           (limited ? std::vector<int>(10, 0) : std::vector<int>{0, 1, 0, 1, 0, 1, 0, 1, 0, 1}));
 }
+
+// Expected holders come from _myDocs/_relay/26.10.24_ps-seed-ui/relay_seed_oracle.py.
+TEST_CASE("A relay-random seed of any member, even one without layers, changes the holders", "[PreciseSeam][Rules][Relay]")
+{
+    // A, B and C as in the relay-random test above; D follows C in the queue, and its rules exclude every layer.
+    const auto [seeds, expected] = GENERATE(table<std::vector<std::string>, std::vector<int>>({
+        {{"", "", "", ""}, {0, 1, 2, 1, 2, 0, 2, 1, 2, 0}},
+        {{"seed 7", "", "", ""}, {1, 0, 1, 0, 2, 0, 2, 0, 1, 2}},
+        {{"", "", "", "seed 7"}, {0, 1, 2, 1, 0, 1, 0, 1, 2, 1}}}));
+    CAPTURE(seeds);
+    ExportFixture fixture("back");
+    const std::vector<double> xs{2., 9., 16., 9.};
+    for (size_t i = 0; i < xs.size(); ++i) {
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(xs[i], -3, -1), std::string(1, char('A' + i)));
+        fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random " + seeds[i] + (i == 3 ? ", 500" : "");
+    }
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    CHECK(front_helpers(loops, {-7., -1., 7.}) == expected);
+}
+
+TEST_CASE("A weak relay-random group takes the seeds of its members", "[PreciseSeam][Rules][Relay]")
+{
+    const auto [seeds, expected] = GENERATE(table<std::vector<std::string>, std::vector<int>>({
+        {{"", "", "", ""}, {0, 1, 2, 1, 2, 0, 2, 1, 2, 0}},
+        {{"", "seed 7", "", ""}, {2, 1, 0, 1, 2, 0, 1, 2, 0, 1}},
+        {{"", "", "", "seed 7"}, {0, 1, 2, 1, 0, 1, 0, 1, 2, 1}}}));
+    CAPTURE(seeds);
+    ExportFixture fixture("back");
+    const std::vector<double> xs{2., 9., 16., 9.};
+    for (size_t i = 0; i < xs.size(); ++i) {
+        fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, front_box(), Vec3d(xs[i], -3, -1));
+        fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random " + seeds[i] + (i == 3 ? ", 500" : "");
+    }
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    CHECK(front_zones(loops, {2., 9., 16.}) == expected);
+}
+
+TEST_CASE("model counts layers and heights from the model, so a raft does not move them", "[PreciseSeam][Rules][Origin]")
+{
+    const int raft_layers = GENERATE(0, 2);
+    const std::string rule = GENERATE(as<std::string>{}, "model, 3-5", "model, excl, 1-8", "model, z0-1", "model, zin0.4-1");
+    CAPTURE(raft_layers, rule);
+    ExportFixture fixture("back", raft_layers);
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = rule;
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    const PrintObject &object = *fixture.print.objects().front();
+    REQUIRE(loops.size() == 10);
+    REQUIRE(object.layers().size() == loops.size());
+    // Loop i is model layer i + 1; its band is measured from the bottom of the first model layer.
+    const double bottom = object.layers().front()->bottom_z();
+    for (size_t i = 0; i < loops.size(); ++i) {
+        const double low = object.layers()[i]->bottom_z() - bottom, high = object.layers()[i]->print_z - bottom;
+        CAPTURE(i, low, high);
+        const bool expected = rule == "model, 3-5"       ? i >= 2 && i <= 4 :
+                              rule == "model, excl, 1-8" ? i >= 8 :
+                              rule == "model, z0-1"      ? low < 1. - EPSILON :
+                                                           low >= 0.4 - EPSILON && high <= 1. + EPSILON;
+        CHECK(seam_on_front_helper(loops[i]) == expected);
+    }
+    CHECK(fixture.warning().empty());
+}

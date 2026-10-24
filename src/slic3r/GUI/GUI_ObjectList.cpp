@@ -15,6 +15,7 @@
 
 #include "OptionsGroup.hpp"
 #include "Tab.hpp"
+#include "PreciseSeamRulesEditor.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
 #include "GLCanvas3D.hpp"
@@ -6304,16 +6305,20 @@ void ObjectList::edit_precise_seam_rules()
 {
     if (!can_edit_precise_seam_rules())
         return;
+    // A pending edit of the settings field is applied first, so that the dialog starts from it.
+    commit_precise_seam_rules_edit();
     ModelVolume *volume = selected_precise_seam_volume(*this, *m_objects_model);
     // TRN: Help for the Precise Seam rules field. Keep the rule keywords untranslated.
     wxTextEntryDialog dialog(this, _L("Comma-separated rules, applied from left to right:\n"
                                       "layers: 5, 10-20, 10-20step3, 3x+1, odd, even, top5, all\n"
                                       "heights in mm: z12.5-30 (layers that reach into it), zin12.5-30 (layers wholly inside), z12.5\n"
+                                      "model, bed: the layers and heights after it count from the model, above a raft, or from the bed (default)\n"
                                       "mode: incl (default), excl\n"
                                       "type: center, left, right, green, red, gray\n"
                                       "priority: pr1 (highest), pr-1 (lowest); off; nowarn\n"
                                       "relay, relay1: modifiers of one group act in turn, layer by layer: all center, left, right, or all green, red, gray\n"
-                                      "relay-random, relay-random1: the same, but each layer goes to a random member, not the previous one when another can\n"
+                                      "relay-random, relay-random1: the same, but each layer goes to a random member, not the previous one when another can; "
+                                      "relay-random1 seed 7 takes another draw, which may still give the same members\n"
                                       "magnet, magnet2.5: where the modifier does not cross a wall, it acts on the point nearest to it; within 2.5 mm if given, magnet0 on a touch\n"
                                       "idName: a name for scripts; the rules ignore it\n"
                                       "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
@@ -6322,13 +6327,7 @@ void ObjectList::edit_precise_seam_rules()
                              _L("Precise Seam Rules"), from_u8(volume->precise_seam_rules));
     if (dialog.ShowModal() != wxID_OK)
         return;
-    const std::string rules = into_u8(dialog.GetValue());
-    if (rules == volume->precise_seam_rules)
-        return;
-    take_snapshot(_u8L("Edit Precise Seam Rules"));
-    volume->precise_seam_rules = rules;
-    // Rules change only the seam placement; the export step is invalidated when the print is updated.
-    wxGetApp().plater()->schedule_background_process();
+    apply_precise_seam_rules(volume->id(), into_u8(dialog.GetValue()));
 }
 
 void ObjectList::rename_item()

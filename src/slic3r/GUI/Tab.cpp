@@ -86,6 +86,7 @@
 
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
+#include "PreciseSeamRulesEditor.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
 #include "slic3r/Utils/PresetUpdater.hpp"
 #include "slic3r/plugin/PluginConfig.hpp"
@@ -3757,6 +3758,7 @@ void TabPrintModel::build()
 void TabPrintModel::set_model_config(std::map<ObjectBase *, ModelConfig *> const & object_configs)
 {
     m_object_configs = object_configs;
+    on_model_config_set();
     m_prints.get_selected_preset().config.apply(*m_parent_tab->m_config);
     update_model_config();
 }
@@ -4279,9 +4281,38 @@ void TabPrintObject::notify_changed(ObjectBase * object)
 //BBS: GUI refactor
 
 TabPrintPart::TabPrintPart(ParamsPanel* parent) :
-    TabPrintModel(parent, PrintRegionConfig().keys())
+    TabPrintModel(parent, PrintRegionConfig().keys()), m_precise_seam_rules(std::make_unique<PreciseSeamRulesEditor>())
 {
     m_parent_tab = wxGetApp().get_model_tab();
+}
+
+TabPrintPart::~TabPrintPart() = default;
+
+void TabPrintPart::build()
+{
+    TabPrintModel::build();
+    // The Precise Seam rules are a field of the volume, not an option: they join after the option filter
+    // above, which drops every line without options.
+    for (const char *name : {"Frequent", "Others"}) {
+        const auto it   = std::find_if(m_pages.begin(), m_pages.end(), [name](const PageShp &page) { return page->title() == name; });
+        PageShp    page = it != m_pages.end() ? *it : add_options_page(L("Others"), "custom-gcode_other");
+        auto optgroup   = page->new_optgroup(L("Precise Seam Rules"), L"param_seam");
+        optgroup->visibility_condition = [this] { return m_precise_seam_rules->shown(); };
+        Line line{"", ""};
+        line.full_width = 1;
+        line.widget     = [this](wxWindow *parent) { return m_precise_seam_rules->create(parent); };
+        optgroup->append_line(line);
+    }
+}
+
+void TabPrintPart::on_model_config_set()
+{
+    // The rules field shows for a single Precise Seam volume only.
+    const auto *volume = m_object_configs.size() == 1 ? dynamic_cast<const ModelVolume *>(m_object_configs.begin()->first) : nullptr;
+    const bool  shown  = m_precise_seam_rules->shown();
+    m_precise_seam_rules->set_volume(volume != nullptr && volume->is_precise_seam() ? volume : nullptr);
+    if (shown != m_precise_seam_rules->shown())
+        update_visibility();
 }
 
 void TabPrintPart::notify_changed(ObjectBase * object)

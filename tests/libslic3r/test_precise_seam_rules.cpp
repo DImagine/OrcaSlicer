@@ -198,7 +198,11 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
                                       "relay-rand", "relay-random0", "relay-random-1", "relay-random.1", "relay-randomjunk",
                                       "relay-random1-5", "inclrelay-random", "relay-random1red", "inclida", "exclidx",
                                       "magnet.5", "magnet2.", "magnet-2", "magnet2-3", "magnetx", "inclmagnet", "exclmagnet2",
-                                      "magnet2red", "magnetz2", "magnet1.2.3");
+                                      "magnet2red", "magnetz2", "magnet1.2.3", "seed7", "relayseed7", "relay1seed7",
+                                      "relay-randomseed", "relay-random1seed", "relay-random1seed4294967296",
+                                      "relay-random1seed99999999999999999999", "relay-random1seed7x", "relay-random1seed-1",
+                                      "relay-random1seed1.5", "relay-randomseed7seed8", "relay-random1seed7red", "modelx",
+                                      "bed2", "modelz10", "inclmodel", "exclbed", "bedred", "model1");
     CAPTURE(text);
     const LayerRules rules = field(text);
     REQUIRE(rules.diagnostics.size() == 1);
@@ -757,7 +761,7 @@ std::vector<std::vector<uint8_t>> win_table(const std::vector<std::string> &rows
 std::vector<size_t> holders(const std::vector<std::string> &rows, size_t members) { return relay_holders(win_table(rows), members); }
 std::vector<size_t> random_holders(const std::vector<std::string> &rows, size_t members, int64_t group)
 {
-    return relay_random_holders(win_table(rows), members, group);
+    return relay_random_holders(win_table(rows), members, relay_random_group_seed(group, {}));
 }
 constexpr size_t nobody = RelayOrder::no_holder;
 } // namespace
@@ -834,4 +838,130 @@ TEST_CASE("A relay block starts at its holder and wraps around in queue order", 
     // The entries before the block are its seniors: none here.
     relay_strong_volumes(order, effective, 1, 0, out);
     CHECK(out.empty());
+}
+
+TEST_CASE("relay-random takes a seed after the group, outside the group label", "[PreciseSeam][Rules][Relay]")
+{
+    const LayerRules spaced = field("relay-random 1 seed 7");
+    CHECK(spaced.diagnostics.empty());
+    CHECK(spaced.relay == RelayLabel{true, 1});
+    CHECK(spaced.relay_seed == std::optional<uint32_t>(7));
+    CHECK(field("relay-randomseed7").relay == RelayLabel{true, 0});
+    CHECK(field("relay-randomseed7").relay_seed == std::optional<uint32_t>(7));
+    CHECK(field("relay-random1seed0").relay_seed == std::optional<uint32_t>(0));
+    CHECK(field("relay-random1seed4294967295").relay_seed == std::optional<uint32_t>(4294967295u));
+    CHECK_FALSE(field("relay-random1").relay_seed.has_value());
+    // Repeats compare the values, so leading zeros do not conflict.
+    CHECK(field("relay-random01seed007,relay-random1seed7").diagnostics.empty());
+    // Another seed, or none, is another element: the first stays in effect with its own seed.
+    const LayerRules later = field("relay-random1,relay-random1seed7");
+    CHECK(count_code(later.diagnostics, Code::RelayConflict) == 1);
+    CHECK_FALSE(later.relay_seed.has_value());
+    const LayerRules other = field("relay-random1seed7,relay-random1seed8");
+    CHECK(count_code(other.diagnostics, Code::RelayConflict) == 1);
+    CHECK(other.relay_seed == std::optional<uint32_t>(7));
+    // A malformed seed takes no slot.
+    const LayerRules after_error = field("relay-random1seedx,relay-random1seed3");
+    CHECK(count_code(after_error.diagnostics, Code::InvalidElement) == 1);
+    CHECK(after_error.relay_seed == std::optional<uint32_t>(3));
+}
+
+TEST_CASE("The group seed mixes every member seed in queue order", "[PreciseSeam][Rules][Relay]")
+{
+    using Seeds = std::vector<std::optional<uint32_t>>;
+    const std::optional<uint32_t> none;
+    // Expected values from _myDocs/_relay/26.10.24_ps-seed-ui/relay_seed_oracle.py.
+    CHECK(relay_random_group_seed(0, {}) == 0xE220A8397B1DCDAFull);
+    CHECK(relay_random_group_seed(0, Seeds{none, none, none}) == 0xE220A8397B1DCDAFull);
+    CHECK(relay_random_group_seed(0, Seeds{7, none, none}) == 0x0F50186E0BA16FA4ull);
+    CHECK(relay_random_group_seed(0, Seeds{none, 7, none}) == 0x588ACF71AB60E0A2ull);
+    CHECK(relay_random_group_seed(0, Seeds{0, none, none}) == 0xD1C0270687984B37ull);
+    CHECK(relay_random_group_seed(0, Seeds{4294967295u, none, none}) == 0x831A81BD93315937ull);
+    CHECK(relay_random_group_seed(1, Seeds{none, none, 7}) == 0xCEDF49D26DB06234ull);
+    CHECK(relay_random_group_seed(1, Seeds{3, 5, 9}) == 0x379E0E373B6FFD9Full);
+
+    const auto wins = win_table(std::vector<std::string>(12, "111"));
+    const auto run  = [&wins](const Seeds &seeds) { return relay_random_holders(wins, 3, relay_random_group_seed(0, seeds)); };
+    // Without seeds the holders stay those of the group number alone.
+    CHECK(run(Seeds{none, none, none}) == Layers{0, 1, 2, 1, 2, 0, 2, 1, 2, 0, 2, 1});
+    CHECK(run(Seeds{7, none, none}) == Layers{1, 0, 1, 0, 2, 0, 2, 0, 1, 2, 0, 2});
+    // The same seed on another member, and seed0 against no seed, give other holders here.
+    CHECK(run(Seeds{none, 7, none}) == Layers{2, 1, 0, 1, 2, 0, 1, 2, 0, 1, 0, 1});
+    CHECK(run(Seeds{0, none, none}) == Layers{0, 2, 1, 0, 2, 1, 0, 1, 2, 1, 0, 1});
+    // An only winner fixes the phase of two members, whatever the seed.
+    std::vector<std::string> forced(8, "11");
+    forced.front() = "10";
+    for (uint32_t seed : {0u, 1u, 7u, 4294967295u})
+        CHECK(relay_random_holders(win_table(forced), 2, relay_random_group_seed(0, Seeds{seed, none})) == Layers{0, 1, 0, 1, 0, 1, 0, 1});
+}
+
+TEST_CASE("model counts the model layers through their numbers", "[PreciseSeam][Rules][Origin]")
+{
+    // 8 numbers; model layer 2 has none, model layer 3 holds number 6.
+    const Layers model_to_bed{3, 0, 6};
+    const auto   evaluate = [&](const std::string &text) { return select_layers(field(text), 8, {3, 6}, {}, model_to_bed); };
+    const LayerSelection unnumbered = evaluate("model,2");
+    CHECK(selected(unnumbered).empty());
+    CHECK(count_code(unnumbered.diagnostics, Code::EmptySet) == 1);
+    CHECK(selected(evaluate("model,3")) == Layers{6});
+    CHECK(selected(evaluate("model,all")) == Layers{3, 6});
+    CHECK(selected(evaluate("model,odd")) == Layers{3, 6});
+    CHECK(selected(evaluate("model,1,bed,6,excl,model,1")) == Layers{6});
+    // The bed universe stays: exclusion starts from every number.
+    CHECK(selected(evaluate("excl,model,all")) == Layers{1, 2, 4, 5, 7, 8});
+    CHECK(selected(evaluate("bed,4")) == Layers{4});
+    // The mode carries over the origin and the origin over the mode.
+    CHECK(selected(evaluate("model,excl,odd,bed,2")) == Layers{1, 4, 5, 7, 8});
+    // An element all of whose layers were already set is not empty.
+    CHECK(evaluate("model,3,bed,6").diagnostics.empty());
+    // topK takes the highest numbered model layers in either origin.
+    CHECK(selected(evaluate("model,top2")) == Layers{3, 6});
+    CHECK(selected(select_layers(field("model,top1"), 8, {3, 6}, {}, Layers{3, 6, 0})) == Layers{6});
+    // Without a raft the numbers may still differ: other objects take numbers.
+    CHECK(selected(select_layers(field("bed,2"), 5, {1, 3, 5}, {}, Layers{1, 3, 5})) == Layers{2});
+    CHECK(selected(select_layers(field("model,2"), 5, {1, 3, 5}, {}, Layers{1, 3, 5})) == Layers{3});
+}
+
+TEST_CASE("Every source starts from the bed, and the origin changes only the sets", "[PreciseSeam][Rules][Origin]")
+{
+    const Layers model_to_bed{4, 5, 6, 7, 8}; // A raft takes numbers 1..3.
+    const auto   evaluate = [&](const LayerRules &rules) { return selected(select_layers(rules, 8, {4, 5, 6, 7, 8}, {}, model_to_bed)); };
+    CHECK(evaluate(parse_layer_rules("a -^ps=model,1=ps^- -^ps=2=ps^-", "3")) == Layers{2, 3, 4});
+    CHECK(evaluate(parse_layer_rules("a -^ps=model=ps^-", "1")) == Layers{1});
+    // A malformed element keeps the origin.
+    CHECK(evaluate(field("model,modelx,2")) == Layers{5});
+    // Only flags restrict nothing.
+    CHECK_FALSE(field("model").restricts_layers());
+    CHECK(field("model,bed,model").diagnostics.empty());
+    // Other elements do not count from the model.
+    const LayerRules others = field("model,relay-random1seed7,magnet2.5,pr1,odd");
+    CHECK(others.diagnostics.empty());
+    CHECK(others.relay_seed == std::optional<uint32_t>(7));
+    CHECK(others.magnet == MagnetRule{2500000});
+    CHECK(others.priority == std::optional<int>(1));
+    CHECK(evaluate(others) == Layers{4, 6, 8});
+}
+
+TEST_CASE("model heights start at the bottom of the first model layer", "[PreciseSeam][Rules][Origin][Heights]")
+{
+    // A raft and its gap end at 0.7; the first model layer is 0.3 mm, the next ones 0.2 mm.
+    const std::vector<LayerBand> bands{{4, 0.7, 1.0}, {5, 1.0, 1.2}, {6, 1.2, 1.4}, {7, 1.4, 1.6}, {8, 1.6, 1.8}};
+    const Layers model_to_bed{4, 5, 6, 7, 8};
+    const auto   evaluate = [&](const std::string &text) { return select_layers(field(text), 8, {4, 5, 6, 7, 8}, bands, model_to_bed, 0.7); };
+    CHECK(selected(evaluate("model,z0-0.3")) == Layers{4});
+    CHECK(selected(evaluate("model,zin0.3-0.7")) == Layers{5, 6});
+    CHECK(selected(evaluate("model,z0.5")) == Layers{5});
+    CHECK(selected(evaluate("model,z0.50005")) == Layers{5});
+    // The level of the bottom has no layer below it, and a single height holds no layer.
+    CHECK(selected(evaluate("model,z0")).empty());
+    CHECK(selected(evaluate("model,zin0")).empty());
+    // From the bed the same range lies under the raft top.
+    const LayerSelection bed = evaluate("z0-0.3");
+    CHECK(selected(bed).empty());
+    CHECK(count_code(bed.diagnostics, Code::EmptySet) == 1);
+    CHECK(selected(evaluate("model,z0-0.3,bed,z1.7")) == Layers{4, 8});
+    CHECK(selected(evaluate("excl,model,z0-0.5")) == Layers{1, 2, 3, 6, 7, 8});
+    // A model bottom of zero makes both origins measure alike.
+    CHECK(selected(select_layers(field("model,z0.1-0.3"), 3, {1, 2, 3}, grid(3, 0.2), {1, 2, 3}, 0.)) ==
+          selected(select_layers(field("z0.1-0.3"), 3, {1, 2, 3}, grid(3, 0.2), {1, 2, 3}, 0.)));
 }

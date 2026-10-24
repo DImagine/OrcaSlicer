@@ -105,7 +105,8 @@ print and is tested on its own.
   `kx+b` (x from 0), `odd`, `even`, `topK`, `all` and the heights `zA-B`,
   `zinA-B` and `zA` (see Heights below). `incl` and `excl` switch
   between adding and subtracting the following sets, and may prefix one set
-  (`excl129-312`). Labels `center`, `left`, `right`, `green`, `red`,
+  (`excl129-312`). `model` and `bed` switch the origin of the following sets
+  in the same way (see Origin below). Labels `center`, `left`, `right`, `green`, `red`,
   `gray`/`grey` set the type; `prN` and `pr-N` set the priority; `off`
   disables the modifier and `nowarn` silences the warnings about differences
   from the object list. A keyword is followed directly by its number or set:
@@ -114,7 +115,7 @@ print and is tested on its own.
   volume: the name is then not parsed and reports nothing. Anywhere else it is
   an invalid element. `relayN` and a bare `relay` put the volume into a relay
   group, `relay-randomN` and `relay-random` into a random one (see Relay
-  below). `magnet` and `magnetN` (N in mm, a decimal as for heights) draw the
+  below); `seedS` after the latter, as in `relay-random1seed7`, gives a seed. `magnet` and `magnetN` (N in mm, a decimal as for heights) draw the
   modifier to the nearest point of a perimeter it does not cross (see Magnet
   below). An element that starts with `id` names the volume for external
   scripts: it is taken as a whole, with any text after `id`, before the
@@ -157,6 +158,20 @@ print and is tested on its own.
   the plan events, so the grid of another object never moves them; support-only
   events have no band and are never selected by height. The selected layers
   then act as a set of their numbers.
+- **Origin.** Every source (each name block, then the field) starts from the
+  bed, and `model` or `bed` sets the origin of the sets after it, as the mode
+  does; each set keeps the origin it was read with, and other elements ignore
+  it. From the model, layer i is the i-th model layer of the object, so raft
+  and support-only events take no number, and heights are measured from the
+  bottom of the first model layer, above the raft and its gap. A model set is
+  evaluated over the model layers and turned into their plan numbers through
+  the original map, where a layer without a number is 0 and selects nothing;
+  the numbers of the layers above it do not move down. The result then enters
+  the usual left-to-right chain over the plan numbers, so exclusion still
+  starts from every number, and an empty set is reported after this mapping.
+  `topK` is the same in both origins. Without a raft and with one object both
+  origins agree; other objects and supports with their own heights still give
+  the numbers gaps.
 - **Effective order.** Volumes are grouped by their effective type. Within a
   group the order is `pr1, pr2, ...`, then the volumes without priority in
   object order, then `pr-1, pr-2, ...`; ties keep the object order. The strong
@@ -202,7 +217,14 @@ print and is tested on its own.
   members of a weak one. The holder is one of them other than the holder of
   the last layer that had one, unless that holder is the only one. The
   choice is `hash % candidates` over the candidates in queue order, where the
-  hash is splitmix64 of the group number mixed with the object layer index. It
+  hash is splitmix64 of the group seed mixed with the object layer index. The
+  group seed is splitmix64 of the group number; when some member has a seed,
+  each member in queue order, also one whose rules exclude every layer, then
+  mixes in its seed plus one, or zero without one. A seed of any member thus
+  takes part with its place, and a group without seeds keeps its old
+  holders. Another seed is another draw, not a promise of other holders: with
+  few winners several seeds give the same ones, and two members always
+  alternate after the first free choice. It
   uses unsigned 64-bit arithmetic only, as the result of a standard library
   distribution differs between platforms, so every export and platform gives
   the same seams. The hash ignores the volume IDs, so the schedule survives
@@ -753,8 +775,21 @@ rebuilt on every export.
   colors are close shades of one orange because all three mark strong
   modifiers; the object list icons tell the modes apart.
 - *Precise Seam Rules*, right under *Precise Seam Type* in the part menu of a
-  single Precise Seam volume, edits its rules field; renaming such a volume also updates the print, since
-  the name may hold rules.
+  single Precise Seam volume, edits its rules field; renaming such a volume also
+  updates the print, since the name may hold rules.
+- The part settings show the same field, three lines high, in a *Precise Seam
+  Rules* group on the Frequent and the Others page, for a single selected
+  Precise Seam volume only. The field is no config option: the part tab adds
+  the groups after its option filter, and a visibility condition of the group
+  hides them for other selections. `PreciseSeamRulesEditor` keeps the shown
+  volume and a pending edit by volume ID; typing changes only the draft, which
+  is applied to its own volume when the field loses focus, on Ctrl+Enter, when
+  the selection changes, before the dialog opens, and before saving, slicing
+  and exporting, which may be started by a shortcut while the focus stays in
+  the field. A backup does not apply it. Undo, redo and a new project drop the
+  draft first, so a late focus loss cannot write it back. The dialog and the
+  field share `apply_precise_seam_rules()`: one snapshot when the text differs,
+  then a background update. The settings search does not find the field.
 - Precise Seam volumes have no filament and cannot be pasted into SLA objects.
   Python plugins see them as `ModelVolumeType` values and through the
   `is_precise_seam*()` methods.

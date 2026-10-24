@@ -217,6 +217,7 @@
 #include "Camera.hpp"
 #include "Mouse3DController.hpp"
 #include "Tab.hpp"
+#include "PreciseSeamRulesEditor.hpp"
 #include "Jobs/OrientJob.hpp"
 #include "Jobs/ArrangeJob.hpp"
 #include "Jobs/FillBedJob.hpp"
@@ -10822,6 +10823,8 @@ void Plater::priv::delete_all_objects_from_model()
 
 void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
 {
+    // A pending Precise Seam rules edit belongs to the project being closed.
+    reset_precise_seam_rules_edit();
     // TakeSnapshot below and load_current_presets() further down each re-evaluate the
     // aggregate dirty flag against a baseline that hasn't been reset yet, so they can toggle
     // is_dirty() back and forth several times before it settles; coalesce those into one event.
@@ -15408,6 +15411,9 @@ bool Plater::priv::up_to_date(bool saved, bool backup)
 
 void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator it_snapshot)
 {
+    // A pending Precise Seam rules edit belongs to the model being replaced; a late focus loss must not
+    // write it back.
+    reset_precise_seam_rules_edit();
     // Make sure that no updating function calls take_snapshot until we are done.
     SuppressSnapshots snapshot_supressor(q);
 
@@ -19496,6 +19502,8 @@ void Plater::apply_cut_object_to_model(size_t obj_idx, const ModelObjectPtrs& ne
 
 void Plater::export_gcode(bool prefer_removable)
 {
+    // A shortcut leaves the focus in the Precise Seam rules field, so its pending edit is applied here.
+    commit_precise_seam_rules_edit();
     if (p->model.objects.empty())
         return;
 
@@ -20413,6 +20421,9 @@ void publish(Model &model, SaveStrategy strategy) {
 int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy strategy, int export_plate_idx, Export3mfProgressFn proFn)
 {
     int ret = 0;
+    // A shortcut leaves the focus in the Precise Seam rules field; a backup does not apply text being typed.
+    if (!(strategy & SaveStrategy::Backup))
+        commit_precise_seam_rules_edit();
     //if (p->model.objects.empty()) {
     //    MessageDialog dialog(nullptr, _L("No objects to export."), _L("Save project"), wxYES);
     //    if (dialog.ShowModal() == wxYES)
@@ -20755,6 +20766,8 @@ bool Plater::is_multi_extruder_ams_empty()
 //BBS: add multiple plate reslice logic
 void Plater::reslice()
 {
+    // A shortcut leaves the focus in the Precise Seam rules field, so its pending edit is applied here.
+    commit_precise_seam_rules_edit();
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter, process_completed_with_error=%2%")%__LINE__ %p->process_completed_with_error;
     // There is "invalid data" button instead "slice now"
     if (p->process_completed_with_error == p->partplate_list.get_curr_plate_index())

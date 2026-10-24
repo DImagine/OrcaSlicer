@@ -129,6 +129,17 @@ public:
             m_out_of_range = true;
         return value;
     }
+    // A relay-random seed, 0 .. 2^32 - 1, with leading zeros. Long input saturates; a larger value is no seed.
+    std::optional<uint32_t> seed()
+    {
+        const size_t begin = m_pos;
+        uint64_t     value = 0;
+        for (; !done() && m_text[m_pos] >= '0' && m_text[m_pos] <= '9'; ++m_pos)
+            value = std::min<uint64_t>(value * 10 + uint64_t(m_text[m_pos] - '0'), uint64_t(std::numeric_limits<uint32_t>::max()) + 1);
+        if (m_pos == begin || value > std::numeric_limits<uint32_t>::max())
+            return std::nullopt;
+        return uint32_t(value);
+    }
     // A height in mm, "uint [. uint]", as nanometres. More than six decimals or a value above the limit is
     // out of range, which is remembered; long input saturates before that check.
     std::optional<int64_t> nanometres()
@@ -234,13 +245,15 @@ std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
 }
 
 struct ParsedElement {
-    enum class Kind { Mode, Set, Type, Priority, Off, Nowarn, Override, Relay, Magnet };
+    enum class Kind { Mode, Set, Type, Priority, Off, Nowarn, Override, Relay, Magnet, Origin };
     Kind                        kind;
     bool                        exclude = false; // Mode only.
+    bool                        model   = false; // Origin only.
     std::optional<RuleLayerSet> set;             // Mode with a prefixed set, or Set.
     ModelVolumeType             type     = ModelVolumeType::INVALID;
     int                         priority = 0;
     RelayLabel                  relay;
+    std::optional<uint32_t>     relay_seed;
     MagnetRule                  magnet;
 };
 
@@ -284,17 +297,29 @@ std::optional<ParsedElement> parse_element(Cursor &c)
         return ParsedElement{Kind::Nowarn};
     if (c.eat("override"))
         return ParsedElement{Kind::Override};
-    // relay = ("relay-random" | "relay") [uint]; without a number it is a group of its own, apart from relay1, ...
+    // relay = "relay" [uint] | "relay-random" [uint] ["seed" seed]; without a number it is a group of its own,
+    // apart from relay1, ...
     const bool random = c.eat("relay-random");
     if (random || c.eat("relay")) {
         ParsedElement element{Kind::Relay};
         element.relay.random = random;
-        if (!c.done()) {
+        bool seed = random && c.eat("seed");
+        if (!seed && !c.done()) {
             const std::optional<int64_t> group = c.uint();
             if (!group || *group < 1)
                 return std::nullopt;
             element.relay.number = *group;
+            seed                 = random && c.eat("seed");
         }
+        if (seed && !(element.relay_seed = c.seed()))
+            return std::nullopt;
+        return element;
+    }
+    // origin = "model" | "bed": the sets after it count model layers and heights, or those of the bed.
+    const bool model = c.eat("model");
+    if (model || c.eat("bed")) {
+        ParsedElement element{Kind::Origin};
+        element.model = model;
         return element;
     }
     // magnet = "magnet" [decimal]; the distance in mm is kept in nanometres, 0 means a touch.
@@ -312,10 +337,12 @@ std::optional<ParsedElement> parse_element(Cursor &c)
     return std::nullopt;
 }
 
-// Each source starts in the include mode; sets, type and priority carry over between sources.
+// Each source starts in the include mode and counts from the bed; sets, type and priority carry over between
+// sources.
 void parse_source(LayerRules &rules, std::string_view source_text, const RuleSource &source)
 {
     bool   exclude = false;
+    bool   model   = false;
     bool   first   = true; // No non-empty element seen yet.
     size_t index   = 0;
     for (size_t begin = 0; begin <= source_text.size(); ++index) {
@@ -347,7 +374,7 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
             continue;
         }
         const auto add_set = [&](const RuleLayerSet &set) {
-            rules.operations.push_back({exclude, set, source, element_index, std::string(raw)});
+            rules.operations.push_back({exclude, model, set, source, element_index, std::string(raw)});
         };
         switch (element->kind) {
         case ParsedElement::Kind::Mode:
@@ -379,11 +406,14 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
                 rules.diagnostics.push_back({RuleDiagnosticCode::InvalidElement, source, element_index, std::string(raw)});
             break;
         case ParsedElement::Kind::Relay:
-            if (!rules.relay)
-                rules.relay = element->relay;
-            else if (*rules.relay != element->relay)
+            // The seed is a part of the element: a later relay with another seed, or without one, conflicts.
+            if (!rules.relay) {
+                rules.relay      = element->relay;
+                rules.relay_seed = element->relay_seed;
+            } else if (*rules.relay != element->relay || rules.relay_seed != element->relay_seed)
                 rules.diagnostics.push_back({RuleDiagnosticCode::RelayConflict, source, element_index, std::string(raw)});
             break;
+        case ParsedElement::Kind::Origin: model = element->model; break;
         case ParsedElement::Kind::Magnet:
             // Distances compare as numbers: magnet2.5 repeats magnet02.500000.
             if (!rules.magnet)
@@ -502,7 +532,7 @@ LayerRules parse_layer_rules(std::string_view volume_name, std::string_view fiel
 }
 
 LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const std::vector<size_t> &object_layers,
-                             const std::vector<LayerBand> &bands)
+                             const std::vector<LayerBand> &bands, const std::vector<size_t> &model_to_bed, double model_bottom)
 {
     LayerSelection selection;
     selection.layers.assign(layer_count + 1, false);
@@ -517,12 +547,35 @@ LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const 
     // Otherwise the mode of the first valid set picks the initial set: all layers for exclusion.
     if (!rules.restricts_layers() || rules.operations.front().exclude)
         std::fill(selection.layers.begin() + 1, selection.layers.begin() + 1 + count, true);
+    // Model heights: the same bands, measured from the bottom of the model.
+    std::vector<LayerBand> model_bands;
+    for (const RuleLayerOperation &operation : rules.operations)
+        if (operation.model && operation.set.kind == RuleLayerSet::Kind::Height) {
+            for (const LayerBand &band : bands)
+                model_bands.push_back({band.number, band.bottom_z - model_bottom, band.print_z - model_bottom});
+            break;
+        }
     for (const RuleLayerOperation &operation : rules.operations) {
-        bool any = false;
-        for_each_layer(operation.set, count, object_layers, bands, [&](int64_t layer) {
+        bool       any   = false;
+        const auto visit = [&](int64_t layer) {
             selection.layers[size_t(layer)] = !operation.exclude;
             any                             = true;
-        });
+        };
+        using Kind = RuleLayerSet::Kind;
+        if (!operation.model || operation.set.kind == Kind::Top)
+            // topK takes the highest numbered model layers in either origin.
+            for_each_layer(operation.set, count, object_layers, bands, visit);
+        else if (operation.set.kind == Kind::Height)
+            for_each_layer(operation.set, count, object_layers, model_bands, visit);
+        else
+            // Model layer i is the number of the i-th model layer; one without a number selects nothing, and
+            // the numbers of the model layers above it do not move down.
+            for_each_layer(operation.set, int64_t(model_to_bed.size()), {}, {}, [&](int64_t layer) {
+                const size_t number = model_to_bed[size_t(layer) - 1];
+                assert(number <= layer_count);
+                if (number != 0)
+                    visit(int64_t(number));
+            });
         if (!any)
             selection.diagnostics.push_back({RuleDiagnosticCode::EmptySet, operation.source, operation.element, operation.text});
     }

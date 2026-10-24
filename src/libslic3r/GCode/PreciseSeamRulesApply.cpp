@@ -76,6 +76,7 @@ void init_precise_seam_data_by_rules(
             labelled[*rules[i].relay].push_back(i);
     std::vector<std::optional<size_t>> group_of(volumes.size());
     std::vector<bool>                  mixed(volumes.size(), false);
+    std::vector<uint64_t>              group_seeds; // relay-random: from every member, before layers drop any.
     size_t                             group_count = 0;
     for (const auto &[label, members] : labelled) {
         const auto strong = [&ruled](size_t i) { return is_precise_seam_strong(ruled[i].effective_type()); };
@@ -85,7 +86,13 @@ void init_precise_seam_data_by_rules(
                 group_of[i] = group_count;
             else
                 mixed[i] = true;
-        group_count += same ? 1 : 0;
+        if (!same)
+            continue;
+        std::vector<std::optional<uint32_t>> seeds;
+        for (size_t i : members)
+            seeds.push_back(rules[i].relay_seed);
+        group_seeds.push_back(label.random ? relay_random_group_seed(label.number, seeds) : 0);
+        ++group_count;
     }
 
     // Diagnostics of one volume in source order (the name as a whole, its blocks, then the field) and
@@ -112,6 +119,8 @@ void init_precise_seam_data_by_rules(
             if (numbering.object_layers[layer] != 0)
                 bands.push_back({numbering.object_layers[layer], model_layers[layer]->bottom_z(), model_layers[layer]->print_z});
     }
+    // Model heights start at the bottom of the first model layer, above the raft and its gap, numbered or not.
+    const double model_bottom = model_layers.empty() ? 0. : model_layers.front()->bottom_z();
     std::vector<std::optional<std::vector<bool>>> layers(volumes.size());
     for (size_t i = 0; i < volumes.size(); ++i) {
         // Nothing reads the diagnostics of the rules after this point.
@@ -119,7 +128,7 @@ void init_precise_seam_data_by_rules(
         if (!rules[i].off && !rules[i].restricts_layers())
             layers[i].emplace();
         else if (!rules[i].off) {
-            LayerSelection selection = select_layers(rules[i], numbering.count, numbered, bands);
+            LayerSelection selection = select_layers(rules[i], numbering.count, numbered, bands, numbering.object_layers, model_bottom);
             own.insert(own.end(), std::make_move_iterator(selection.diagnostics.begin()), std::make_move_iterator(selection.diagnostics.end()));
             std::vector<bool> row(numbering.object_layers.size(), false);
             bool              any = false;
@@ -199,6 +208,7 @@ void init_precise_seam_data_by_rules(
             relay.entries.push_back({nullptr, relay.groups.size()});
             RelayOrder::Group &group = relay.groups.emplace_back();
             group.label              = *rules[i].relay; // The anchor is a member, even without layers.
+            group.seed               = group_seeds[*group_of[i]];
             for (size_t member : blocks[*block]) {
                 group.members.push_back(volumes[member]);
                 take_part(member, strong_volumes_out);
@@ -223,7 +233,7 @@ void init_precise_seam_data_by_rules(
             for (size_t m = 0; m < members.size(); ++m)
                 active[layer][m] = layers[members[m]]->empty() || (*layers[members[m]])[layer];
         const RelayLabel         &label   = *rules[i].relay; // The anchor is a member, even without layers.
-        const std::vector<size_t> holders = label.random ? relay_random_holders(active, members.size(), label.number) :
+        const std::vector<size_t> holders = label.random ? relay_random_holders(active, members.size(), group_seeds[*group_of[i]]) :
                                                            relay_holders(active, members.size());
         // Each member keeps only the layers it holds, in a full row, as an empty one means every layer. A member
         // that holds none is left out, like one whose rules exclude every layer.
@@ -273,11 +283,22 @@ uint64_t mix(uint64_t x)
 }
 } // namespace
 
-std::vector<size_t> relay_random_holders(const std::vector<std::vector<uint8_t>> &wins, size_t member_count, int64_t group_number)
+uint64_t relay_random_group_seed(int64_t group_number, const std::vector<std::optional<uint32_t>> &seeds)
+{
+    uint64_t seed = mix(uint64_t(group_number));
+    if (std::none_of(seeds.begin(), seeds.end(), [](const std::optional<uint32_t> &s) { return s.has_value(); }))
+        return seed;
+    // One step per member keeps its place; +1 in 64 bits tells seed0 from no seed, also for 2^32 - 1.
+    for (const std::optional<uint32_t> &s : seeds)
+        seed = mix(seed ^ (s ? uint64_t(*s) + 1 : 0));
+    return seed;
+}
+
+std::vector<size_t> relay_random_holders(const std::vector<std::vector<uint8_t>> &wins, size_t member_count, uint64_t group_seed)
 {
     std::vector<size_t> holders(wins.size(), RelayOrder::no_holder);
     size_t              previous = RelayOrder::no_holder; // Holder of the last layer with a winner.
-    const uint64_t      seed     = mix(uint64_t(group_number));
+    const uint64_t      seed     = group_seed;
     for (size_t layer = 0; layer < wins.size(); ++layer) {
         const std::vector<uint8_t> &row = wins[layer];
         if (row.empty())
@@ -381,7 +402,7 @@ void schedule_relay(RelayOrder &order, const PrintObject &object, const Effectiv
                 wins[layer] = std::move(row);
             }
         });
-        group.holders = group.label.random ? relay_random_holders(wins, group.members.size(), group.label.number) :
+        group.holders = group.label.random ? relay_random_holders(wins, group.members.size(), group.seed) :
                                              relay_holders(wins, group.members.size());
     }
 }

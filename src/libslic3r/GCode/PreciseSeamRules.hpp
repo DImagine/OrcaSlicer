@@ -86,6 +86,7 @@ inline constexpr int64_t nanometres_per_mm = 1000000;
 
 struct RuleLayerOperation {
     bool         exclude = false; // Mode in effect for this set.
+    bool         model   = false; // Origin in effect for this set: model layers and heights instead of the bed.
     RuleLayerSet set;
     RuleSource   source;
     size_t       element = 0;
@@ -98,6 +99,7 @@ struct LayerRules {
     std::optional<ModelVolumeType>  type;       // First type label over all sources.
     std::optional<int>              priority;   // First priority over all sources: N for prN, -N for pr-N.
     std::optional<RelayLabel>       relay;      // First relay label over all sources.
+    std::optional<uint32_t>         relay_seed; // seed of that relay-random element; not part of the group label.
     std::optional<std::string>      id;         // Trimmed original text of the first id element; the language ignores it.
     std::optional<MagnetRule>       magnet;     // First magnet over all sources.
     bool                            off             = false;
@@ -132,9 +134,12 @@ struct LayerSelection {
 
 // Evaluates the rules for layer numbers 1..layer_count. `object_layers` lists, in ascending order, the
 // numbers of the layers that hold this object's model layers; topK selects from them. `bands` holds the
-// height band of each of these model layers; height sets select from them.
+// height band of each of these model layers; height sets select from them. Sets after `model` count the
+// model layers instead: `model_to_bed` gives the number of each model layer, 0 for one without a number,
+// and their heights are measured from `model_bottom`, the bottom of the first model layer.
 LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const std::vector<size_t> &object_layers,
-                             const std::vector<LayerBand> &bands = {});
+                             const std::vector<LayerBand> &bands = {}, const std::vector<size_t> &model_to_bed = {},
+                             double model_bottom = 0.);
 
 // Rule numbers of one print object's layers: preview events of the plate when printing by layer, the
 // object's own events from 1 when printing by object.
