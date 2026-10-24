@@ -30,8 +30,22 @@ enum class RuleDiagnosticCode {
     TypeDiffersFromTree, // Effective type differs from the volume type in the object list.
     OrderDiffersFromTree, // Effective order of the volume differs from its position in the object list.
     RelayConflict,       // A later relay label differs from the first one, which stays in effect.
-    RelayGroupNotStrong  // The relay group of the volume has a weak member, so the group acts without relay.
+    RelayGroupNotStrong, // The relay group of the volume has a weak member, so the group acts without relay.
+    IdConflict           // A later id differs from the first one, which stays in effect.
 };
+
+// Relay group label. The four spaces relay, relayN, relay-random and relay-randomN never share a group.
+struct RelayLabel {
+    bool    random = false; // relay-random: each layer goes to a pseudo-random winner.
+    int64_t number = 0;     // 0 for a label without a number.
+
+    bool operator==(const RelayLabel &rhs) const { return random == rhs.random && number == rhs.number; }
+    bool operator!=(const RelayLabel &rhs) const { return !(*this == rhs); }
+    bool operator<(const RelayLabel &rhs) const { return random != rhs.random ? rhs.random : number < rhs.number; }
+};
+
+// The label as it is written after normalization, e.g. "relay2" or "relay-random".
+std::string relay_label_text(const RelayLabel &label);
 
 // Name blocks are numbered from 1 in name order; the field always comes after them.
 struct RuleSource {
@@ -74,7 +88,8 @@ struct LayerRules {
     std::vector<RuleLayerOperation> operations; // Valid layer sets in application order.
     std::optional<ModelVolumeType>  type;       // First type label over all sources.
     std::optional<int>              priority;   // First priority over all sources: N for prN, -N for pr-N.
-    std::optional<int64_t>          relay;      // First relay label over all sources: N for relayN, 0 for relay.
+    std::optional<RelayLabel>       relay;      // First relay label over all sources.
+    std::optional<std::string>      id;         // Trimmed original text of the first id element; the language ignores it.
     bool                            off             = false;
     bool                            nowarn          = false;
     bool                            name_overridden = false; // override first in the field: the name took no part.

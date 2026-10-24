@@ -69,7 +69,7 @@ void init_precise_seam_data_by_rules(
 
     // Relay groups by label, in volume order and without off volumes. Relay takes only strong types, so a
     // group with a weak member acts without relay; its members keep their other rules.
-    std::map<int64_t, std::vector<size_t>> labelled;
+    std::map<RelayLabel, std::vector<size_t>> labelled;
     for (size_t i = 0; i < volumes.size(); ++i)
         if (!rules[i].off && rules[i].relay)
             labelled[*rules[i].relay].push_back(i);
@@ -137,8 +137,7 @@ void init_precise_seam_data_by_rules(
         if (contains(order.reordered, i))
             own.push_back({RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}});
         if (not_strong[i])
-            own.push_back({RuleDiagnosticCode::RelayGroupNotStrong, {}, 0,
-                           *rules[i].relay == 0 ? std::string("relay") : "relay" + std::to_string(*rules[i].relay)});
+            own.push_back({RuleDiagnosticCode::RelayGroupNotStrong, {}, 0, relay_label_text(*rules[i].relay)});
         for (RuleDiagnostic &diagnostic : own)
             diagnostics_out.push_back({volumes[i], std::move(diagnostic)});
         if (rules[i].name_overridden)
@@ -392,6 +391,10 @@ std::vector<std::string> rule_warnings(const std::vector<ModifierDiagnostic> &di
         case Code::RelayGroupNotStrong:
             // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the relay group, e.g. "relay2". Do not translate "relay".
             message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": group \"%3%\" acts without relay, as relay takes only Seam Center, Seam Left and Seam Right modifiers.")) % volume % object % text).str();
+            break;
+        case Code::IdConflict:
+            // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text, %4% its place, e.g. "rules field, element 2". Do not translate "id".
+            message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": id \"%3%\" (%4%) differs from the first id in its rules and was ignored.")) % volume % object % text % location(d)).str();
             break;
         }
         // Equal texts also come from two blocks broken the same way, or equal rules in a source.

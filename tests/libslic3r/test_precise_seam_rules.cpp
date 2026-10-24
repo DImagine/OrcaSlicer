@@ -194,7 +194,9 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
                                       "z.5-1", "z12.-30", "z1.2.3-4", "z10-20step3", "ztop5", "inclzinbad", "exclzin1-0",
                                       "zinc1", "zz1", "zin", "z1incl", "zin1step2", "z30-12.5", "z-1", "z+1", "z1e2", "z1-",
                                       "incloverride", "overridered", "overrideoff", "relay0", "relay-1", "relay.1", "relay=1",
-                                      "relay1-5", "relay1junk", "inclrelay1", "exclrelay1", "relay1red");
+                                      "relay1-5", "relay1junk", "inclrelay1", "exclrelay1", "relay1red", "relay-", "relayrandom",
+                                      "relay-rand", "relay-random0", "relay-random-1", "relay-random.1", "relay-randomjunk",
+                                      "relay-random1-5", "inclrelay-random", "relay-random1red", "inclida", "exclidx");
     CAPTURE(text);
     const LayerRules rules = field(text);
     REQUIRE(rules.diagnostics.size() == 1);
@@ -203,6 +205,7 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
     CHECK_FALSE(rules.type.has_value());
     CHECK_FALSE(rules.priority.has_value());
     CHECK_FALSE(rules.relay.has_value());
+    CHECK_FALSE(rules.id.has_value());
     CHECK_FALSE(rules.off);
     CHECK_FALSE(rules.nowarn);
 }
@@ -586,10 +589,10 @@ TEST_CASE("override elsewhere is an invalid element and keeps the name", "[Preci
 
 TEST_CASE("relay labels a group, and the first label stays in effect", "[PreciseSeam][Rules][Relay]")
 {
-    CHECK(field("relay").relay == 0); // A group of its own, apart from the numbered ones.
-    CHECK(field("relay1").relay == 1);
-    CHECK(field("Relay007").relay == 7);
-    CHECK(field("relay1000000").relay == 1000000);
+    CHECK(field("relay").relay == RelayLabel{}); // A group of its own, apart from the numbered ones.
+    CHECK(field("relay1").relay == RelayLabel{false, 1});
+    CHECK(field("Relay007").relay == RelayLabel{false, 7});
+    CHECK(field("relay1000000").relay == RelayLabel{false, 1000000});
     CHECK(count_code(field("relay1000001").diagnostics, Code::NumberOutOfRange) == 1);
     CHECK(field("relay1,relay01").diagnostics.empty());
     for (const std::string text : {"relay1,relay2", "relay1,relay", "relay,relay1"}) {
@@ -602,9 +605,97 @@ TEST_CASE("relay labels a group, and the first label stays in effect", "[Precise
     }
     // The label carries over from the name to the field, like the type.
     const LayerRules both = parse_layer_rules("-^ps=relay2=ps^-", "relay3,odd");
-    CHECK(both.relay == 2);
+    CHECK(both.relay == RelayLabel{false, 2});
     CHECK(count_code(both.diagnostics, Code::RelayConflict) == 1);
     CHECK(apply_rules(both) == range(1, 399, 2));
+}
+
+TEST_CASE("relay-random labels a group apart from the relay groups", "[PreciseSeam][Rules][Relay]")
+{
+    CHECK(field("relay-random").relay == RelayLabel{true, 0});
+    CHECK(field("Relay - Random 07").relay == RelayLabel{true, 7});
+    CHECK(count_code(field("relay-random1000001").diagnostics, Code::NumberOutOfRange) == 1);
+    CHECK(field("relay-random1,relay-random01").diagnostics.empty());
+    // relay1 and relay-random1 are different groups, so one volume cannot be in both.
+    for (const std::string text : {"relay1,relay-random1", "relay-random1,relay1", "relay-random,relay-random1", "relay-random,relay"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(rules.relay == field(text.substr(0, text.find(','))).relay);
+        REQUIRE(rules.diagnostics.size() == 1);
+        CHECK(rules.diagnostics.front().code == Code::RelayConflict);
+    }
+    CHECK(relay_label_text({}) == "relay");
+    CHECK(relay_label_text({false, 3}) == "relay3");
+    CHECK(relay_label_text({true, 0}) == "relay-random");
+    CHECK(relay_label_text({true, 12}) == "relay-random12");
+}
+
+TEST_CASE("id names a volume for scripts and changes nothing else", "[PreciseSeam][Rules]")
+{
+    // Any text may follow id, non-ASCII too, and keeps its case.
+    for (const std::string text : {"idFront", "id", "id\xD0\x9F", "idA=ps^-B", "idoff", "idoverride", "idrelay-random1", "id5-1x"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(rules.diagnostics.empty());
+        CHECK(rules.id == text);
+        CHECK_FALSE(rules.restricts_layers());
+        CHECK_FALSE(rules.type.has_value());
+        CHECK_FALSE(rules.relay.has_value());
+        CHECK_FALSE(rules.off);
+        CHECK_FALSE(rules.name_overridden);
+    }
+    // The original is trimmed and keeps its inner spaces.
+    CHECK(field(" I D Front ,5").id == "I D Front");
+    // Repeats compare after normalization: ASCII case and spaces do not count, non-ASCII case does.
+    const LayerRules same = field("I D A,ida");
+    CHECK(same.diagnostics.empty());
+    CHECK(same.id == "I D A");
+    for (const std::string text : {"idA,idB", "id\xD0\x9F,id\xD0\xBF", "id,idA"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(rules.id == text.substr(0, text.find(',')));
+        REQUIRE(rules.diagnostics.size() == 1);
+        CHECK(rules.diagnostics.front().code == Code::IdConflict);
+        CHECK(rules.diagnostics.front().element == 2);
+        CHECK(rules.diagnostics.front().text == text.substr(text.find(',') + 1));
+    }
+    // An id keeps the mode and picks no initial set.
+    CHECK(select({}, "excl,idA,odd") == range(2, 400, 2));
+    CHECK(select({}, "idA,5") == Layers{5});
+    // The id carries over from the name to the field, unless override leaves the name out.
+    const LayerRules both = parse_layer_rules("-^ps=idN=ps^-", "idF");
+    CHECK(both.id == "idN");
+    REQUIRE(both.diagnostics.size() == 1);
+    CHECK(both.diagnostics.front().source == RuleSource{true, 0});
+    const LayerRules overridden = parse_layer_rules("-^ps=idN=ps^-", "override,idF");
+    CHECK(overridden.name_overridden);
+    CHECK(overridden.id == "idF");
+    CHECK(overridden.diagnostics.empty());
+    // override after an id is no longer the first element.
+    const LayerRules late = parse_layer_rules("-^ps=5=ps^-", "idF,override");
+    CHECK_FALSE(late.name_overridden);
+    REQUIRE(late.diagnostics.size() == 1);
+    CHECK(late.diagnostics.front().code == Code::InvalidElement);
+    CHECK(late.diagnostics.front().element == 2);
+    CHECK(apply_rules(late) == Layers{5});
+}
+
+TEST_CASE("Name markers and commas bound an id", "[PreciseSeam][Rules]")
+{
+    // The name block ends at the first closing marker: off falls outside, and the second closing is stray.
+    const LayerRules closed = parse_layer_rules("-^ps=idA=ps^-B,off=ps^-", {});
+    CHECK(closed.id == "idA");
+    CHECK_FALSE(closed.off);
+    CHECK(count_code(closed.diagnostics, Code::BrokenMarker) == 1);
+    // A second opening discards the block with the id.
+    const LayerRules reopened = parse_layer_rules("-^ps=idA-^ps=off=ps^-", {});
+    CHECK_FALSE(reopened.id.has_value());
+    CHECK(reopened.off);
+    CHECK(count_code(reopened.diagnostics, Code::BrokenMarker) == 1);
+    // A comma always ends the id.
+    const LayerRules split = field("idA,B");
+    CHECK(split.id == "idA");
+    CHECK(count_code(split.diagnostics, Code::InvalidElement) == 1);
 }
 
 namespace {

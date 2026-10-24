@@ -240,7 +240,7 @@ struct ParsedElement {
     std::optional<RuleLayerSet> set;             // Mode with a prefixed set, or Set.
     ModelVolumeType             type     = ModelVolumeType::INVALID;
     int                         priority = 0;
-    int64_t                     relay    = 0; // Group number; 0 for a bare relay.
+    RelayLabel                  relay;
 };
 
 const std::pair<std::string_view, ModelVolumeType> type_labels[] = {
@@ -250,8 +250,8 @@ const std::pair<std::string_view, ModelVolumeType> type_labels[] = {
     {"grey", ModelVolumeType::PRECISE_SEAM_NEUTRAL},
 };
 
-// No keyword of the language is a prefix of another but z of zin, which parse_layer_set() tries first; a digit
-// must follow both. So the first matching keyword decides the rule.
+// No keyword of the language is a prefix of another but z of zin and relay of relay-random, which are tried
+// longest first; a digit must follow z and zin. So the first matching keyword decides the rule.
 std::optional<ParsedElement> parse_element(Cursor &c)
 {
     using Kind = ParsedElement::Kind;
@@ -283,14 +283,16 @@ std::optional<ParsedElement> parse_element(Cursor &c)
         return ParsedElement{Kind::Nowarn};
     if (c.eat("override"))
         return ParsedElement{Kind::Override};
-    // relay = "relay" [uint]; without a number it is a group of its own, apart from relay1, relay2, ...
-    if (c.eat("relay")) {
+    // relay = ("relay-random" | "relay") [uint]; without a number it is a group of its own, apart from relay1, ...
+    const bool random = c.eat("relay-random");
+    if (random || c.eat("relay")) {
         ParsedElement element{Kind::Relay};
+        element.relay.random = random;
         if (!c.done()) {
             const std::optional<int64_t> group = c.uint();
             if (!group || *group < 1)
                 return std::nullopt;
-            element.relay = *group;
+            element.relay.number = *group;
         }
         return element;
     }
@@ -318,6 +320,15 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
             continue;
         const size_t element_index = index + 1;
         const bool   first_element = std::exchange(first, false);
+        // id: a name for external scripts. Any text may follow, so it is taken as a whole before the grammar;
+        // no other keyword starts with "id". Repeats compare normalized, the trimmed original is kept.
+        if (normalized.compare(0, 2, "id") == 0) {
+            if (!rules.id)
+                rules.id = std::string(raw);
+            else if (normalize(*rules.id) != normalized)
+                rules.diagnostics.push_back({RuleDiagnosticCode::IdConflict, source, element_index, std::string(raw)});
+            continue;
+        }
         Cursor       cursor(normalized);
         std::optional<ParsedElement> element = parse_element(cursor);
         // A malformed element changes nothing, not even the mode.
@@ -444,6 +455,14 @@ void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<si
 }
 
 } // namespace
+
+std::string relay_label_text(const RelayLabel &label)
+{
+    std::string text = label.random ? "relay-random" : "relay";
+    if (label.number != 0)
+        text += std::to_string(label.number);
+    return text;
+}
 
 bool has_rule_marker(std::string_view volume_name)
 {
