@@ -7,6 +7,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -191,7 +193,7 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
                                       "inclred", "inclpr1", "exclexcl1", "red1-5", "excl.", "incl.odd", "red.", "1.5", "z",
                                       "100step3", "100-200step0", "100-200step.3", "top0", "top-5", "top.5", "incloff",
                                       "offjunk", "exclnowarn", "nowarn.", "odd.", "1-", "-1-5", "1-5step", "\xD0\xB0",
-                                      "z.5-1", "z12.-30", "z1.2.3-4", "z10-20step3", "ztop5", "inclzinbad", "exclzin1-0",
+                                      "z.5-1", "z12.-30", "z1.2.3-4", "ztop5", "inclzinbad", "exclzin1-0",
                                       "zinc1", "zz1", "zin", "z1incl", "zin1step2", "z30-12.5", "z-1", "z+1", "z1e2", "z1-",
                                       "incloverride", "overridered", "overrideoff", "relay0", "relay-1", "relay.1", "relay=1",
                                       "relay1-5", "relay1junk", "inclrelay1", "exclrelay1", "relay1red", "relay-", "relayrandom",
@@ -202,7 +204,10 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
                                       "relay-randomseed", "relay-random1seed", "relay-random1seed4294967296",
                                       "relay-random1seed99999999999999999999", "relay-random1seed7x", "relay-random1seed-1",
                                       "relay-random1seed1.5", "relay-randomseed7seed8", "relay-random1seed7red", "modelx",
-                                      "bed2", "modelz10", "inclmodel", "exclbed", "bedred", "model1");
+                                      "bed2", "modelz10", "inclmodel", "exclbed", "bedred", "model1", "z5step2", "z0-1step0",
+                                      "z0-1step", "z0-1step.5", "z0-1step-1", "zin0-10step2", "z0x", "z0x+5", "z0.0x",
+                                      "z+0x", "z2x+", "z2x+-1", "z1+2x", "z1x2", "z+-1x", "z.5x", "z1.x", "z-1.x", "z1e2x", "zinx",
+                                      "zin2x", "zin-1x", "z2xstep1", "z0-1step0.5x", "z1-2x");
     CAPTURE(text);
     const LayerRules rules = field(text);
     REQUIRE(rules.diagnostics.size() == 1);
@@ -519,6 +524,148 @@ TEST_CASE("Height literals take a point, at most six decimals and the limit", "[
         CHECK(count_code(rules.diagnostics, Code::NumberOutOfRange) == 1);
         CHECK_FALSE(rules.restricts_layers());
     }
+}
+
+namespace {
+// Every level selects as zA does: the bands that hold it, by the predicate of the specification.
+Layers levels_oracle(const std::vector<int64_t> &levels, const std::vector<LayerBand> &bands)
+{
+    std::set<size_t> out;
+    for (const int64_t level : levels) {
+        const double mm = double(level) / nanometres_per_mm;
+        for (const LayerBand &band : bands)
+            if (band.print_z >= mm - EPSILON && band.bottom_z < mm - EPSILON)
+                out.insert(band.number);
+    }
+    return Layers(out.begin(), out.end());
+}
+// Nanometres as a literal in mm, always with six decimals.
+std::string mm_text(int64_t nanometres)
+{
+    std::string fraction = std::to_string(nanometres % nanometres_per_mm);
+    return std::to_string(nanometres / nanometres_per_mm) + "." + std::string(6 - fraction.size(), '0') + fraction;
+}
+// The levels k*x + b above zero for x >= 0, listed up to `top`, without the canonical form of the parser.
+std::vector<int64_t> formula_levels(int64_t k, int64_t b, int64_t top)
+{
+    std::vector<int64_t> out;
+    for (int64_t level = b; k > 0 ? level <= top : level > 0; level += k)
+        if (level > 0)
+            out.push_back(level);
+    return out;
+}
+std::string formula_text(int64_t k, int64_t b)
+{
+    return "z" + std::string(k < 0 ? "-" : "") + mm_text(std::abs(k)) + "x" + (b < 0 ? "-" : "+") + mm_text(std::abs(b));
+}
+} // namespace
+
+TEST_CASE("A height step selects the layer of each level", "[PreciseSeam][Rules][Heights][Step]")
+{
+    // Levels 0, 0.5, 1, 1.5, 2: no layer holds 0, a border level belongs to the lower layer.
+    CHECK(heights("z0-2step0.5") == Layers{3, 5, 8, 10});
+    CHECK(heights("z0.3-1step0.4") == Layers{2, 4}); // 0.3 and 0.7; B is no level.
+    // A step below the layer height selects every layer once, one above it skips layers.
+    CHECK(heights("z0-1step0.05") == range(1, 5));
+    CHECK(heights("z0-80step10") == range(50, 400, 50));
+    CHECK(heights(" Z 0 - 80 STEP 10 ") == range(50, 400, 50));
+    // A single level is zA, also at the tolerance.
+    for (const std::string level : {"12.5", "12.6", "10.00005", "10.0002", "0.00005", "0", "80"}) {
+        CAPTURE(level);
+        CHECK(heights("z" + level + "-" + level + "step3") == heights("z" + level));
+    }
+    // A billion levels take no time per level.
+    CHECK(heights("z0-80step0.000001") == range(1, 400));
+    Layers rest;
+    for (size_t layer = 1; layer <= 400; ++layer)
+        if (layer % 50 != 0)
+            rest.push_back(layer);
+    CHECK(heights("excl,z0-80step10") == rest);
+    CHECK(heights("exclz0-80step10,excl,odd") == heights("excl,z0-80step10,excl,odd"));
+    const LayerRules rules = field("z0-1step0.25");
+    REQUIRE(rules.operations.size() == 1);
+    CHECK(rules.operations.front().set.step == 250000);
+    CHECK(field("z0-1").operations.front().set.step == 0);
+    CHECK(field("zin0-1").operations.front().set.step == 0);
+}
+
+TEST_CASE("A height formula selects the layer of each level above zero", "[PreciseSeam][Rules][Heights][Formula]")
+{
+    CHECK(heights("z2x+0.3") == range(2, 392, 10));
+    CHECK(heights("z2x+5") == range(25, 395, 10)); // No level below b: x starts at 0.
+    CHECK(heights("z3x-1") == range(10, 400, 15)); // -1 is no level, 2 is the first.
+    CHECK(heights("zx") == range(5, 400, 5));
+    CHECK(heights("z+1x") == range(5, 400, 5));
+    CHECK(heights("z-2x+10") == range(10, 50, 10));
+    CHECK(heights("z-x+1") == Layers{5});
+    CHECK(heights("z1000000x").empty());
+    // No level above zero: a valid empty set, not a broken element.
+    for (const std::string text : {"z-x", "z-x-1", "z-2x+0"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(rules.diagnostics.empty());
+        CHECK(rules.restricts_layers());
+        const LayerSelection selection = select_heights(text);
+        CHECK(selected(selection).empty());
+        CHECK(count_code(selection.diagnostics, Code::EmptySet) == 1);
+        CHECK(heights("excl," + text) == range(1, 400));
+    }
+    // A decimal comma splits the element: z2x+0 and layer 4.
+    CHECK(heights("z2x+0,4") == join(range(4, 4), range(10, 400, 10)));
+    // The largest literals.
+    CHECK(field("z1000000x-1000000").restricts_layers());
+    CHECK(field("z-1000000x+1000000").restricts_layers());
+    for (const std::string text : {"z1000000.000001x", "z1x+1000001", "z-1x-1000000.5", "z0-1step1000001", "z0-1step0.0000011"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(count_code(rules.diagnostics, Code::NumberOutOfRange) == 1);
+        CHECK_FALSE(rules.restricts_layers());
+    }
+}
+
+TEST_CASE("Height steps and formulas match the levels listed one by one", "[PreciseSeam][Rules][Heights][Formula]")
+{
+    // Bands from -1 mm, as after a belt shift, so that levels at or below zero would show.
+    const std::vector<LayerBand> bands = grid(30, 0.2, -1.);
+    const auto evaluate = [&](const std::string &text) { return selected(select_layers(field(text), 30, object_layers(30), bands)); };
+    for (const int64_t k : {200000, -200000, 300000, -300000, 700000, -1000000, 1500000, 1000, -1000})
+        for (const int64_t b : {0, 1, -1, 3000, 400000, -400000, 600000, -600000, 2000000, -2500000, 4800000}) {
+            const std::string text = formula_text(k, b);
+            CAPTURE(text);
+            CHECK(evaluate(text) == levels_oracle(formula_levels(k, b, 6000000), bands));
+        }
+    for (const int64_t a : {0, 300000, 1000000})
+        for (const int64_t width : {0, 700000, 4200000})
+            for (const int64_t step : {1000, 100000, 250000, 400000, 3000000}) {
+                const std::string text = "z" + mm_text(a) + "-" + mm_text(a + width) + "step" + mm_text(step);
+                CAPTURE(text);
+                std::vector<int64_t> levels;
+                for (int64_t level = a; level <= a + width; level += step)
+                    levels.push_back(level);
+                CHECK(evaluate(text) == levels_oracle(levels, bands));
+            }
+    // Steps of one nanometre on bands of one micrometre around zero.
+    const std::vector<LayerBand> fine = grid(5, 0.001, -0.002);
+    for (const int64_t k : {1, -1})
+        for (const int64_t b : {0, 1, -1, 1500, -1500, 2999}) {
+            const std::string text = formula_text(k, b);
+            CAPTURE(text);
+            CHECK(selected(select_layers(field(text), 5, object_layers(5), fine)) == levels_oracle(formula_levels(k, b, 4000), fine));
+        }
+    // Levels at or below zero select nothing, unless a range names them.
+    CHECK(selected(select_layers(field("z1x-0.3"), 1, {1}, {{1, -0.4, -0.2}})).empty());
+    CHECK(selected(select_layers(field("z-x+1"), 1, {1}, {{1, -0.2, 0.}})).empty());
+    CHECK(selected(select_layers(field("z0-0step1"), 1, {1}, {{1, -0.2, 0.}})) == Layers{1});
+    CHECK(selected(select_layers(field("z0"), 1, {1}, {{1, -0.2, 0.}})) == Layers{1});
+}
+
+TEST_CASE("Height formulas reach the top of their representation", "[PreciseSeam][Rules][Heights][Formula]")
+{
+    // Synthetic heights far above any print: the arithmetic near INT64_MAX nanometres stays exact.
+    CHECK(selected(select_layers(field("zx"), 1, {1}, {{1, 9.2e12 - 1., 9.2e12}})) == Layers{1});
+    CHECK(selected(select_layers(field("z1000000x"), 1, {1}, {{1, 9.e12 - 0.5, 9.e12 + 0.5}})) == Layers{1});
+    CHECK(selected(select_layers(field("zx"), 1, {1}, {{1, 9.3e12, 9.3e12 + 1.}})).empty());
+    CHECK(selected(select_layers(field("z0.000001x-1000000"), 1, {1}, {{1, 0., 1.}})) == Layers{1});
 }
 
 TEST_CASE("override first in the field replaces the name rules", "[PreciseSeam][Rules][Override]")
@@ -973,4 +1120,9 @@ TEST_CASE("model heights start at the bottom of the first model layer", "[Precis
     // A model bottom of zero makes both origins measure alike.
     CHECK(selected(select_layers(field("model,z0.1-0.3"), 3, {1, 2, 3}, grid(3, 0.2), {1, 2, 3}, 0.)) ==
           selected(select_layers(field("z0.1-0.3"), 3, {1, 2, 3}, grid(3, 0.2), {1, 2, 3}, 0.)));
+    // Steps and formulas measure their levels from the same bottom.
+    CHECK(selected(evaluate("model,z0-1step0.5")) == Layers{5, 8});
+    CHECK(selected(evaluate("model,zx+0.1")) == Layers{4, 8});
+    CHECK(selected(evaluate("zx+0.1")) == Layers{5});
+    CHECK(selected(select_layers(field("model,z0-0.3step0.1"), 5, {4, 5}, upper, {0, 4, 5}, 0.8)) == Layers{4});
 }

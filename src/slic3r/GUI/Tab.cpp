@@ -4296,7 +4296,7 @@ void TabPrintPart::build()
     for (const char *name : {"Frequent", "Others"}) {
         const auto it   = std::find_if(m_pages.begin(), m_pages.end(), [name](const PageShp &page) { return page->title() == name; });
         PageShp    page = it != m_pages.end() ? *it : add_options_page(L("Others"), "custom-gcode_other");
-        auto optgroup   = page->new_optgroup(L("Precise Seam Rules"), L"param_seam");
+        auto optgroup   = page->new_optgroup(L("Precise Seam Rules (experimental)"), L"param_seam");
         optgroup->visibility_condition = [this] { return m_precise_seam_rules->shown(); };
         Line line{"", ""};
         line.full_width = 1;

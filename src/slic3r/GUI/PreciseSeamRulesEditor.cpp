@@ -38,9 +38,11 @@ PreciseSeamRulesEditor *part_editor()
 wxString precise_seam_rules_help()
 {
     // TRN: Help for the Precise Seam rules field. Keep the rule keywords untranslated.
-    return _L("Comma-separated rules, applied from left to right:\n"
+    return _L("Experimental: the rules syntax may change in future versions.\n"
+              "Comma-separated rules, applied from left to right:\n"
               "layers: 5, 10-20, 10-20step3, 3x+1, odd, even, top5, all\n"
-              "heights in mm: z12.5-30 (layers that reach into it), zin12.5-30 (layers wholly inside), z12.5\n"
+              "heights in mm: z12.5-30 (layers that reach into it), zin12.5-30 (layers wholly inside), z12.5; "
+              "z0-30step2.5 and z2.5x+0.4 select the layer at each level, as z12.5 does\n"
               "model, bed: the layers and heights after it count from the model, above a raft, or from the bed (default)\n"
               "mode: incl (default), excl\n"
               "type: center, left, right, green, red, gray\n"

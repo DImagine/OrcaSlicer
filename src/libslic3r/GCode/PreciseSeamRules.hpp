@@ -77,7 +77,9 @@ struct RuleLayerSet {
     Kind    kind   = Kind::All;
     int64_t first  = 0;     // Range: A; Formula: k (non-zero); Top: K; Height: A in nanometres.
     int64_t last   = 0;     // Range: B; Formula: b; Height: B in nanometres.
-    int64_t step   = 1;     // Range only; a single layer N is the range N-N.
+    // Range: a single layer N is the range N-N. Height: 0 for the continuous range [A, B], otherwise the levels
+    // A, A + step, ... <= B in nanometres, each selecting as zA does; a height formula is kept as such levels.
+    int64_t step   = 1;
     bool    inside = false; // Height only: zin, the whole layer within [A, B]; a single height zA is zA-A.
 };
 

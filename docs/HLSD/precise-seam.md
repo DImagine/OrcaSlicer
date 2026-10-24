@@ -93,7 +93,8 @@ Layer rules can override both the type and the place in this order (see
 ## Layer rules
 
 A short language limits a modifier to some layers and can set its type and
-priority. It is read only from Precise Seam volumes, from two sources: blocks
+priority. The language is experimental and its syntax may change; the group
+title and the help say so. It is read only from Precise Seam volumes, from two sources: blocks
 between `-^ps=` and `=ps^-` in the volume name, so that a CAD model can carry
 the rules through repeated exports, and the volume's rules field
 (`ModelVolume::precise_seam_rules`). Name blocks apply left to right, then the
@@ -103,7 +104,7 @@ print and is tested on its own.
 - **Elements.** Elements are separated by commas; whitespace is removed and
   ASCII letters are lowered first. Layer sets are `N`, `A-B`, `A-BstepS`,
   `kx+b` (x from 0), `odd`, `even`, `topK`, `all` and the heights `zA-B`,
-  `zinA-B` and `zA` (see Heights below). `incl` and `excl` switch
+  `zinA-B`, `zA`, `zA-BstepS` and `zkx+b` (see Heights below). `incl` and `excl` switch
   between adding and subtracting the following sets, and may prefix one set
   (`excl129-312`). `model` and `bed` switch the origin of the following sets
   in the same way (see Origin below). Labels `center`, `left`, `right`, `green`, `red`,
@@ -154,7 +155,14 @@ print and is tested on its own.
   so both its bounds lean towards the lower layer (`z10.00005` takes the layer
   that ends at 10.0); the inclusion is `bottom_z >= A - EPSILON` and
   `print_z <= B + EPSILON`. Heights are parsed exactly, in nanometres,
-  with at most six decimals. Bands come from the object's own layers, not from
+  with at most six decimals. `zA-BstepS` and `zkx+b` give levels, A, A+S, ...
+  up to B, or k*x+b for whole x >= 0 above zero; each level selects as `zA`
+  does, and a formula has no upper bound of its own (technically INT64_MAX
+  nanometres). k and b take a sign, k is 1 when omitted (`zx`); `zin` takes
+  neither a step nor a formula. A formula without a level above zero is a valid
+  empty set. The selection takes no time per level: for each band a binary
+  search finds the first level above its bottom, and only that level can reach
+  into the band. Bands come from the object's own layers, not from
   the plan events, so the grid of another object never moves them; support-only
   events have no band and are never selected by height. The selected layers
   then act as a set of their numbers.
@@ -775,7 +783,7 @@ rebuilt on every export.
   colors are close shades of one orange because all three mark strong
   modifiers; the object list icons tell the modes apart.
 - The part settings edit the rules field of a Precise Seam volume, three lines
-  high, in a *Precise Seam Rules* group on the Frequent and the Others page, for
+  high, in a *Precise Seam Rules (experimental)* group on the Frequent and the Others page, for
   a single selected Precise Seam volume only; there is no separate menu item.
   Renaming such a volume also updates the print, since the name may hold rules. The field is no config option: the part tab adds
   the groups after its option filter, and a visibility condition of the group

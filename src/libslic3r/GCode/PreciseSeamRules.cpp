@@ -98,6 +98,7 @@ public:
     explicit Cursor(std::string_view text) : m_text(text) {}
 
     bool done() const { return m_pos == m_text.size(); }
+    bool digit() const { return !done() && m_text[m_pos] >= '0' && m_text[m_pos] <= '9'; }
     bool out_of_range() const { return m_out_of_range; }
 
     bool eat(std::string_view word)
@@ -172,23 +173,76 @@ private:
     bool             m_out_of_range = false;
 };
 
+// Rounds towards positive infinity for a positive divisor.
+int64_t ceil_div(int64_t numerator, int64_t divisor) { return numerator >= 0 ? (numerator + divisor - 1) / divisor : -(-numerator / divisor); }
+
+// The rest of a height formula after "z" [sign] [k] "x": the levels k*x + b in mm for whole x >= 0, kept as the
+// increasing levels above zero. Without such levels the set is valid and empty.
+std::optional<RuleLayerSet> parse_height_formula(Cursor &c, int sign, std::optional<int64_t> lead)
+{
+    if (lead && *lead == 0) // "z0x+5" is a constant, not a formula.
+        return std::nullopt;
+    const int64_t k = (sign < 0 ? -1 : 1) * lead.value_or(nanometres_per_mm);
+    int64_t       b = 0;
+    const bool    plus = c.eat('+');
+    if (plus || c.eat('-')) {
+        const std::optional<int64_t> value = c.nanometres();
+        if (!value)
+            return std::nullopt;
+        b = plus ? *value : -*value;
+    }
+    // first > last: no level. With literals up to the limit, k*x0 stays within about 2e12.
+    RuleLayerSet set{RuleLayerSet::Kind::Height, 1, 0, 1};
+    if (k > 0) {
+        // The smallest level above zero, without going back below b: x starts at 0.
+        set.first = b + k * std::max<int64_t>(0, ceil_div(1 - b, k));
+        set.last  = std::numeric_limits<int64_t>::max();
+        set.step  = k;
+    } else if (b > 0) {
+        // b, b - |k|, ... down to the smallest level above zero.
+        set.step                = -k;
+        const int64_t remainder = b % set.step;
+        set.first               = remainder != 0 ? remainder : set.step;
+        set.last                = b;
+    }
+    return set;
+}
+
 // layer_set = uint | uint "-" uint [step] | formula | parity | top | all | height
 std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
 {
     using Kind = RuleLayerSet::Kind;
-    // height = ("z" | "zin") decimal ["-" decimal]; zin is tried first, as z begins it.
+    // height = "zin" decimal ["-" decimal] | "z" decimal ["-" decimal ["step" decimal]]
+    //        | "z" ["+" | "-"] [decimal] "x" [("+" | "-") decimal]; zin is tried first, as z begins it.
     const bool inside = c.eat("zin");
     if (inside || c.eat('z')) {
-        const std::optional<int64_t> first = c.nanometres();
-        if (!first)
+        int sign = 0;
+        if (!inside && c.eat('+'))
+            sign = 1;
+        else if (!inside && c.eat('-'))
+            sign = -1;
+        // A broken number is no omitted coefficient: "z1.x" is not "zx".
+        std::optional<int64_t> first;
+        if (c.digit() && !(first = c.nanometres()))
             return std::nullopt;
-        RuleLayerSet set{Kind::Height, *first, *first};
+        if (!inside && c.eat('x'))
+            return parse_height_formula(c, sign, first);
+        // Heights are unsigned: "z-1" and "z+1" are not valid.
+        if (sign != 0 || !first)
+            return std::nullopt;
+        RuleLayerSet set{Kind::Height, *first, *first, 0};
         set.inside = inside;
         if (c.eat('-')) {
             const std::optional<int64_t> last = c.nanometres();
             if (!last || *last < set.first)
                 return std::nullopt;
             set.last = *last;
+            if (!inside && c.eat("step")) {
+                const std::optional<int64_t> step = c.nanometres();
+                if (!step || *step < 1)
+                    return std::nullopt;
+                set.step = *step;
+            }
         }
         return set;
     }
@@ -265,7 +319,8 @@ const std::pair<std::string_view, ModelVolumeType> type_labels[] = {
 };
 
 // No keyword of the language is a prefix of another but z of zin and relay of relay-random, which are tried
-// longest first; a digit must follow z and zin. So the first matching keyword decides the rule.
+// longest first; a digit must follow zin, and a digit, a sign or x must follow z. So the first matching keyword
+// decides the rule.
 std::optional<ParsedElement> parse_element(Cursor &c)
 {
     using Kind = ParsedElement::Kind;
@@ -438,9 +493,6 @@ std::string leading_element(std::string_view source_text)
     return {};
 }
 
-// Rounds towards positive infinity for a positive divisor.
-int64_t ceil_div(int64_t numerator, int64_t divisor) { return numerator >= 0 ? (numerator + divisor - 1) / divisor : -(-numerator / divisor); }
-
 // Calls `visit` for every layer of the set within [1, count]. With literals up to rule_number_limit, every
 // value below stays within +-(count + 3 * rule_number_limit): a formula starts at b or within one step k
 // of 1 or count, and every loop stops at most one step past its bound.
@@ -484,6 +536,31 @@ void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<si
         break;
     }
     case Kind::Height: {
+        if (set.step > 0) {
+            if (set.first > set.last)
+                break;
+            // Levels first + i*step, i in [0, n], computed exactly; first >= 0, so n cannot overflow. Each
+            // level selects as zA does. The first level above a band's bottom is found by a binary search, as
+            // its predicate is monotonic in i also after rounding; when it does not reach into the band, no
+            // later level does. This takes no time per level, whatever their number.
+            const int64_t n     = (set.last - set.first) / set.step;
+            const auto    level = [&set](int64_t i) { return double(set.first + i * set.step) / nanometres_per_mm; };
+            for (const LayerBand &band : bands) {
+                if (band.number < 1 || band.number > size_t(count) || !(band.bottom_z < level(n) - EPSILON))
+                    continue;
+                int64_t lo = 0, hi = n;
+                while (lo < hi) {
+                    const int64_t mid = lo + (hi - lo) / 2;
+                    if (band.bottom_z < level(mid) - EPSILON)
+                        hi = mid;
+                    else
+                        lo = mid + 1;
+                }
+                if (band.print_z >= level(lo) - EPSILON)
+                    visit(int64_t(band.number));
+            }
+            break;
+        }
         // A whole layer never fits into a single height, whatever the tolerance.
         if (set.inside && set.first == set.last)
             break;
