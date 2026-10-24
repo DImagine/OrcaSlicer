@@ -143,15 +143,19 @@ print and is tested on its own.
   never reported as "no effect". A volume that is off or active on no layer is
   left out entirely.
 - **Isolation.** Few prints use rules, so the language is a separate branch
-  (`GCode/PreciseSeamRulesApply.cpp`): the path without rules runs no code of
-  the language and its export stages stay in their usual order. The branch is
-  taken per object when a Precise Seam volume has a non-empty rules field or a
-  block marker in its name; the check reads the raw text and parses nothing, and
-  broken rules still take the branch so that they are reported. Without rules
-  there is no early plan or numbering, no parsing and no rule messages, and
-  `init_precise_seam_data()` collects the volumes as before. The one cost left
-  in the shared code is that the strong and weak loops take an optional
-  `EffectiveModifiers` and skip its lookup when it is null. The price is a
+  (`GCode/PreciseSeamRulesApply.cpp`) and the export stages of a print without
+  rules stay in their usual order. The branch is taken per object when a
+  Precise Seam volume has a non-empty rules field or a block marker in its
+  name; the check reads the raw text and parses nothing, and broken rules still
+  take the branch so that they are reported. Without rules there is no early
+  plan or numbering, no parsing or evaluation and no rule messages, and
+  `init_precise_seam_data()` collects the volumes as it does for Precise Seam
+  alone. What remains on that path is the check itself, empty containers, and
+  in the strong and weak loops an optional `EffectiveModifiers` whose lookup is
+  skipped when it is null. The layer numbering is an adapter of the export
+  plan and stays next to it in `GCode.cpp`; when printing by layer it keeps
+  rows only for the objects with rules, while every event of the plate still
+  takes a number. The price is a
   second collection of the volumes in the branch; a test checks that rules
   which keep every layer and type give the seams of no rules. Dependencies go
   one way: the geometric core (`PreciseSeam.hpp`) does not include the language.

@@ -1605,6 +1605,67 @@ TEST_CASE("Changing only the rules updates the exported seam", "[PreciseSeam][Ru
     CHECK(std::none_of(switched_off.begin(), switched_off.end(), seam_on_front_helper));
     // A volume switched off by its rules is not reported as having no effect.
     CHECK(fixture.warning().empty());
+
+    // A rule problem is reported; removing the last rules returns the object to the path without rules,
+    // and the old rule warning goes with them.
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "bad";
+    const auto invalid = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(invalid.size() == 10);
+    CHECK(std::all_of(invalid.begin(), invalid.end(), seam_on_front_helper));
+    CHECK_FALSE(fixture.warning().empty());
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules.clear();
+    const auto restored = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(restored.size() == 10);
+    CHECK(std::all_of(restored.begin(), restored.end(), seam_on_front_helper));
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("Printing by object, an object with rules and one without keep their own seams", "[PreciseSeam][Rules]")
+{
+    // Only the object with rules has its layer plan collected before the seams; the other one is
+    // collected where the export always does it.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("print_sequence", "by object");
+    config.set_deserialize_strict("seam_position", "back");
+    config.set_deserialize_strict("seam_slope_type", "none");
+    config.set_deserialize_strict("layer_height", "0.2");
+    config.set_deserialize_strict("initial_layer_print_height", "0.2");
+    config.set_deserialize_strict("outer_wall_line_width", "0.4");
+    config.set_deserialize_strict("initial_layer_line_width", "0.4");
+    Model model;
+    Print print;
+    Test::init_print({make_cube(20, 20, 2), make_cube(20, 20, 2)}, print, model, config);
+    REQUIRE(model.objects.size() == 2);
+    // The same front-face helper as ExportFixture::add() on each object.
+    for (ModelObject *object : model.objects) {
+        const ModelVolume *cube = object->volumes.front();
+        const Vec3d cube_min = cube->mesh().transformed_bounding_box(cube->get_matrix()).min;
+        ModelVolume *helper = object->add_volume(make_cube(2, 6, 4));
+        helper->set_type(ModelVolumeType::PRECISE_SEAM_CENTER);
+        helper->name = "front";
+        const Vec3d current = helper->mesh().transformed_bounding_box(helper->get_matrix()).min;
+        helper->set_offset(helper->get_offset() + cube_min + Vec3d(4, -3, -1) - current);
+    }
+    model.objects.front()->volumes.back()->precise_seam_rules = "odd";
+    print.apply(model, config);
+    const auto loops = outer_wall_loops(Test::gcode(print));
+    REQUIRE(loops.size() == 20);
+    // The objects print one after the other, ten loops each, in an order the arrangement decides. Each one
+    // numbers its own layers from 1: the object with rules on its odd layers, the other on every layer.
+    const auto on_helper = [&loops](size_t first) {
+        std::vector<bool> out;
+        for (size_t i = first; i < first + 10; ++i)
+            out.push_back(seam_on_front_helper(loops[i]));
+        return out;
+    };
+    std::vector<bool> odd_layers;
+    for (size_t i = 0; i < 10; ++i)
+        odd_layers.push_back(i % 2 == 0); // Loop i is layer i + 1.
+    const std::vector<bool> first = on_helper(0), second = on_helper(10);
+    const bool rules_first = first == odd_layers;
+    CHECK((rules_first ? first : second) == odd_layers);
+    CHECK((rules_first ? second : first) == std::vector<bool>(10, true));
+    CHECK(print.step_state_with_warnings(psGCodeExport).warnings.empty());
 }
 
 TEST_CASE("Rules that keep every layer and type give the seams of no rules", "[PreciseSeam][Rules]")

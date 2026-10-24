@@ -162,8 +162,9 @@ public:
   //The following data structures hold all perimeter points for all PrintObject.
   std::unordered_map<const PrintObject*, PrintObjectSeamData> m_seam_per_object;
 
-  // Rule numbers of the layers of each print object, for Precise Seam layer rules. Without them, or for
-  // an object missing here, the object numbers its own layers from 1.
+  // Rule numbers of the layers of each print object, for Precise Seam layer rules. The export passes an
+  // entry for every object that uses rules; without the map (direct calls, e.g. tests) such an object
+  // numbers its own layers from 1.
   using PreciseSeamNumbering = std::unordered_map<const PrintObject*, PreciseSeam::LayerNumbering>;
 
   void init(const Print &print, std::function<void(void)> throw_if_canceled_func,

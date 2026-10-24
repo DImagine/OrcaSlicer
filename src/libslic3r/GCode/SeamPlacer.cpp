@@ -2144,7 +2144,8 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
           PreciseSeam::LayerNumbering own_layers;
           const PreciseSeam::LayerNumbering *object_numbering = &own_layers;
           if (numbering != nullptr) {
-              // The export numbers every object that uses rules.
+              // The export numbers every object that uses rules. Asserted, not checked at run time: an
+              // invariant that cannot fail in the export is documented, not handled.
               const auto it = numbering->find(po);
               assert(it != numbering->end());
               if (it != numbering->end())
@@ -2354,8 +2355,9 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
   }
 
   // Layer rule diagnostics: each one is a separate single-line warning, in object, volume, source and
-  // element order.
-  m_precise_seam_rule_warnings = PreciseSeam::rule_warnings(rule_diagnostics);
+  // element order. Only objects with rules produce them.
+  if (!rule_diagnostics.empty())
+      m_precise_seam_rule_warnings = PreciseSeam::rule_warnings(rule_diagnostics);
 }
 
 void SeamPlacer::place_seam(const Layer *layer, ExtrusionLoop &loop,

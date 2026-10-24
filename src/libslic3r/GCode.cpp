@@ -2534,9 +2534,11 @@ static SeamPlacer::PreciseSeamNumbering precise_seam_numbering(
     const Print &print, const ToolOrdering &tool_ordering,
     const std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> &layers_to_print)
 {
+    // Rows only for the objects with rules; the events of all objects take numbers.
     SeamPlacer::PreciseSeamNumbering numbering;
     for (const PrintObject *object : print.objects())
-        numbering[object].object_layers.assign(object->layers().size(), 0);
+        if (PreciseSeam::uses_precise_seam_rules(*object->model_object()))
+            numbering[object].object_layers.assign(object->layers().size(), 0);
     size_t count = 0;
     for (const auto &[print_z, layers] : layers_to_print) {
         const bool belt_brim_only =
@@ -2547,12 +2549,12 @@ static SeamPlacer::PreciseSeamNumbering precise_seam_numbering(
         ++count;
         // Entries follow print.objects(); an event can hold the support of one object and a model layer of another.
         for (size_t i = 0; i < layers.size(); ++i)
-            if (const Layer *layer = layers[i].object_layer) {
-                const PrintObject *object = print.objects()[i];
-                const size_t       index  = layer->id() - object->slicing_parameters().raft_layers();
-                if (index < numbering[object].object_layers.size())
-                    numbering[object].object_layers[index] = count;
-            }
+            if (const Layer *layer = layers[i].object_layer)
+                if (const auto row = numbering.find(print.objects()[i]); row != numbering.end()) {
+                    const size_t index = layer->id() - row->first->slicing_parameters().raft_layers();
+                    if (index < row->second.object_layers.size())
+                        row->second.object_layers[index] = count;
+                }
     }
     for (auto &entry : numbering)
         entry.second.count = count;
