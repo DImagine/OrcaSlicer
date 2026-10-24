@@ -196,16 +196,17 @@ print and is tested on its own.
   or a strong modifier takes them. The relay pre-pass and the main pass do not
   see weak groups.
 - **Random relay.** A `relay-random` group differs only in the choice of the
-  holder, from the same table of winners: a winner other than the holder of
-  the last layer with a winner, unless that holder is the only winner. The
+  holder, from the same table: the winners of a strong group, the active
+  members of a weak one. The holder is one of them other than the holder of
+  the last layer that had one, unless that holder is the only one. The
   choice is `hash % candidates` over the candidates in queue order, where the
   hash is splitmix64 of the group number mixed with the object layer index. It
   uses unsigned 64-bit arithmetic only, as the result of a standard library
   distribution differs between platforms, so every export and platform gives
   the same seams. The hash ignores the volume IDs, so the schedule survives
   saving and loading.
-- **Relay pre-pass.** Who wins depends on the geometry, so `schedule_relay()`
-  runs before the main pass, group by group in block order. In parallel over
+- **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
+  `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, and runs
   the strong driver on a fresh copy of each, first with the seniors, then on a
   free perimeter with each member alone until it wins. These probes are quiet:
@@ -215,8 +216,8 @@ print and is tested on its own.
   order of a layer in the main pass, where each worker rebuilds one list per
   layer, so both passes see the same occupation. This rests on the contract of
   the strong driver: the first success ends a perimeter, and weak modifiers act
-  only without a strong result. Without a group of two or more members nothing
-  of this runs. With groups, perimeters are extracted again and clipping
+  only without a strong result. Without a strong group of two or more members
+  nothing of this runs. With such groups, perimeters are extracted again and clipping
   repeats for the members and their seniors, an ordinary senior up to once per
   group.
 - **Isolation.** Few prints use rules, so the language is a separate branch

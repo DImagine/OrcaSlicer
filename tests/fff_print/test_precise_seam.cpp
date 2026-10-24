@@ -2397,11 +2397,12 @@ TEST_CASE("A weak relay group stands at its most senior member, and each member 
     ExportFixture fixture("back");
     SECTION("pr1 moves the anchor, the queue stays in the object list order")
     {
-        const ModelVolume *A = add_modifier(fixture, green, "relay");
         const ModelVolume *X = add_modifier(fixture, ModelVolumeType::PRECISE_SEAM_BLOCKED, "");
+        const ModelVolume *A = add_modifier(fixture, green, "relay");
         const ModelVolume *B = add_modifier(fixture, green, "relay,pr1");
         const WeakInit init(fixture, 4);
-        // Priority order B, A, X becomes the block {A, B} and X; weak ones apply in reverse.
+        // Priority order B, X, A becomes the block {A, B} and X, so the block is senior to X only by pr1;
+        // weak ones apply in reverse.
         CHECK(init.weak == Volumes{X, B, A});
         CHECK(init.row(A) == "1010");
         CHECK(init.row(B) == "0101");
