@@ -2036,3 +2036,48 @@ TEST_CASE("A relay group with a weak member acts without relay and is reported",
     CHECK(warnings[2].find("\"B\"") != std::string::npos);
     CHECK(warnings[2].find("\"relay1\" acts without relay") != std::string::npos);
 }
+
+TEST_CASE("A stand-in tries the members after the holder first, round the queue", "[PreciseSeam][Rules][Relay]")
+{
+    // A and C cross only the left island (x = 3 and 6 mm, -1 and 2 relative to its centre), B only the right
+    // one (x = 15 mm, -1). While B holds, the left island goes to C, the member after B, not to A.
+    ExportFixture fixture("back", 0, two_islands());
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(14, -3, -1), "B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(5, -3, -1), "C");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 20);
+    // Holders A, B, C, A, ...: the left island shows A, then C under B and under C. Indices into {A, C}.
+    std::vector<std::pair<int, int>> expected;
+    for (int layer = 1; layer <= 10; ++layer)
+        expected.emplace_back(layer % 3 == 1 ? 0 : 1, 0);
+    CHECK(island_helpers(loops, {-1., 2.}) == expected);
+}
+
+TEST_CASE("A stand-in of a senior group keeps the turn of the junior group", "[PreciseSeam][Rules][Relay]")
+{
+    // Object list H_A, G_C, H_B, G_D: groups H = relay1 (anchor H_A) and G = relay2 (anchor G_C) interleave.
+    // H_A crosses only the left island; H_B, G_C and G_D only the right one, H_B on odd layers by its rules.
+    // Relative to the right island's centre (x = 16 mm) H_B, G_C and G_D are at -2.5, 0 and 2.5.
+    ExportFixture fixture("back", 0, two_islands());
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(2, -3, -1), "H_A");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay1";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(15, -3, -1), "G_C");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay2";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(12.5, -3, -1), "H_B");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay1,odd";
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(17.5, -3, -1), "G_D");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay2";
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 20);
+    // H takes the right island on odd layers, as a stand-in on layer 1 and as the holder on layer 3, so G
+    // has no holder there and keeps its turn: G_C on layer 2, G_D on layer 4. Were the stand-in left out of
+    // the seniors of G, G would spend its turn on layer 1 and show G_D on layer 2.
+    // Indices into {H_A, H_B, G_C, G_D}.
+    const std::vector<std::pair<int, int>> expected{{0, 1}, {0, 2}, {0, 1}, {0, 3}, {0, 1},
+                                                    {0, 2}, {0, 1}, {0, 3}, {0, 1}, {0, 2}};
+    CHECK(island_helpers(loops, {-1., -2.5, 0., 2.5}) == expected);
+}
