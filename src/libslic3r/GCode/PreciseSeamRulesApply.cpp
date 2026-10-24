@@ -2,6 +2,7 @@
 #include "PreciseSeamRulesApply.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <iterator>
 #include <limits>
@@ -12,7 +13,9 @@
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
 #include "libslic3r/I18N.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
 #include "PreciseSeam.hpp"
 #include "PreciseSeamRules.hpp"
 
@@ -32,6 +35,7 @@ void init_precise_seam_data_by_rules(
     bool &has_strong_out,
     const ModelObject &model_object,
     const LayerNumbering &numbering,
+    const ConstLayerPtrsAdaptor &model_layers,
     EffectiveModifiers &effective_out,
     std::vector<ModifierDiagnostic> &diagnostics_out)
 {
@@ -65,6 +69,20 @@ void init_precise_seam_data_by_rules(
     // Layers of each volume, with its diagnostics in volume order. An empty row means every layer;
     // nullopt leaves the volume out: switched off, or its rules exclude every layer of this object.
     const std::vector<size_t> numbered = numbering.numbered_layers();
+    // Height bands of the numbered model layers, matched by the original layer index (numbered_layers()
+    // drops that index); built only when some volume selects by height.
+    std::vector<LayerBand> bands;
+    const bool uses_heights = std::any_of(rules.begin(), rules.end(), [](const LayerRules &r) {
+        return std::any_of(r.operations.begin(), r.operations.end(),
+                           [](const RuleLayerOperation &op) { return op.set.kind == RuleLayerSet::Kind::Height; });
+    });
+    if (uses_heights) {
+        // Both come from the same print object, so they always have one entry per layer.
+        assert(numbering.object_layers.size() == model_layers.size());
+        for (size_t layer = 0; layer < numbering.object_layers.size(); ++layer)
+            if (numbering.object_layers[layer] != 0)
+                bands.push_back({numbering.object_layers[layer], model_layers[layer]->bottom_z(), model_layers[layer]->print_z});
+    }
     std::vector<std::optional<std::vector<bool>>> layers(volumes.size());
     for (size_t i = 0; i < volumes.size(); ++i) {
         // Nothing reads the diagnostics of the rules after this point.
@@ -72,7 +90,7 @@ void init_precise_seam_data_by_rules(
         if (!rules[i].off && !rules[i].restricts_layers())
             layers[i].emplace();
         else if (!rules[i].off) {
-            LayerSelection selection = select_layers(rules[i], numbering.count, numbered);
+            LayerSelection selection = select_layers(rules[i], numbering.count, numbered, bands);
             own.insert(own.end(), std::make_move_iterator(selection.diagnostics.begin()), std::make_move_iterator(selection.diagnostics.end()));
             std::vector<bool> row(numbering.object_layers.size(), false);
             bool              any = false;
@@ -92,6 +110,9 @@ void init_precise_seam_data_by_rules(
             own.push_back({RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}});
         for (RuleDiagnostic &diagnostic : own)
             diagnostics_out.push_back({volumes[i], std::move(diagnostic)});
+        if (rules[i].name_overridden)
+            BOOST_LOG_TRIVIAL(info) << "[PreciseSeamRules] override: object_id=" << model_object.id().id
+                                    << " volume_id=" << volumes[i]->id().id << " the rules field replaces the name rules";
         // nowarn hides the differences from the user, not from the log.
         if (contains(order.suppressed, i))
             // IDs only: names may hold line breaks, and rule_warnings() names them escaped.

@@ -1803,3 +1803,67 @@ TEST_CASE("Rule warnings of one modifier follow the element order", "[PreciseSea
     CHECK(warnings[0].find("\"500\"") != std::string::npos);
     CHECK(warnings[1].find("\"bad\"") != std::string::npos);
 }
+
+TEST_CASE("Height rules keep their place in mm when the layer height changes", "[PreciseSeam][Rules][Heights]")
+{
+    // Loop i is the layer (i h, (i + 1) h]: z0.5-1.2 takes the layers that meet the range, zin0.5-1.2 those inside it.
+    const auto [height, rule, first, last] = GENERATE(table<std::string, std::string, size_t, size_t>(
+        {{"0.2", "z0.5-1.2", 2, 5}, {"0.1", "z0.5-1.2", 4, 11}, {"0.2", "zin0.5-1.2", 3, 5}, {"0.1", "zin0.5-1.2", 5, 11}}));
+    CAPTURE(height, rule);
+    ExportFixture fixture("back");
+    fixture.config.set_deserialize_strict("layer_height", height);
+    fixture.config.set_deserialize_strict("initial_layer_print_height", height);
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=" + rule + "=ps^-");
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == (height == "0.2" ? 10 : 20));
+    for (size_t i = 0; i < loops.size(); ++i) {
+        CAPTURE(i);
+        CHECK(seam_on_front_helper(loops[i]) == (i >= first && i <= last));
+    }
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("Heights count from the bed, so a raft lifts the model layers", "[PreciseSeam][Rules][Heights]")
+{
+    ExportFixture fixture("back", 2);
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=z0-2=ps^-");
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    const PrintObject &object = *fixture.print.objects().front();
+    REQUIRE(loops.size() == 10);
+    REQUIRE(object.layers().size() == loops.size());
+    size_t selected = 0;
+    for (size_t i = 0; i < loops.size(); ++i) {
+        CAPTURE(i, object.layers()[i]->bottom_z());
+        const bool expected = object.layers()[i]->bottom_z() < 2. - EPSILON;
+        CHECK(seam_on_front_helper(loops[i]) == expected);
+        selected += expected;
+    }
+    // Without the raft every layer of the 2 mm cube starts below 2 mm.
+    CHECK(selected > 0);
+    CHECK(selected < loops.size());
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("override in the field replaces the name rules of the exported seam", "[PreciseSeam][Rules][Override]")
+{
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=1-3=ps^-");
+    ModelVolume &helper = *fixture.model.objects.front()->volumes.back();
+    helper.precise_seam_rules = "override, excl, odd";
+    const auto replaced = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(replaced.size() == 10);
+    for (size_t i = 0; i < replaced.size(); ++i) {
+        CAPTURE(i);
+        CHECK(seam_on_front_helper(replaced[i]) == (i % 2 == 1)); // Loop i is layer i + 1.
+    }
+    CHECK(fixture.warning().empty());
+
+    // Clearing the field brings the name rules back.
+    helper.precise_seam_rules.clear();
+    const auto restored = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(restored.size() == 10);
+    for (size_t i = 0; i < restored.size(); ++i) {
+        CAPTURE(i);
+        CHECK(seam_on_front_helper(restored[i]) == (i < 3));
+    }
+}

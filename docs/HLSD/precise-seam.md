@@ -102,13 +102,17 @@ print and is tested on its own.
 
 - **Elements.** Elements are separated by commas; whitespace is removed and
   ASCII letters are lowered first. Layer sets are `N`, `A-B`, `A-BstepS`,
-  `kx+b` (x from 0), `odd`, `even`, `topK` and `all`. `incl` and `excl` switch
+  `kx+b` (x from 0), `odd`, `even`, `topK`, `all` and the heights `zA-B`,
+  `zinA-B` and `zA` (see Heights below). `incl` and `excl` switch
   between adding and subtracting the following sets, and may prefix one set
   (`excl129-312`). Labels `center`, `left`, `right`, `green`, `red`,
   `gray`/`grey` set the type; `prN` and `pr-N` set the priority; `off`
   disables the modifier and `nowarn` silences the warnings about differences
   from the object list. A keyword is followed directly by its number or set:
-  `pr.1` is not an element.
+  `pr.1` is not an element. `override` as the first element of the field
+  replaces the name, so that the behaviour can change without renaming the
+  volume: the name is then not parsed and reports nothing. Anywhere else it is
+  an invalid element.
 - **Atomic elements.** An element that does not match the grammar as a whole,
   or has a number above 1 000 000, is dropped with a warning and changes
   nothing, not even the mode. Numbers are bounded before any arithmetic and a
@@ -131,6 +135,17 @@ print and is tested on its own.
   rules are used, the plan is built once before `SeamPlacer::init()` and the
   export prints that same plan, since collecting it raises warnings and errors:
   by layer for the whole plate, by object only for the objects with rules.
+- **Heights.** A height set selects the numbered model layers of the object by
+  their band `(bottom_z, print_z]`, measured from the bed in the coordinates of
+  the preview, so it keeps its place in mm when the layer height changes. `zA-B`
+  takes the layers whose band meets `[A, B]`, `zinA-B` those wholly inside it;
+  a single height `zA` is `zA-A`, the layer that holds that level, and `zinA` is
+  always empty. A level on the border of two layers belongs to the lower one.
+  The comparisons allow `EPSILON`; heights are parsed exactly, in nanometres,
+  with at most six decimals. Bands come from the object's own layers, not from
+  the plan events, so the grid of another object never moves them; support-only
+  events have no band and are never selected by height. The selected layers
+  then act as a set of their numbers.
 - **Effective order.** Volumes are grouped by their effective type. Within a
   group the order is `pr1, pr2, ...`, then the volumes without priority in
   object order, then `pr-1, pr-2, ...`; ties keep the object order. The strong

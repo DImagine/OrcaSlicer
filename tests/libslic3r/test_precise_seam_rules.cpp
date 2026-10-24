@@ -188,9 +188,12 @@ TEST_CASE("Whitespace is removed and letters are lowered before parsing", "[Prec
 TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][Rules]")
 {
     const std::string text = GENERATE(as<std::string>{}, "0", "0x+5", "3x+-1", "1+2x", "+5", "-5", "pr0", "pr-0", "pr1.", "pr.1",
-                                      "inclred", "inclpr1", "exclexcl1", "red1-5", "excl.", "incl.odd", "red.", "1.5", "z10",
+                                      "inclred", "inclpr1", "exclexcl1", "red1-5", "excl.", "incl.odd", "red.", "1.5", "z",
                                       "100step3", "100-200step0", "100-200step.3", "top0", "top-5", "top.5", "incloff",
-                                      "offjunk", "exclnowarn", "nowarn.", "odd.", "1-", "-1-5", "1-5step", "\xD0\xB0");
+                                      "offjunk", "exclnowarn", "nowarn.", "odd.", "1-", "-1-5", "1-5step", "\xD0\xB0",
+                                      "z.5-1", "z12.-30", "z1.2.3-4", "z10-20step3", "ztop5", "inclzinbad", "exclzin1-0",
+                                      "zinc1", "zz1", "zin", "z1incl", "zin1step2", "z30-12.5", "z-1", "z+1", "z1e2", "z1-",
+                                      "incloverride", "overridered", "overrideoff");
     CAPTURE(text);
     const LayerRules rules = field(text);
     REQUIRE(rules.diagnostics.size() == 1);
@@ -391,4 +394,190 @@ TEST_CASE("Only rules text on a Precise Seam volume selects the rules branch", "
     helper->set_type(ModelVolumeType::PARAMETER_MODIFIER);
     helper->name = "helper -^ps=odd=ps^-";
     CHECK_FALSE(uses_precise_seam_rules(*object));
+}
+
+namespace {
+// Model layers 1..count of equal height from `base`, each its own event: band i is (base + (i-1)h, base + ih].
+std::vector<LayerBand> grid(size_t count, double height, double base = 0.)
+{
+    std::vector<LayerBand> out;
+    for (size_t i = 1; i <= count; ++i)
+        out.push_back({i, base + double(i - 1) * height, base + double(i) * height});
+    return out;
+}
+
+// The examples of the specification: 400 layers of 0.2 mm, tops 0.2 ... 80.0.
+LayerSelection select_heights(const std::string &text, size_t count = 400, double height = 0.2)
+{
+    return select_layers(field(text), count, object_layers(count), grid(count, height));
+}
+Layers heights(const std::string &text, size_t count = 400, double height = 0.2) { return selected(select_heights(text, count, height)); }
+} // namespace
+
+TEST_CASE("Heights select the layers whose band meets the range", "[PreciseSeam][Rules][Heights]")
+{
+    CHECK(heights("z0-10") == range(1, 50));
+    CHECK(heights("z10-20") == range(50, 100)); // Layer 50, 9.8...10.0, holds the level 10.
+    CHECK(heights("z12.5-30") == range(63, 150));
+    CHECK(heights("z10-20,excl,odd") == range(50, 100, 2));
+    CHECK(heights("excl,z0-1") == range(6, 400));
+    CHECK(heights("exclz0-1") == range(6, 400));
+    CHECK(heights("z10-20,excl,top5") == range(50, 100));
+    CHECK(heights("top5,excl,z79.5-80") == Layers{396, 397});
+    // Thinner layers keep the same bounds in mm.
+    CHECK(heights("z12.5-30", 800, 0.1) == range(125, 300));
+}
+
+TEST_CASE("zin selects only the layers wholly inside the range", "[PreciseSeam][Rules][Heights]")
+{
+    CHECK(heights("zin10-20") == range(51, 100));
+    CHECK(heights("zin12.5-30") == range(64, 150));
+    CHECK(heights("inclzin0-1") == range(1, 5));
+    // Adjacent ranges share the border layer by intersection only.
+    CHECK(heights("z0-10,excl,z10-20") == range(1, 49));
+    CHECK(heights("zin0-10,excl,zin10-20") == range(1, 50));
+}
+
+TEST_CASE("A single height is the range of one level", "[PreciseSeam][Rules][Heights]")
+{
+    CHECK(heights("z12.5") == Layers{63});
+    CHECK(heights("z12.5-12.5") == Layers{63});
+    CHECK(heights("z12.6") == Layers{63}); // A border level belongs to the lower layer.
+    const LayerRules single = field("z12.5");
+    REQUIRE(single.operations.size() == 1);
+    CHECK(single.operations.front().set.first == 12500000);
+    CHECK(single.operations.front().set.last == 12500000);
+    // No layer fits wholly into one level.
+    for (const std::string text : {"zin12.5", "zin12.5-12.5", "zin12.6"}) {
+        CAPTURE(text);
+        const LayerSelection selection = select_heights(text);
+        CHECK(selected(selection).empty());
+        CHECK(count_code(selection.diagnostics, Code::EmptySet) == 1);
+    }
+}
+
+TEST_CASE("Height comparisons lean towards the lower layer by the tolerance", "[PreciseSeam][Rules][Heights]")
+{
+    CHECK(heights("z10.00005") == Layers{50});
+    CHECK(heights("z10.0002") == Layers{51});
+    CHECK(heights("z0.00005").empty());
+    CHECK(heights("z0.0002") == Layers{1});
+    CHECK(heights("zin10.00005-20") == range(51, 100));
+    CHECK(heights("zin10.0002-20") == range(52, 100));
+    CHECK(heights("zin10-19.99995") == range(51, 100));
+    CHECK(heights("zin10-19.9998") == range(51, 99));
+    // A band thinner than twice the tolerance passes both inclusion bounds of a range, never of a level.
+    const std::vector<LayerBand> thin = {{1, 4.99995, 5.00005}};
+    CHECK(selected(select_layers(field("zin5"), 1, {1}, thin)).empty());
+    CHECK(selected(select_layers(field("zin4.9999-5.0001"), 1, {1}, thin)) == Layers{1});
+}
+
+TEST_CASE("Heights select only numbered model layers of the object", "[PreciseSeam][Rules][Heights]")
+{
+    // Model layers 0.2 and 0.4 are events 1 and 3; event 2 is support only and has no band.
+    const std::vector<LayerBand> model = {{1, 0., 0.2}, {3, 0.2, 0.4}};
+    CHECK(selected(select_layers(field("z0-100"), 3, {1, 3}, model)) == Layers{1, 3});
+    CHECK(selected(select_layers(field("excl,z0-100"), 3, {1, 3}, model)) == Layers{2});
+    // Over a raft and its gap the first model layer starts at 1.0.
+    const LayerSelection gap = select_layers(field("z0-0.9"), 10, object_layers(10), grid(10, 0.2, 1.));
+    CHECK(selected(gap).empty());
+    CHECK(count_code(gap.diagnostics, Code::EmptySet) == 1);
+    CHECK(selected(select_layers(field("z0-1.1"), 10, object_layers(10), grid(10, 0.2, 1.))) == Layers{1});
+    // Above the object, and without layers at all.
+    const LayerSelection above = select_heights("z90-100");
+    CHECK(selected(above).empty());
+    CHECK(count_code(above.diagnostics, Code::EmptySet) == 1);
+    CHECK(selected(select_layers(field("z0-10"), 0, {}, {})).empty());
+}
+
+TEST_CASE("Height literals take a point, at most six decimals and the limit", "[PreciseSeam][Rules][Heights]")
+{
+    CHECK(heights("z012.50-30") == range(63, 150));
+    CHECK(heights(" Z 12.5 - 30 ") == range(63, 150));
+    CHECK(heights("ZIN10-20") == range(51, 100));
+    CHECK(heights("z0.123456-1") == range(1, 5));
+    // A decimal comma splits the element: z12 is layer 60, 5-30 are layer numbers.
+    CHECK(heights("z12,5-30") == join(range(5, 30), {60}));
+    CHECK(field("z1000000").restricts_layers());
+    CHECK(field("z0001000000.000000").restricts_layers());
+    for (const std::string text : {"z1000000.000001", "z0.1234567-1", "z0.1234560-1", "z1000001", "z0-1000000.5",
+                                   "z123456789012345678901234567890"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(count_code(rules.diagnostics, Code::NumberOutOfRange) == 1);
+        CHECK_FALSE(rules.restricts_layers());
+    }
+}
+
+TEST_CASE("override first in the field replaces the name rules", "[PreciseSeam][Rules][Override]")
+{
+    const LayerRules replaced = parse_layer_rules("-^ps=red,1-10=ps^-", "override,20-30");
+    CHECK(replaced.name_overridden);
+    CHECK_FALSE(replaced.type.has_value());
+    CHECK(replaced.diagnostics.empty());
+    CHECK(apply_rules(replaced) == range(20, 30));
+
+    const LayerRules alone = parse_layer_rules("-^ps=red,1-10=ps^-", "override");
+    CHECK(alone.name_overridden);
+    CHECK_FALSE(alone.type.has_value());
+    CHECK(apply_rules(alone) == range(1, 400));
+
+    // Every effect and every diagnostic of the name goes, broken markers too.
+    const LayerRules flags = parse_layer_rules("-^ps=off,pr1,nowarn,green,bad=ps^- -^ps=odd -^ps=even=ps^-", "override");
+    CHECK_FALSE(flags.off);
+    CHECK_FALSE(flags.nowarn);
+    CHECK_FALSE(flags.priority.has_value());
+    CHECK_FALSE(flags.type.has_value());
+    CHECK(flags.diagnostics.empty());
+
+    // Empty elements and whitespace before it do not count.
+    const LayerRules spaced = parse_layer_rules("-^ps=red=ps^-", ", \t , Override ,5");
+    CHECK(spaced.name_overridden);
+    CHECK_FALSE(spaced.type.has_value());
+    CHECK(apply_rules(spaced) == Layers{5});
+}
+
+TEST_CASE("The rest of the field after override starts afresh", "[PreciseSeam][Rules][Override]")
+{
+    CHECK(select("-^ps=1-10=ps^-", "override,excl,5") == join(range(1, 4), range(6, 400)));
+    CHECK(parse_layer_rules("-^ps=1-10=ps^-", "override,off").off);
+    const LayerSelection empty = select_layers(parse_layer_rules("-^ps=1-10=ps^-", "override,zin12.5"), 400, object_layers(400),
+                                               grid(400, 0.2));
+    CHECK(selected(empty).empty());
+    CHECK(count_code(empty.diagnostics, Code::EmptySet) == 1);
+}
+
+TEST_CASE("override elsewhere is an invalid element and keeps the name", "[PreciseSeam][Rules][Override]")
+{
+    const LayerRules late = parse_layer_rules("-^ps=red=ps^-", "20-30,override");
+    CHECK_FALSE(late.name_overridden);
+    CHECK(late.type == ModelVolumeType::PRECISE_SEAM_BLOCKED);
+    REQUIRE(late.diagnostics.size() == 1);
+    CHECK(late.diagnostics.front().code == Code::InvalidElement);
+    CHECK(late.diagnostics.front().source.field);
+    CHECK(late.diagnostics.front().element == 2);
+    CHECK(apply_rules(late) == range(20, 30));
+
+    const LayerRules after_bad = parse_layer_rules("-^ps=red=ps^-", "bad,override,5");
+    CHECK_FALSE(after_bad.name_overridden);
+    CHECK(after_bad.type == ModelVolumeType::PRECISE_SEAM_BLOCKED);
+    CHECK(count_code(after_bad.diagnostics, Code::InvalidElement) == 2);
+    CHECK_FALSE(parse_layer_rules("-^ps=red=ps^-", "incl,override").name_overridden);
+
+    const LayerRules in_name = parse_layer_rules("-^ps=override,5=ps^-", {});
+    CHECK_FALSE(in_name.name_overridden);
+    REQUIRE(in_name.diagnostics.size() == 1);
+    CHECK(in_name.diagnostics.front().source == RuleSource{false, 1});
+    CHECK(apply_rules(in_name) == Layers{5});
+    // The override in the name is not reported once the field replaces the name.
+    CHECK(parse_layer_rules("-^ps=override,5=ps^-", "override").diagnostics.empty());
+
+    // A repeat is invalid but leaves the name replaced; element positions count the empty elements.
+    const LayerRules repeated = parse_layer_rules("-^ps=red=ps^-", ",override,bad,override");
+    CHECK(repeated.name_overridden);
+    CHECK_FALSE(repeated.type.has_value());
+    REQUIRE(repeated.diagnostics.size() == 2);
+    CHECK(repeated.diagnostics[0].element == 3);
+    CHECK(repeated.diagnostics[0].text == "bad");
+    CHECK(repeated.diagnostics[1].element == 4);
 }

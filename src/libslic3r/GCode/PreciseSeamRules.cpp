@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 #include "libslic3r/Model.hpp"
+#include "libslic3r/libslic3r.h"
 
 namespace Slic3r {
 namespace PreciseSeam {
@@ -128,6 +129,31 @@ public:
             m_out_of_range = true;
         return value;
     }
+    // A height in mm, "uint [. uint]", as nanometres. More than six decimals or a value above the limit is
+    // out of range, which is remembered; long input saturates before that check.
+    std::optional<int64_t> nanometres()
+    {
+        const std::optional<int64_t> whole = uint();
+        if (!whole)
+            return std::nullopt;
+        int64_t fraction = 0;
+        if (eat('.')) {
+            size_t digits = 0;
+            for (; !done() && m_text[m_pos] >= '0' && m_text[m_pos] <= '9'; ++m_pos, ++digits)
+                if (digits < 6)
+                    fraction = fraction * 10 + (m_text[m_pos] - '0');
+            if (digits == 0) // "12." is not a number.
+                return std::nullopt;
+            if (digits > 6)
+                m_out_of_range = true;
+            for (; digits < 6; ++digits)
+                fraction *= 10;
+        }
+        const int64_t value = *whole * nanometres_per_mm + fraction;
+        if (value > rule_number_limit * nanometres_per_mm)
+            m_out_of_range = true;
+        return value;
+    }
 
 private:
     std::string_view m_text;
@@ -135,10 +161,26 @@ private:
     bool             m_out_of_range = false;
 };
 
-// layer_set = uint | uint "-" uint [step] | formula | parity | top | all
+// layer_set = uint | uint "-" uint [step] | formula | parity | top | all | height
 std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
 {
     using Kind = RuleLayerSet::Kind;
+    // height = ("z" | "zin") decimal ["-" decimal]; zin is tried first, as z begins it.
+    const bool inside = c.eat("zin");
+    if (inside || c.eat('z')) {
+        const std::optional<int64_t> first = c.nanometres();
+        if (!first)
+            return std::nullopt;
+        RuleLayerSet set{Kind::Height, *first, *first};
+        set.inside = inside;
+        if (c.eat('-')) {
+            const std::optional<int64_t> last = c.nanometres();
+            if (!last || *last < set.first)
+                return std::nullopt;
+            set.last = *last;
+        }
+        return set;
+    }
     if (c.eat("odd"))
         return RuleLayerSet{Kind::Odd};
     if (c.eat("even"))
@@ -192,7 +234,7 @@ std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
 }
 
 struct ParsedElement {
-    enum class Kind { Mode, Set, Type, Priority, Off, Nowarn };
+    enum class Kind { Mode, Set, Type, Priority, Off, Nowarn, Override };
     Kind                        kind;
     bool                        exclude = false; // Mode only.
     std::optional<RuleLayerSet> set;             // Mode with a prefixed set, or Set.
@@ -207,7 +249,8 @@ const std::pair<std::string_view, ModelVolumeType> type_labels[] = {
     {"grey", ModelVolumeType::PRECISE_SEAM_NEUTRAL},
 };
 
-// No keyword of the language is a prefix of another, so the first matching keyword decides the rule.
+// No keyword of the language is a prefix of another but z of zin, which parse_layer_set() tries first; a digit
+// must follow both. So the first matching keyword decides the rule.
 std::optional<ParsedElement> parse_element(Cursor &c)
 {
     using Kind = ParsedElement::Kind;
@@ -237,6 +280,8 @@ std::optional<ParsedElement> parse_element(Cursor &c)
         return ParsedElement{Kind::Off};
     if (c.eat("nowarn"))
         return ParsedElement{Kind::Nowarn};
+    if (c.eat("override"))
+        return ParsedElement{Kind::Override};
     if (std::optional<RuleLayerSet> set = parse_layer_set(c)) {
         ParsedElement element{Kind::Set};
         element.set = std::move(set);
@@ -249,6 +294,7 @@ std::optional<ParsedElement> parse_element(Cursor &c)
 void parse_source(LayerRules &rules, std::string_view source_text, const RuleSource &source)
 {
     bool   exclude = false;
+    bool   first   = true; // No non-empty element seen yet.
     size_t index   = 0;
     for (size_t begin = 0; begin <= source_text.size(); ++index) {
         const size_t           comma = std::min(source_text.find(',', begin), source_text.size());
@@ -259,6 +305,7 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
         if (normalized.empty())
             continue;
         const size_t element_index = index + 1;
+        const bool   first_element = std::exchange(first, false);
         Cursor       cursor(normalized);
         std::optional<ParsedElement> element = parse_element(cursor);
         // A malformed element changes nothing, not even the mode.
@@ -293,8 +340,28 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
             break;
         case ParsedElement::Kind::Off: rules.off = true; break;
         case ParsedElement::Kind::Nowarn: rules.nowarn = true; break;
+        case ParsedElement::Kind::Override:
+            // Only the first element of the field replaces the name, which parse_layer_rules() then skipped.
+            if (source.field && first_element)
+                rules.name_overridden = true;
+            else
+                rules.diagnostics.push_back({RuleDiagnosticCode::InvalidElement, source, element_index, std::string(raw)});
+            break;
         }
     }
+}
+
+// The first element that is not empty after normalization, as parse_source() reads it.
+std::string leading_element(std::string_view source_text)
+{
+    for (size_t begin = 0; begin <= source_text.size();) {
+        const size_t comma      = std::min(source_text.find(',', begin), source_text.size());
+        std::string  normalized = normalize(source_text.substr(begin, comma - begin));
+        if (!normalized.empty())
+            return normalized;
+        begin = comma + 1;
+    }
+    return {};
 }
 
 // Rounds towards positive infinity for a positive divisor.
@@ -304,7 +371,8 @@ int64_t ceil_div(int64_t numerator, int64_t divisor) { return numerator >= 0 ? (
 // value below stays within +-(count + 3 * rule_number_limit): a formula starts at b or within one step k
 // of 1 or count, and every loop stops at most one step past its bound.
 template<class Visit>
-void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<size_t> &object_layers, Visit &&visit)
+void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<size_t> &object_layers, const std::vector<LayerBand> &bands,
+                    Visit &&visit)
 {
     using Kind = RuleLayerSet::Kind;
     switch (set.kind) {
@@ -341,6 +409,19 @@ void for_each_layer(const RuleLayerSet &set, int64_t count, const std::vector<si
         }
         break;
     }
+    case Kind::Height: {
+        // A whole layer never fits into a single height, whatever the tolerance.
+        if (set.inside && set.first == set.last)
+            break;
+        // Bands are (bottom_z, print_z]. Both bounds of an intersection lean towards the lower layer by EPSILON.
+        const double a = double(set.first) / nanometres_per_mm, b = double(set.last) / nanometres_per_mm;
+        for (const LayerBand &band : bands)
+            if (band.number >= 1 && band.number <= size_t(count) &&
+                (set.inside ? band.bottom_z >= a - EPSILON && band.print_z <= b + EPSILON :
+                              band.print_z >= a - EPSILON && band.bottom_z < b - EPSILON))
+                visit(int64_t(band.number));
+        break;
+    }
     }
 }
 
@@ -357,15 +438,19 @@ bool has_rule_marker(std::string_view volume_name)
 LayerRules parse_layer_rules(std::string_view volume_name, std::string_view field)
 {
     LayerRules rules;
-    NameBlocks name = extract_name_blocks(volume_name);
-    rules.diagnostics = std::move(name.diagnostics);
-    for (size_t i = 0; i < name.blocks.size(); ++i)
-        parse_source(rules, name.blocks[i], {false, i + 1});
+    // override first in the field replaces the name: neither its rules nor its diagnostics take part.
+    if (leading_element(field) != "override") {
+        NameBlocks name   = extract_name_blocks(volume_name);
+        rules.diagnostics = std::move(name.diagnostics);
+        for (size_t i = 0; i < name.blocks.size(); ++i)
+            parse_source(rules, name.blocks[i], {false, i + 1});
+    }
     parse_source(rules, field, {true, 0});
     return rules;
 }
 
-LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const std::vector<size_t> &object_layers)
+LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const std::vector<size_t> &object_layers,
+                             const std::vector<LayerBand> &bands)
 {
     LayerSelection selection;
     selection.layers.assign(layer_count + 1, false);
@@ -382,7 +467,7 @@ LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const 
         std::fill(selection.layers.begin() + 1, selection.layers.begin() + 1 + count, true);
     for (const RuleLayerOperation &operation : rules.operations) {
         bool any = false;
-        for_each_layer(operation.set, count, object_layers, [&](int64_t layer) {
+        for_each_layer(operation.set, count, object_layers, bands, [&](int64_t layer) {
             selection.layers[size_t(layer)] = !operation.exclude;
             any                             = true;
         });

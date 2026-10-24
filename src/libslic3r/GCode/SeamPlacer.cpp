@@ -2162,6 +2162,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
               m_seam_per_object[po].has_precise_seam_strong_volumes,
               *po->model_object(),
               *object_numbering,
+              po->layers(),
               global_model_info.precise_seam_effective.emplace(),
               rule_diagnostics);
       } else

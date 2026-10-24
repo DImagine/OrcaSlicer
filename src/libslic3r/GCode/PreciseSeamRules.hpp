@@ -48,12 +48,16 @@ struct RuleDiagnostic {
 
 // Layer set kept unevaluated: the number of layers is known only when the print is exported.
 struct RuleLayerSet {
-    enum class Kind { Range, Formula, Odd, Even, Top, All };
-    Kind    kind  = Kind::All;
-    int64_t first = 0; // Range: A; Formula: k (non-zero); Top: K.
-    int64_t last  = 0; // Range: B; Formula: b.
-    int64_t step  = 1; // Range only; a single layer N is the range N-N.
+    enum class Kind { Range, Formula, Odd, Even, Top, All, Height };
+    Kind    kind   = Kind::All;
+    int64_t first  = 0;     // Range: A; Formula: k (non-zero); Top: K; Height: A in nanometres.
+    int64_t last   = 0;     // Range: B; Formula: b; Height: B in nanometres.
+    int64_t step   = 1;     // Range only; a single layer N is the range N-N.
+    bool    inside = false; // Height only: zin, the whole layer within [A, B]; a single height zA is zA-A.
 };
+
+// Heights are kept exactly, in nanometres (1e-6 mm), and converted to mm only when compared.
+inline constexpr int64_t nanometres_per_mm = 1000000;
 
 struct RuleLayerOperation {
     bool         exclude = false; // Mode in effect for this set.
@@ -68,8 +72,9 @@ struct LayerRules {
     std::vector<RuleLayerOperation> operations; // Valid layer sets in application order.
     std::optional<ModelVolumeType>  type;       // First type label over all sources.
     std::optional<int>              priority;   // First priority over all sources: N for prN, -N for pr-N.
-    bool                            off    = false;
-    bool                            nowarn = false;
+    bool                            off             = false;
+    bool                            nowarn          = false;
+    bool                            name_overridden = false; // override first in the field: the name took no part.
     std::vector<RuleDiagnostic>     diagnostics; // Parse and conflict diagnostics in source/element order.
 
     // Rules without any valid layer set act on every layer (compatibility with volumes without rules).
@@ -79,8 +84,16 @@ struct LayerRules {
 // Whether the name holds a block marker in either direction, in any letter case, whole block or not.
 bool has_rule_marker(std::string_view volume_name);
 
-// Parses the name blocks, then the field, of one Precise Seam volume.
+// Parses the name blocks, then the field, of one Precise Seam volume. When the first element of the field is
+// override, the name is not parsed at all.
 LayerRules parse_layer_rules(std::string_view volume_name, std::string_view field);
+
+// Height band (bottom_z, print_z] in mm of one numbered model layer of the object.
+struct LayerBand {
+    size_t number;
+    double bottom_z;
+    double print_z;
+};
 
 struct LayerSelection {
     std::vector<bool>           layers; // Index is the layer number; index 0 is unused and always false.
@@ -90,8 +103,10 @@ struct LayerSelection {
 };
 
 // Evaluates the rules for layer numbers 1..layer_count. `object_layers` lists, in ascending order, the
-// numbers of the layers that hold this object's model layers; topK selects from them.
-LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const std::vector<size_t> &object_layers);
+// numbers of the layers that hold this object's model layers; topK selects from them. `bands` holds the
+// height band of each of these model layers; height sets select from them.
+LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const std::vector<size_t> &object_layers,
+                             const std::vector<LayerBand> &bands = {});
 
 // Rule numbers of one print object's layers: preview events of the plate when printing by layer, the
 // object's own events from 1 when printing by object.

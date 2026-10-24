@@ -6308,11 +6308,13 @@ void ObjectList::edit_precise_seam_rules()
     // TRN: Help for the Precise Seam layer rules field. Keep the rule keywords untranslated.
     wxTextEntryDialog dialog(this, _L("Comma-separated rules, applied from left to right:\n"
                                       "layers: 5, 10-20, 10-20step3, 3x+1, odd, even, top5, all\n"
+                                      "heights in mm: z12.5-30 (layers that reach into it), zin12.5-30 (layers wholly inside), z12.5\n"
                                       "mode: incl (default), excl\n"
                                       "type: center, left, right, green, red, gray\n"
                                       "priority: pr1 (highest), pr-1 (lowest); off; nowarn\n"
                                       "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
-                                      "The name may hold more rules between -^ps= and =ps^-."),
+                                      "Heights are measured from the bed, as on the slider. Decimals take a point: a comma separates rules.\n"
+                                      "The name may hold more rules between -^ps= and =ps^-; override as the first rule here ignores them."),
                              _L("Precise Seam Layer Rules"), from_u8(volume->precise_seam_rules));
     if (dialog.ShowModal() != wxID_OK)
         return;
