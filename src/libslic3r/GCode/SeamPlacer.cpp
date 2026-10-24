@@ -374,6 +374,8 @@ struct GlobalModelInfo {
   PreciseSeam::ModifierRegionsCache precise_seam_slices;
   // Effective type and active layers of the modifiers above, only for an object that uses layer rules.
   std::optional<PreciseSeam::EffectiveModifiers> precise_seam_effective;
+  // Relay groups of that object and their holders, only when some group has two members or more.
+  std::optional<PreciseSeam::RelayOrder> precise_seam_relay;
 
   bool is_enforced(const Vec3f &position, float radius) const {
     if (enforcers.empty()) {
@@ -2164,6 +2166,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
               *object_numbering,
               po->layers(),
               global_model_info.precise_seam_effective.emplace(),
+              global_model_info.precise_seam_relay,
               rule_diagnostics);
       } else
           PreciseSeam::init_precise_seam_data(

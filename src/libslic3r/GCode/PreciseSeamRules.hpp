@@ -28,7 +28,9 @@ enum class RuleDiagnosticCode {
     PriorityConflict,    // A later priority differs from the first one, which stays in effect.
     EmptySet,            // A valid layer set selects no existing layer (informational).
     TypeDiffersFromTree, // Effective type differs from the volume type in the object list.
-    OrderDiffersFromTree // Effective order of the volume differs from its position in the object list.
+    OrderDiffersFromTree, // Effective order of the volume differs from its position in the object list.
+    RelayConflict,       // A later relay label differs from the first one, which stays in effect.
+    RelayGroupNotStrong  // The relay group of the volume has a weak member, so the group acts without relay.
 };
 
 // Name blocks are numbered from 1 in name order; the field always comes after them.
@@ -72,6 +74,7 @@ struct LayerRules {
     std::vector<RuleLayerOperation> operations; // Valid layer sets in application order.
     std::optional<ModelVolumeType>  type;       // First type label over all sources.
     std::optional<int>              priority;   // First priority over all sources: N for prN, -N for pr-N.
+    std::optional<int64_t>          relay;      // First relay label over all sources: N for relayN, 0 for relay.
     bool                            off             = false;
     bool                            nowarn          = false;
     bool                            name_overridden = false; // override first in the field: the name took no part.

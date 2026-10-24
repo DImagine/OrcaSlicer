@@ -193,7 +193,8 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
                                       "offjunk", "exclnowarn", "nowarn.", "odd.", "1-", "-1-5", "1-5step", "\xD0\xB0",
                                       "z.5-1", "z12.-30", "z1.2.3-4", "z10-20step3", "ztop5", "inclzinbad", "exclzin1-0",
                                       "zinc1", "zz1", "zin", "z1incl", "zin1step2", "z30-12.5", "z-1", "z+1", "z1e2", "z1-",
-                                      "incloverride", "overridered", "overrideoff");
+                                      "incloverride", "overridered", "overrideoff", "relay0", "relay-1", "relay.1", "relay=1",
+                                      "relay1-5", "relay1junk", "inclrelay1", "exclrelay1", "relay1red");
     CAPTURE(text);
     const LayerRules rules = field(text);
     REQUIRE(rules.diagnostics.size() == 1);
@@ -201,6 +202,7 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
     CHECK_FALSE(rules.restricts_layers());
     CHECK_FALSE(rules.type.has_value());
     CHECK_FALSE(rules.priority.has_value());
+    CHECK_FALSE(rules.relay.has_value());
     CHECK_FALSE(rules.off);
     CHECK_FALSE(rules.nowarn);
 }
@@ -580,4 +582,94 @@ TEST_CASE("override elsewhere is an invalid element and keeps the name", "[Preci
     CHECK(repeated.diagnostics[0].element == 3);
     CHECK(repeated.diagnostics[0].text == "bad");
     CHECK(repeated.diagnostics[1].element == 4);
+}
+
+TEST_CASE("relay labels a group, and the first label stays in effect", "[PreciseSeam][Rules][Relay]")
+{
+    CHECK(field("relay").relay == 0); // A group of its own, apart from the numbered ones.
+    CHECK(field("relay1").relay == 1);
+    CHECK(field("Relay007").relay == 7);
+    CHECK(field("relay1000000").relay == 1000000);
+    CHECK(count_code(field("relay1000001").diagnostics, Code::NumberOutOfRange) == 1);
+    CHECK(field("relay1,relay01").diagnostics.empty());
+    for (const std::string text : {"relay1,relay2", "relay1,relay", "relay,relay1"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(rules.relay == field(text.substr(0, text.find(','))).relay);
+        REQUIRE(rules.diagnostics.size() == 1);
+        CHECK(rules.diagnostics.front().code == Code::RelayConflict);
+        CHECK(rules.diagnostics.front().element == 2);
+    }
+    // The label carries over from the name to the field, like the type.
+    const LayerRules both = parse_layer_rules("-^ps=relay2=ps^-", "relay3,odd");
+    CHECK(both.relay == 2);
+    CHECK(count_code(both.diagnostics, Code::RelayConflict) == 1);
+    CHECK(apply_rules(both) == range(1, 399, 2));
+}
+
+namespace {
+// One row per layer, one character per member: '1' where the member wins; an empty row has no winner.
+std::vector<size_t> holders(const std::vector<std::string> &rows, size_t members)
+{
+    std::vector<std::vector<uint8_t>> wins;
+    for (const std::string &row : rows) {
+        wins.emplace_back();
+        for (char c : row)
+            wins.back().push_back(c == '1');
+    }
+    return relay_holders(wins, members);
+}
+constexpr size_t none = RelayOrder::no_holder;
+} // namespace
+
+TEST_CASE("The relay turn passes to the member after each holder", "[PreciseSeam][Rules][Relay]")
+{
+    CHECK(holders({"111", "111", "111", "111"}, 3) == Layers{0, 1, 2, 0});
+    // B cannot on layer 2: A holds again, and the turn stays with B.
+    CHECK(holders({"11", "10", "11", "11"}, 2) == Layers{0, 0, 1, 0});
+    // Nobody wins on layer 2, or the layer has nothing to win: the turn is kept.
+    CHECK(holders({"11", "00", "11", "11"}, 2) == Layers{0, none, 1, 0});
+    CHECK(holders({"11", "", "11"}, 2) == Layers{0, none, 1});
+    // The first member cannot first; several in a row cannot.
+    CHECK(holders({"01", "11", "11"}, 2) == Layers{1, 0, 1});
+    CHECK(holders({"001", "111", "111"}, 3) == Layers{2, 0, 1});
+    // B acts only from layer 51: A holds layers 1..50, then they alternate.
+    std::vector<std::string> rows(50, "10");
+    rows.insert(rows.end(), 4, "11");
+    std::vector<size_t> expected(50, 0);
+    expected.insert(expected.end(), {1, 0, 1, 0});
+    CHECK(holders(rows, 2) == expected);
+}
+
+TEST_CASE("A relay block starts at its holder and wraps around in queue order", "[PreciseSeam][Rules][Relay]")
+{
+    Model        model;
+    ModelObject *object = model.add_object();
+    std::vector<const ModelVolume*> v; // A, B, C in the group, then X.
+    for (int i = 0; i < 4; ++i)
+        v.push_back(object->add_volume(make_cube(2, 2, 2)));
+    const ModelVolume *A = v[0], *B = v[1], *C = v[2], *X = v[3];
+    RelayOrder order;
+    order.entries = {{nullptr, 0}, {X}};
+    order.groups  = {{{A, B, C}, {0, 1, 2, none}}};
+    EffectiveModifiers effective;
+    for (const ModelVolume *volume : v)
+        effective.emplace(volume, EffectiveModifier{ModelVolumeType::PRECISE_SEAM_CENTER, {}});
+    effective.at(B).layers = {true, true, false, true}; // Its rules exclude layer 2.
+
+    using Volumes = std::vector<const ModelVolume*>;
+    Volumes out{X}; // Cleared first.
+    relay_strong_volumes(order, effective, 0, 2, out);
+    CHECK(out == Volumes{A, B, C, X});
+    relay_strong_volumes(order, effective, 1, 2, out);
+    CHECK(out == Volumes{B, C, A, X});
+    // A member outside its layers does not stand in.
+    relay_strong_volumes(order, effective, 2, 2, out);
+    CHECK(out == Volumes{C, A, X});
+    // Without a holder the whole block is left out.
+    relay_strong_volumes(order, effective, 3, 2, out);
+    CHECK(out == Volumes{X});
+    // The entries before the block are its seniors: none here.
+    relay_strong_volumes(order, effective, 1, 0, out);
+    CHECK(out.empty());
 }

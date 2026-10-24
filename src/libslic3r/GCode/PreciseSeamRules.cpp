@@ -234,12 +234,13 @@ std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
 }
 
 struct ParsedElement {
-    enum class Kind { Mode, Set, Type, Priority, Off, Nowarn, Override };
+    enum class Kind { Mode, Set, Type, Priority, Off, Nowarn, Override, Relay };
     Kind                        kind;
     bool                        exclude = false; // Mode only.
     std::optional<RuleLayerSet> set;             // Mode with a prefixed set, or Set.
     ModelVolumeType             type     = ModelVolumeType::INVALID;
     int                         priority = 0;
+    int64_t                     relay    = 0; // Group number; 0 for a bare relay.
 };
 
 const std::pair<std::string_view, ModelVolumeType> type_labels[] = {
@@ -282,6 +283,17 @@ std::optional<ParsedElement> parse_element(Cursor &c)
         return ParsedElement{Kind::Nowarn};
     if (c.eat("override"))
         return ParsedElement{Kind::Override};
+    // relay = "relay" [uint]; without a number it is a group of its own, apart from relay1, relay2, ...
+    if (c.eat("relay")) {
+        ParsedElement element{Kind::Relay};
+        if (!c.done()) {
+            const std::optional<int64_t> group = c.uint();
+            if (!group || *group < 1)
+                return std::nullopt;
+            element.relay = *group;
+        }
+        return element;
+    }
     if (std::optional<RuleLayerSet> set = parse_layer_set(c)) {
         ParsedElement element{Kind::Set};
         element.set = std::move(set);
@@ -346,6 +358,12 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
                 rules.name_overridden = true;
             else
                 rules.diagnostics.push_back({RuleDiagnosticCode::InvalidElement, source, element_index, std::string(raw)});
+            break;
+        case ParsedElement::Kind::Relay:
+            if (!rules.relay)
+                rules.relay = element->relay;
+            else if (*rules.relay != element->relay)
+                rules.diagnostics.push_back({RuleDiagnosticCode::RelayConflict, source, element_index, std::string(raw)});
             break;
         }
     }

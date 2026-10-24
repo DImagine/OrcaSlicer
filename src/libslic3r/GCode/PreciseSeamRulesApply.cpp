@@ -5,7 +5,9 @@
 #include <cassert>
 #include <cstddef>
 #include <iterator>
+#include <cstdint>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -37,11 +39,13 @@ void init_precise_seam_data_by_rules(
     const LayerNumbering &numbering,
     const ConstLayerPtrsAdaptor &model_layers,
     EffectiveModifiers &effective_out,
+    std::optional<RelayOrder> &relay_out,
     std::vector<ModifierDiagnostic> &diagnostics_out)
 {
     strong_volumes_out.clear();
     weak_volumes_out.clear();
     effective_out.clear();
+    relay_out.reset();
     has_strong_out = false;
 
     // Rules are parsed once per volume, before the parallel layer processing.
@@ -58,6 +62,26 @@ void init_precise_seam_data_by_rules(
     for (size_t i = 0; i < volumes.size(); ++i)
         ruled.push_back({volumes[i]->type(), &rules[i]});
     const EffectiveOrder order = effective_order(ruled);
+
+    // Relay groups by label, in volume order and without off volumes. Relay takes only strong types, so a
+    // group with a weak member acts without relay; its members keep their other rules.
+    std::map<int64_t, std::vector<size_t>> labelled;
+    for (size_t i = 0; i < volumes.size(); ++i)
+        if (!rules[i].off && rules[i].relay)
+            labelled[*rules[i].relay].push_back(i);
+    std::vector<std::optional<size_t>> group_of(volumes.size());
+    std::vector<bool>                  not_strong(volumes.size(), false);
+    size_t                             group_count = 0;
+    for (const auto &[label, members] : labelled) {
+        const bool strong = std::all_of(members.begin(), members.end(),
+                                        [&ruled](size_t i) { return is_precise_seam_strong(ruled[i].effective_type()); });
+        for (size_t i : members)
+            if (strong)
+                group_of[i] = group_count;
+            else
+                not_strong[i] = true;
+        group_count += strong ? 1 : 0;
+    }
 
     // Diagnostics of one volume in source order (the name as a whole, its blocks, then the field) and
     // element order; parsing and empty-set diagnostics of one element keep their order.
@@ -108,6 +132,9 @@ void init_precise_seam_data_by_rules(
             own.push_back({RuleDiagnosticCode::TypeDiffersFromTree, {}, 0, {}});
         if (contains(order.reordered, i))
             own.push_back({RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}});
+        if (not_strong[i])
+            own.push_back({RuleDiagnosticCode::RelayGroupNotStrong, {}, 0,
+                           *rules[i].relay == 0 ? std::string("relay") : "relay" + std::to_string(*rules[i].relay)});
         for (RuleDiagnostic &diagnostic : own)
             diagnostics_out.push_back({volumes[i], std::move(diagnostic)});
         if (rules[i].name_overridden)
@@ -120,19 +147,97 @@ void init_precise_seam_data_by_rules(
                                     << " volume_id=" << volumes[i]->id().id << " type or order differs from the object list";
     }
 
-    const auto collect = [&](const std::vector<size_t> &group, std::vector<const ModelVolume*> &out) {
-        for (size_t i : group)
-            if (layers[i]) {
-                effective_out.emplace(volumes[i], EffectiveModifier{ruled[i].effective_type(), std::move(*layers[i])});
-                out.push_back(volumes[i]);
-            }
+    const auto take_part = [&](size_t i, std::vector<const ModelVolume*> &out) {
+        effective_out.emplace(volumes[i], EffectiveModifier{ruled[i].effective_type(), std::move(*layers[i])});
+        out.push_back(volumes[i]);
     };
-    collect(order.strong, strong_volumes_out);
-    collect(order.weak, weak_volumes_out);
+    // A group stands at the place of its most senior member, even one whose rules exclude every layer.
+    // A block keeps the members that take part, in the object list order, which is the queue order.
+    std::vector<std::optional<size_t>>                    block_of(group_count);
+    std::vector<std::vector<size_t>>                      blocks;
+    std::vector<std::pair<size_t, std::optional<size_t>>> places; // Strong order: a volume, or the block placed there.
+    for (size_t i : order.strong)
+        if (!group_of[i]) {
+            if (layers[i])
+                places.emplace_back(i, std::nullopt);
+        } else {
+            std::optional<size_t> &block = block_of[*group_of[i]];
+            if (!block) {
+                block = blocks.size();
+                blocks.emplace_back();
+                places.emplace_back(i, block);
+            }
+            if (layers[i])
+                blocks[*block].push_back(i);
+        }
+    RelayOrder relay;
+    for (const auto &[i, block] : places) {
+        if (block)
+            std::sort(blocks[*block].begin(), blocks[*block].end());
+        // A single member acts on its own at the place of the group.
+        if (!block || blocks[*block].size() == 1) {
+            const size_t volume = block ? blocks[*block].front() : i;
+            relay.entries.push_back({volumes[volume]});
+            take_part(volume, strong_volumes_out);
+        } else if (!blocks[*block].empty()) {
+            relay.entries.push_back({nullptr, relay.groups.size()});
+            RelayOrder::Group &group = relay.groups.emplace_back();
+            for (size_t member : blocks[*block]) {
+                group.members.push_back(volumes[member]);
+                take_part(member, strong_volumes_out);
+            }
+        }
+    }
+    if (!relay.groups.empty())
+        relay_out = std::move(relay);
+    for (size_t i : order.weak)
+        if (layers[i])
+            take_part(i, weak_volumes_out);
     has_strong_out = !strong_volumes_out.empty();
 
     // Weak modifiers use last-write-wins, so apply the higher-priority ones last.
     std::reverse(weak_volumes_out.begin(), weak_volumes_out.end());
+}
+
+std::vector<size_t> relay_holders(const std::vector<std::vector<uint8_t>> &wins, size_t member_count)
+{
+    std::vector<size_t> holders(wins.size(), RelayOrder::no_holder);
+    size_t              turn = 0;
+    for (size_t layer = 0; layer < wins.size(); ++layer) {
+        const std::vector<uint8_t> &row = wins[layer];
+        if (row.empty())
+            continue;
+        assert(row.size() == member_count);
+        for (size_t k = 0; k < member_count; ++k)
+            if (const size_t member = (turn + k) % member_count; row[member] != 0) {
+                holders[layer] = member;
+                turn           = (member + 1) % member_count;
+                break;
+            }
+    }
+    return holders;
+}
+
+void relay_strong_volumes(const RelayOrder &order, const EffectiveModifiers &effective, size_t layer, size_t end,
+                          std::vector<const ModelVolume*> &out)
+{
+    out.clear();
+    for (size_t e = 0; e < end; ++e) {
+        const RelayOrder::Entry &entry = order.entries[e];
+        if (entry.volume != nullptr) {
+            out.push_back(entry.volume);
+            continue;
+        }
+        const RelayOrder::Group &group = order.groups[entry.group];
+        // Groups are scheduled in block order, and only the blocks before the one being scheduled are read.
+        assert(layer < group.holders.size());
+        const size_t holder = group.holders[layer];
+        if (holder == RelayOrder::no_holder)
+            continue;
+        for (size_t k = 0; k < group.members.size(); ++k)
+            if (const ModelVolume *member = group.members[(holder + k) % group.members.size()]; effective.at(member).active_on(layer))
+                out.push_back(member);
+    }
 }
 
 std::vector<std::string> rule_warnings(const std::vector<ModifierDiagnostic> &diagnostics)
@@ -218,6 +323,14 @@ std::vector<std::string> rule_warnings(const std::vector<ModifierDiagnostic> &di
         case Code::OrderDiffersFromTree:
             // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name.
             message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\" acts in the order of its rule priority, not its position in the object list.")) % volume % object).str();
+            break;
+        case Code::RelayConflict:
+            // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text, %4% its place, e.g. "rules field, element 2".
+            message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": relay \"%3%\" (%4%) differs from the first relay in its rules and was ignored.")) % volume % object % text % location(d)).str();
+            break;
+        case Code::RelayGroupNotStrong:
+            // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the relay group, e.g. "relay2". Do not translate "relay".
+            message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": group \"%3%\" acts without relay, as relay takes only Seam Center, Seam Left and Seam Right modifiers.")) % volume % object % text).str();
             break;
         }
         // Equal texts also come from two blocks broken the same way, or equal rules in a source.
