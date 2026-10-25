@@ -374,12 +374,15 @@ design.
   the file is built again with 2T, 4T and half of K; then it is not written.
 - **Writing.** The export stores the files in the `Print`; the GUI writes them
   after a successful slice and after the project is saved, so a new folder
-  needs no slicing, and editing only the field re-runs the export alone. A job
-  counts only while its export is done and the plate's model objects still ask
-  for the same request, which an edit not yet applied to the print, right
-  before a save, would change; clearing the print or loading a ready G-code
-  drops it. The targets of all plates are gathered first, and a file that two
-  plates ask for, compared without letter case, is written by neither. Each
+  needs no slicing, and editing only the field re-runs the export alone, as
+  does renaming an object of a plate with rules, since names go into the files.
+  A save first applies a pending edit to the current plate's print. A job
+  counts only while its plate's slice result is valid, its export is done,
+  the plate's model objects ask for the same request and the job's file names
+  are among those they ask for; clearing the print or loading a ready G-code
+  drops it. Every plate reserves the names its current request asks for,
+  sliced or not, and a file that two plates ask for, compared without letter
+  case, is written by neither. Each
   file goes through a temporary one that then replaces it. Without a saved
   project nothing is written and a notification says so; files of an older
   name or a removed request stay. The fingerprint also takes a digest of the

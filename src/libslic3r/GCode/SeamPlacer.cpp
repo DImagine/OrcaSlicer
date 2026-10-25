@@ -22,6 +22,7 @@
 #include <boost/format.hpp>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstddef>
 #include <igl/Hit.h>
@@ -1643,14 +1644,22 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
 SeamPaint::SeamPaint(const PrintObject &object) : m_info(std::make_unique<SeamPlacerImpl::GlobalModelInfo>())
 {
   SeamPlacerImpl::gather_enforcers_blockers(*m_info, &object);
-  // The facets are already transformed, so their bytes stand for the paint and its transformations alike.
-  std::string bytes;
+  // The facets are already transformed, so they stand for the paint and its transformations alike. They are
+  // written element by element in text, version 1, so the digest does not depend on the memory layout.
+  std::string text = "seam-paint 1\n";
+  char number[32];
   for (const indexed_triangle_set *set : {&m_info->enforcers, &m_info->blockers}) {
-    bytes += "set " + std::to_string(set->vertices.size()) + " " + std::to_string(set->indices.size()) + "\n";
-    bytes.append(reinterpret_cast<const char *>(set->vertices.data()), set->vertices.size() * sizeof(set->vertices.front()));
-    bytes.append(reinterpret_cast<const char *>(set->indices.data()), set->indices.size() * sizeof(set->indices.front()));
+    text += "set " + std::to_string(set->vertices.size()) + " " + std::to_string(set->indices.size()) + "\n";
+    for (const stl_vertex &v : set->vertices)
+      for (int i = 0; i < 3; ++i) {
+        snprintf(number, sizeof(number), "%.9g ", double(v[i]));
+        text += number;
+      }
+    for (const stl_triangle_vertex_indices &t : set->indices)
+      text += std::to_string(t[0]) + " " + std::to_string(t[1]) + " " + std::to_string(t[2]) + " ";
+    text += "\n";
   }
-  m_digest = PreciseSeam::seamdump_sha256(bytes);
+  m_digest = PreciseSeam::seamdump_sha256(text);
 }
 
 SeamPaint::~SeamPaint() = default;

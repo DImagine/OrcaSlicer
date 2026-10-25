@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "libslic3r/GCode/SeamDump.hpp"
 #include "libslic3r/GCode/SeamDumpPrint.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/libslic3r.h"
@@ -215,10 +216,17 @@ TEST_CASE("Above the size limit the file is built again coarser, or not at all",
     const DumpResult none = write_seamdump(objects, tight);
     CHECK(none.svg.empty());
     CHECK(none.size > 100);
-    // A cancel stops the work.
+    // A cancel stops the work, also within one layer: calls before the fingerprint, at the layer and at its
+    // first loop pass, the second loop is not reached.
     DumpSettings cancelled;
-    cancelled.throw_if_canceled = [] { throw std::runtime_error("cancelled"); };
-    CHECK_THROWS(write_seamdump(objects, cancelled));
+    size_t       calls = 0;
+    cancelled.throw_if_canceled = [&calls] {
+        if (++calls == 4)
+            throw std::runtime_error("cancelled");
+    };
+    const std::vector<DumpObject> islands{object({layer(1, {{rectangle(0, 0, 1, 1)}, {rectangle(5, 0, 6, 1)}, {rectangle(10, 0, 11, 1)}})})};
+    CHECK_THROWS(write_seamdump(islands, cancelled));
+    CHECK(calls == 4);
 }
 
 TEST_CASE("Loops that touch themselves or each other are left out", "[PreciseSeam][Seamdump]")
@@ -297,6 +305,16 @@ TEST_CASE("seamdump file names follow the request and the project", "[PreciseSea
     CHECK(seamdump_file_names(each, "Project") == std::vector<std::string>{"boat-Hull (1).svg", "boat-Cabin.svg"});
     each.request.file.reset();
     CHECK(seamdump_file_names(each, "Project") == std::vector<std::string>{"Project.seamdump-Hull (1).svg", "Project.seamdump-Cabin.svg"});
+    // The names a request plans from the model, sliced or not.
+    Model model;
+    ModelObject *hull = model.add_object(), *cabin = model.add_object(), *again = model.add_object();
+    hull->name = again->name = "Hull";
+    cabin->name = "Cabin";
+    SeamdumpRequest request;
+    CHECK(seamdump_planned_names(request, {hull, cabin, again}, "P") == std::vector<std::string>{"P.seamdump.svg"});
+    request.each = true;
+    CHECK(seamdump_planned_names(request, {hull, cabin, again}, "P") ==
+          std::vector<std::string>{"P.seamdump-Hull (1).svg", "P.seamdump-Cabin.svg", "P.seamdump-Hull (2).svg"});
 }
 
 TEST_CASE("A seamdump file replaces the old one only when complete", "[PreciseSeam][Seamdump]")
@@ -316,6 +334,10 @@ TEST_CASE("A seamdump file replaces the old one only when complete", "[PreciseSe
     // A write that cannot happen leaves the old file and no temporary one.
     CHECK_FALSE(write_seamdump_file(folder / "missing" / "Boat, v2.svg", "<svg>3</svg>"));
     CHECK(read("Boat, v2.svg") == "<svg>2</svg>");
+    // So does a replacement that fails: a folder stands where the file would go.
+    boost::filesystem::create_directories(folder / "taken.svg");
+    CHECK_FALSE(write_seamdump_file(folder / "taken.svg", "<svg>4</svg>"));
+    CHECK(boost::filesystem::is_directory(folder / "taken.svg"));
     for (const auto &entry : boost::filesystem::directory_iterator(folder))
         CHECK(entry.path().extension() != ".tmp");
     boost::filesystem::remove_all(folder);

@@ -2845,6 +2845,14 @@ TEST_CASE("seamdump takes the final outer walls at the export and follows a chan
     // The request of the model is what the job holds.
     CHECK(PreciseSeam::seamdump_request({fixture.model.objects.front()}) == fixture.print.seamdump_job()->request);
 
+    // A new name of the object is in the file, so it exports again, without new perimeters.
+    fixture.model.objects.front()->name = "Renamed";
+    fixture.print.apply(fixture.model, fixture.config);
+    CHECK_FALSE(fixture.print.is_step_done(psGCodeExport));
+    fixture.export_gcode();
+    CHECK(fixture.print.get_object(0)->get_layer(0) == first_layer);
+    CHECK(fixture.print.seamdump_job()->files.front().svg.find("data-object=\"Renamed\"") != std::string::npos);
+
     // Without a request there is no job; in a name block it is reported.
     fixture.model.objects.front()->volumes.back()->precise_seam_rules.clear();
     fixture.model.objects.front()->volumes.back()->name = "front -^ps=seamdump=ps^-";

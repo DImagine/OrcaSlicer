@@ -1,3 +1,4 @@
+#include "GCode/PreciseSeamRulesApply.hpp"
 #include "ClipperUtils.hpp"
 #include "IMEXHelpers.hpp"
 #include "Geometry.hpp"
@@ -1907,6 +1908,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 			model_volume_list_copy_configs(model_object /* dst */, model_object_new /* src */, precise_seam_types);
             layer_height_ranges_copy_configs(model_object.layer_config_ranges /* dst */, model_object_new.layer_config_ranges /* src */);
             // Copy the ModelObject name, input_file and instances. The instances will be compared against PrintObject instances in the next step.
+            // A seamdump writes the names into its files and their names, so a new name exports it again.
+            if (model_object.name != model_object_new.name && (PreciseSeam::uses_precise_seam_rules(model_object_new) || this->seamdump_job()))
+                update_apply_status(this->invalidate_step(psGCodeExport));
             model_object.name       = model_object_new.name;
             model_object.input_file = model_object_new.input_file;
             // Only refresh ModelInstances if there is any change.

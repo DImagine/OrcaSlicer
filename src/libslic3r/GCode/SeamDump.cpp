@@ -410,7 +410,8 @@ std::vector<Linef> closed_lines(const std::vector<Vec2d> &polygon)
 // Whether every point of the edges of `polygon` lies within `limit` of `to`. Distance is 1-Lipschitz along an
 // edge, so with d0 and d1 at its ends it stays below (d0 + d1 + length) / 2 on it; an edge where that bound is
 // too large is halved until it proves the limit, or a point beyond it is found.
-bool within(const std::vector<Vec2d> &polygon, const AABBTreeLines::LinesDistancer<Linef> &to, double limit)
+bool within(const std::vector<Vec2d> &polygon, const AABBTreeLines::LinesDistancer<Linef> &to, double limit,
+            const std::function<void()> &check)
 {
     struct Piece {
         Vec2d  a, b;
@@ -424,7 +425,10 @@ bool within(const std::vector<Vec2d> &polygon, const AABBTreeLines::LinesDistanc
         at[i] = distance(polygon[i]);
     for (size_t i = 0; i < polygon.size(); ++i)
         stack.push_back({polygon[i], polygon[(i + 1) % polygon.size()], at[i], at[(i + 1) % polygon.size()], 0});
-    while (!stack.empty()) {
+    for (size_t done = 0; !stack.empty(); ++done) {
+        // A long loop is checked in parts that a cancel can interrupt.
+        if (done % 4096 == 4095)
+            check();
         const Piece p = stack.back();
         stack.pop_back();
         if (p.da > limit || p.db > limit)
@@ -444,14 +448,15 @@ bool within(const std::vector<Vec2d> &polygon, const AABBTreeLines::LinesDistanc
 
 // Whether the published path keeps within T of the source loop both ways, and the orientation of the loop with
 // an area. Its polygonized form stands for it, so the bound leaves room for the chord error.
-bool within_tolerance(const CanonicalLoop &loop, const std::vector<Vec2d> &published, double tolerance)
+bool within_tolerance(const CanonicalLoop &loop, const std::vector<Vec2d> &published, double tolerance,
+                      const std::function<void()> &check)
 {
     const double area = signed_area(published);
     if (std::abs(area) <= tiny || (area > 0.) == loop.hole)
         return false;
     const AABBTreeLines::LinesDistancer<Linef> to_source(closed_lines(loop.mm)), to_published(closed_lines(published));
     const double limit = tolerance - chord_error;
-    return within(published, to_source, limit) && within(loop.mm, to_published, limit);
+    return within(published, to_source, limit, check) && within(loop.mm, to_published, limit, check);
 }
 
 // Distance between two segments in mm, 0 where they cross.
@@ -491,14 +496,15 @@ struct BuiltLayer {
 
 // Builds the published path of each loop with the mildest simplification that keeps the tolerance and the
 // topology of the layer: no crossing between published loops and each hole inside its outer loop.
-void publish_layer(BuiltLayer &layer, double tolerance)
+void publish_layer(BuiltLayer &layer, double tolerance, const std::function<void()> &check)
 {
     const auto try_mode = [&](LayerLoop &l) {
         for (;;) {
+            check();
             l.path = publish(l.loop, l.mode, tolerance);
             if (l.path) {
                 l.polygon = l.path->polygonize();
-                if (within_tolerance(l.loop, l.polygon, tolerance))
+                if (within_tolerance(l.loop, l.polygon, tolerance, check))
                     return;
             }
             if (l.mode == Simplification::None) {
@@ -537,6 +543,8 @@ void publish_layer(BuiltLayer &layer, double tolerance)
         if (!lines.empty()) {
             const auto tree = AABBTreeLines::build_aabb_tree_over_indexed_lines(lines);
             for (size_t e = 0; e < lines.size(); ++e) {
+                if (e % 4096 == 4095)
+                    check();
                 const Linef &line = lines[e];
                 Eigen::AlignedBox<double, 2> box(line.a.cwiseMin(line.b) - Vec2d(contact, contact), line.a.cwiseMax(line.b) + Vec2d(contact, contact));
                 AABBTreeIndirect::traverse(tree, AABBTreeIndirect::intersecting(box), [&](const auto &node) {
@@ -614,10 +622,11 @@ bool sequence_less(const Points &a, const Points &b)
 
 // L numbers of one object: a loop keeps the number of the only loop of its kind it overlaps on the layer below,
 // when that loop overlaps no other; every other loop gets a new number, with the loops it came from.
-void number_loops(std::vector<BuiltLayer> &layers)
+void number_loops(std::vector<BuiltLayer> &layers, const std::function<void()> &check)
 {
     int64_t next = 1;
     for (size_t li = 0; li < layers.size(); ++li) {
+        check();
         std::vector<LayerLoop> &current = layers[li].loops;
         std::vector<LayerLoop> *below   = li > 0 ? &layers[li - 1].loops : nullptr;
         // Components of the overlap graph per kind, as a union-find over below + current.
@@ -945,9 +954,9 @@ Built build(const std::vector<DumpObject> &objects, double tolerance, int count,
                     layer.dropped.push_back("S" + std::to_string(s) + ":degenerate");
             }
             find_parents(layer);
-            publish_layer(layer, tolerance);
+            publish_layer(layer, tolerance, check);
         }
-        number_loops(layers);
+        number_loops(layers, check);
 
         std::string instances;
         for (const Vec2d &shift : object.instances)
@@ -1053,6 +1062,8 @@ std::string seamdump_number(int64_t hundredths)
 
 DumpResult write_seamdump(const std::vector<DumpObject> &objects, const DumpSettings &settings)
 {
+    if (settings.throw_if_canceled)
+        settings.throw_if_canceled();
     const std::string fingerprint = sha256(fingerprint_text(objects));
     // Above the limit: 2T, 4T, then half of K once; K never grows.
     std::vector<std::pair<double, int>> steps{{settings.tolerance, settings.candidates}};

@@ -115,6 +115,7 @@ std::string seamdump_fold(const std::string &name)
         static const std::locale utf8 = boost::locale::generator().generate("en_US.UTF-8");
         return boost::locale::to_lower(name, utf8);
     } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamRules] seamdump: no UTF-8 locale, file names compare in ASCII case only";
         return ascii_lower(name);
     }
 }
@@ -218,7 +219,7 @@ std::shared_ptr<const SeamdumpJob> build_seamdump(const Print &print, std::vecto
             warnings.push_back((boost::format(_u8L("Precise Seam: seamdump of \"%1%\" was not written: %2% bytes are above the limit of %3% bytes.")) %
                                 model_object->name % result.size % request->limit).str());
         else
-            job->files.push_back({parts[g], result.svg});
+            job->files.push_back({parts[g], result.svg, model_object->id().id});
     }
     for (const std::string &name : refused)
         // TRN: Precise Seam seamdump. %1% is the object name. Do not translate "seamdump".
@@ -284,6 +285,23 @@ std::vector<std::string> seamdump_file_names(const SeamdumpJob &job, const std::
     for (const SeamdumpFile &file : job.files)
         out.push_back(job.request.each ? base + "-" + file.object + ".svg" : (job.request.file ? requested : base + ".svg"));
     return out;
+}
+
+std::vector<std::string> seamdump_planned_names(const SeamdumpRequest &request, const std::vector<const ModelObject *> &objects,
+                                                const std::string &project_name)
+{
+    SeamdumpJob plan;
+    plan.request = request;
+    if (!request.each)
+        plan.files.emplace_back();
+    else {
+        std::vector<std::string> names;
+        for (const ModelObject *object : objects)
+            names.push_back(object->name);
+        for (const std::string &part : seamdump_object_names(names))
+            plan.files.push_back({part, {}});
+    }
+    return seamdump_file_names(plan, project_name);
 }
 
 bool write_seamdump_file(const boost::filesystem::path &path, const std::string &svg)

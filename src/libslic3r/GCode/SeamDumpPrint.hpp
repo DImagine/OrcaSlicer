@@ -21,6 +21,7 @@ namespace PreciseSeam {
 struct SeamdumpFile {
     std::string object; // With `each`: the object's part of the file name, unique on the plate; empty otherwise.
     std::string svg;
+    size_t      model_object = 0; // ObjectID of the model object with `each`.
 };
 
 // The files of one plate, built from a snapshot; writing them needs nothing from the print.
@@ -48,6 +49,11 @@ std::vector<std::string> seamdump_object_names(const std::vector<std::string> &n
 // File names of the job in the project folder, in the order of its files: the requested name, or
 // "<project>.seamdump.svg"; with `each`, "<base>-<object>.svg".
 std::vector<std::string> seamdump_file_names(const SeamdumpJob &job, const std::string &project_name);
+
+// File names that a request of a plate asks for, from its model objects in list order, whether its export is
+// done or not; with `each`, one per object, in the order of `objects`.
+std::vector<std::string> seamdump_planned_names(const SeamdumpRequest &request, const std::vector<const ModelObject *> &objects,
+                                                const std::string &project_name);
 
 // Writes one file through a temporary file that then replaces it, so the old file stays until the new one is
 // complete. False on a failure, which leaves no temporary file.

@@ -52,7 +52,7 @@ struct DumpSettings {
     double   tolerance  = 0.1; // T in mm.
     int      candidates = 8;   // K.
     uint64_t limit      = 0;   // Bytes; 0 is none.
-    // Called between layers; it throws to cancel.
+    // Called between parts of the work, at least once per loop and layer; it throws to cancel.
     std::function<void()> throw_if_canceled;
 };
 
