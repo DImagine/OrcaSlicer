@@ -13,8 +13,10 @@
 #include <string>
 
 #include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/KDTreeIndirect.hpp"
+#include "SeamDump.hpp"
 
 namespace Slic3r {
 
@@ -199,6 +201,23 @@ private:
       const SeamPlacerImpl::SeamComparator &comparator,
       const SeamContour::Resolver *contours = nullptr,
       std::pair<size_t, size_t> previous = {}) const;
+};
+
+// The user's seam paint of one print object along its loops, for seamdump, without the rest of the seam
+// placer: as it is painted, before Precise Seam acts and before full green paint is normalized.
+class SeamPaint {
+public:
+  explicit SeamPaint(const PrintObject &object);
+  ~SeamPaint();
+
+  // Paint along `loop` (object coordinates, scaled, either direction) at height z, in mm from its first point
+  // in its direction. Ends come where the paint contour crosses the layer within `reach` of the loop, as the
+  // seam placer bounds its painted ranges; without such ends, a loop wholly green is green, and otherwise the
+  // points of the loop within `reach` of paint, sampled, make the runs.
+  std::vector<PreciseSeam::DumpPaintRun> runs(const Polygon &loop, double z, double reach) const;
+
+private:
+  std::unique_ptr<SeamPlacerImpl::GlobalModelInfo> m_info;
 };
 
 } // namespace Slic3r

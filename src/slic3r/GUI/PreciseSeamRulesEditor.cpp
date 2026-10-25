@@ -52,6 +52,9 @@ wxString precise_seam_rules_help()
               "relay-random1 seed 7 takes another draw, which may still give the same members\n"
               "magnet, magnet2.5: where the modifier does not cross a wall, it acts on the point nearest to it; within 2.5 mm if given, magnet0 on a touch\n"
               "idName: a name for scripts; the rules ignore it\n"
+              "seamdump t0.2 k4 each limit400 \"Boat, v2\": after slicing, writes the outer walls of the plate into an SVG file "
+              "in the project folder for an external seam choice; t: tolerance in mm, k: corners per wall, each: a file per object, "
+              "limit: size in KB, the name in quotes\n"
               "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
               "Heights are measured from the bed by default, as on the slider. Decimals take a point: a comma separates rules.\n"
               "The name may hold more rules between -^ps= and =ps^-; override as the first rule here ignores them.");

@@ -68,6 +68,7 @@ class TreeSupportData;
 class TreeSupport;
 class ExtrusionLayers;
 namespace MultiNozzleUtils { class NozzleGroupResultBase; class LayeredNozzleGroupResult; }
+namespace PreciseSeam { struct SeamdumpJob; }
 
 #define MAX_OUTER_NOZZLE_DIAMETER   4
 // BBS: move from PrintObjectSlice.cpp
@@ -1333,6 +1334,10 @@ public:
     // Orca: pre-slice clearance check for a prime tower compacted by "No sparse layers".
     static StringObjectException compacted_wipe_tower_clearance_valid(const Print &print, Polygons *polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr);
     ConflictResultOpt            get_conflict_result() const { return m_conflict_result; }
+    // Precise Seam seamdump of the last G-code export, or null: set by the export thread, written to files by
+    // the GUI, which knows the project folder.
+    std::shared_ptr<const PreciseSeam::SeamdumpJob> seamdump_job() const { return std::atomic_load(&m_seamdump_job); }
+    void set_seamdump_job(std::shared_ptr<const PreciseSeam::SeamdumpJob> job) { std::atomic_store(&m_seamdump_job, std::move(job)); }
 
     // Return 4 wipe tower corners in the world coordinates (shifted and rotated), including the wipe tower brim.
     Points first_layer_wipe_tower_corners(bool check_wipe_tower_existance=true) const;
@@ -1575,6 +1580,7 @@ private:
     int     m_modified_count {0};
     //BBS
     ConflictResultOpt m_conflict_result;
+    std::shared_ptr<const PreciseSeam::SeamdumpJob> m_seamdump_job;
     FakeWipeTower     m_fake_wipe_tower;
     bool              m_has_auto_filament_map_result{false};
     

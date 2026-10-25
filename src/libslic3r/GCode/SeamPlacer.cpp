@@ -1640,6 +1640,76 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
 
 } // namespace SeamPlacerImpl
 
+SeamPaint::SeamPaint(const PrintObject &object) : m_info(std::make_unique<SeamPlacerImpl::GlobalModelInfo>())
+{
+  SeamPlacerImpl::gather_enforcers_blockers(*m_info, &object);
+}
+
+SeamPaint::~SeamPaint() = default;
+
+std::vector<PreciseSeam::DumpPaintRun> SeamPaint::runs(const Polygon &loop, double z, double reach) const
+{
+  using namespace SeamPlacerImpl;
+  std::vector<PreciseSeam::DumpPaintRun> out;
+  if ((m_info->enforcers.empty() && m_info->blockers.empty()) || loop.size() < 3)
+    return out;
+  // The painted ranges are found on the counterclockwise loop; a position s on it is L - s on the loop given.
+  const bool reversed = loop.area() < 0.;
+  std::vector<Vec2d> xy;
+  for (const Point &p : loop.points)
+    xy.push_back(unscale(p));
+  if (reversed)
+    std::reverse(xy.begin() + 1, xy.end());
+  std::vector<double> arc{0.};
+  for (size_t i = 0; i < xy.size(); ++i)
+    arc.push_back(arc.back() + (xy[(i + 1) % xy.size()] - xy[i]).norm());
+  const double length = arc.back();
+  const auto add = [&](double begin, double end, bool blocked) {
+    out.push_back(reversed ? PreciseSeam::DumpPaintRun{length - end, length - begin, blocked} : PreciseSeam::DumpPaintRun{begin, end, blocked});
+  };
+  for (const bool blocked : {false, true}) {
+    if ((blocked ? m_info->blockers : m_info->enforcers).empty())
+      continue;
+    const std::vector<PaintedInterval> intervals =
+        exact_painted_intervals(xy, arc, z, reach, blocked ? m_info->blocker_contour : m_info->enforcer_contour);
+    if (!intervals.empty()) {
+      for (const PaintedInterval &interval : intervals)
+        add(interval.begin, interval.end, blocked);
+      continue;
+    }
+    // No crossing ends: the paint may still cover the whole loop, which has none.
+    if (!blocked && fully_enforced_loop(xy, z, reach, *m_info)) {
+      add(0., length, false);
+      continue;
+    }
+    // Otherwise the points within reach of paint, every half reach; a run spans its first to its last point.
+    const double step = std::max(reach / 2., 0.05);
+    std::optional<double> begin;
+    double last = 0.;
+    for (size_t i = 0; i < xy.size(); ++i) {
+      const double edge = arc[i + 1] - arc[i];
+      const size_t n = std::max<size_t>(1, size_t(std::ceil(edge / step)));
+      for (size_t k = 0; k < n; ++k) {
+        const double s = arc[i] + edge * double(k) / double(n);
+        const Vec2d p = xy[i] + (xy[(i + 1) % xy.size()] - xy[i]) * (double(k) / double(n));
+        const Vec3f at(float(p.x()), float(p.y()), float(z));
+        const bool painted = blocked ? m_info->is_blocked(at, float(reach)) : m_info->is_enforced(at, float(reach));
+        if (painted) {
+          if (!begin)
+            begin = s;
+          last = s;
+        } else if (begin) {
+          add(*begin, last, blocked);
+          begin.reset();
+        }
+      }
+    }
+    if (begin)
+      add(*begin, last, blocked);
+  }
+  return out;
+}
+
 // Parallel process and extract each perimeter polygon of the given print object.
 // Gather SeamCandidates of each layer into vector and build KDtree over them
 // Store results in the SeamPlacer variables m_seam_per_object

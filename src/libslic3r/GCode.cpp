@@ -9,6 +9,7 @@
 #include "GCode/ToolOrdering.hpp"
 #include "GCode/PreciseSeamRules.hpp"
 #include "GCode/PreciseSeamRulesApply.hpp"
+#include "GCode/SeamDumpPrint.hpp"
 #include "GCode/SeamPlacer.hpp"
 #include "GCode/SpiralVase.hpp"
 #include "GCode/PressureEqualizer.hpp"
@@ -4559,6 +4560,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     // Each layer rule message is its own warning, so the export dialog lists all of them.
     for (const std::string &warning : m_seam_placer.precise_seam_rule_warnings())
         print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, warning);
+    // seamdump: a snapshot of the final outer loops of the plate; the GUI writes its files to the project folder.
+    {
+        std::vector<std::string> warnings;
+        print.set_seamdump_job(PreciseSeam::build_seamdump(print, warnings, throw_if_canceled_func));
+        for (const std::string &warning : warnings)
+            print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, warning);
+    }
 
     // BBS: get path for change filament
     if (m_writer.multiple_extruders) {

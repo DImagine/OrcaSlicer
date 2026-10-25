@@ -174,6 +174,7 @@
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/GCode/SeamDumpPrint.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
@@ -7600,6 +7601,8 @@ struct Plater::priv
     void on_slicing_update(SlicingStatusEvent&);
     void on_slicing_completed(wxCommandEvent&);
     void on_process_completed(SlicingProcessCompletedEvent&);
+    // Precise Seam seamdump: writes the files of the plate's last finished export into the project folder.
+    void write_seamdump(int plate_index);
     void on_export_began(wxCommandEvent&);
     void on_export_finished(wxCommandEvent&);
     void on_slicing_began();
@@ -13443,6 +13446,10 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     if (!this->background_process.empty())
         this->background_process.get_current_plate()->update_slice_result_valid_state(evt.success());
 
+    // The export of this plate has just made its seamdump, if any.
+    if (evt.success() && this->printer_technology == ptFFF && !this->background_process.empty())
+        this->write_seamdump(this->background_process.get_current_plate()->get_index());
+
     //BBS: update the action button according to the current plate's status
     bool ready_to_slice = !this->partplate_list.get_curr_plate()->is_slice_result_valid();
 
@@ -14383,6 +14390,32 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
 
     bboxdata.bbox_all = { bbox_all.min.x(),bbox_all.min.y(),bbox_all.max.x(),bbox_all.max.y() };
     return bboxdata;
+}
+
+void Plater::priv::write_seamdump(int plate_index)
+{
+    PartPlate *plate = partplate_list.get_plate(plate_index);
+    if (plate == nullptr || plate->fff_print() == nullptr)
+        return;
+    const Print &print = *plate->fff_print();
+    // Only a finished export: the job of a print invalidated since then is stale.
+    if (!print.is_step_done(psGCodeExport))
+        return;
+    const std::shared_ptr<const PreciseSeam::SeamdumpJob> job = print.seamdump_job();
+    if (!job)
+        return;
+    if (m_project_folder.empty() || m_project_name.empty()) {
+        notification_manager->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                // TRN: Precise Seam seamdump. Do not translate "seamdump".
+                                                _u8L("Precise Seam: seamdump writes into the project folder; save the project to write it."));
+        return;
+    }
+    // Default names of several plates differ as their G-code names do.
+    std::string project = into_u8(m_project_name);
+    if (partplate_list.get_plate_count() > 1)
+        project += "_plate_" + std::to_string(plate_index + 1);
+    for (const std::string &error : PreciseSeam::write_seamdump_files(*job, m_project_folder, project))
+        notification_manager->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel, error);
 }
 
 wxString Plater::priv::get_project_filename(const wxString& extension) const
@@ -16349,6 +16382,10 @@ int Plater::save_project(bool saveAs)
 
     p->set_project_filename(filename);
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << __LINE__ << " call set_project_filename: " << filename;
+    // The project folder is known now, or has changed: seamdumps of finished exports go there without slicing.
+    if (p->printer_technology == ptFFF)
+        for (int plate = 0; plate < p->partplate_list.get_plate_count(); ++plate)
+            p->write_seamdump(plate);
 
     up_to_date(true, false);
     up_to_date(true, true);

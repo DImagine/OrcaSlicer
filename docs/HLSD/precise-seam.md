@@ -306,6 +306,72 @@ print and is tested on its own.
   which keep every layer and type give the seams of no rules. Dependencies go
   one way: the geometric core (`PreciseSeam.hpp`) does not include the language.
 
+### seamdump
+
+`seamdump` in the rules field asks for a file that an external program, such
+as a language model, reads to choose the seams: the outer walls of every model
+layer of the plate as one SVG (`GCode/SeamDump.cpp`). The answer comes back as
+a file later; reading it is a stage of its own. The contract is the agreed
+specification, `TZ-seamdump.md` of the project notes; this section gives the
+design.
+
+- **Request.** `seamdump {t k each limit} "name"`, flags in any order: the
+  tolerance T in mm on the 0.01 mm grid (0.1 by default), K corners per loop
+  (8), a file per model object, and a size limit in kB (none). Only a seamdump
+  element reads its quoted string: the string keeps spaces, case and commas,
+  `""` is a quote, and every other element, `id` among them, splits and
+  normalizes as before. Only the field may hold it; a name block reports
+  `SeamdumpInName`. The plate takes the first request of a Precise Seam volume
+  that is not off, objects then volumes in list order; requests compare by
+  value after defaults, and a different one is `SeamdumpConflict`.
+- **Snapshot.** The G-code export takes it next to `SeamPlacer::init()`, after
+  `posSimplifyPath`, so its loops are the walls the seams will go on. Outer
+  loops are the closed loops with an outer wall path or inset 0, found through
+  nested collections; an open outer wall, spiral vase and belt printers are
+  refused with a message. Coordinates are those of the first instance on the
+  plate (`shift_without_plate_offset()`). Paint is the user's, before Precise
+  Seam and before full green paint is normalized: `SeamPaint` reuses the paint
+  trees and `exact_painted_intervals()` of the seam placer at `slice_z` with
+  half the outer wall width, and falls back to points near paint when the
+  contour does not cross the layer.
+- **Geometry.** Each loop is made canonical first: outer counterclockwise,
+  holes clockwise, starting at its lexicographically smallest rotation. RDP
+  and `ArcFitter` with T/2 simplify it, the result is put on the grid, and the
+  Hausdorff distance to the source, sampled at T/4 both ways, must stay within
+  T; otherwise the loop falls back to lines only, then to no simplification.
+  Fitted arcs are cut into pieces of at most 90 degrees, since on the grid
+  the centre of a longer arc with close ends, such as most of a circle, moves
+  far with the rounding of its ends; a piece that bulges less than T/4 is a
+  line. `d` is the only definition of a path: arc centres are derived from its
+  rounded ends, radius and flags as an SVG reader does, an arc whose radius
+  SVG would enlarge becomes a line, and `data-arcs` only repeats the centres.
+  Published loops of a layer must not cross and holes must stay inside their
+  outer loop; loops that break this fall back the same way and are dropped,
+  with a reason, only without simplification.
+- **Numbers.** `L<n>` is unique within an object across kinds. A loop keeps
+  the number of the only loop of its kind it overlaps on the layer below, by
+  area of the regions, when that one overlaps no other; every other loop gets
+  a new number in a fixed order, with `data-from` naming the loops it came
+  from. `data-source-loop` is the index of the loop in the layer as the export
+  walks the perimeters, for a later import to find it exactly.
+- **Candidates and paint.** Candidates are the vertices of the published path
+  with the largest turns, K of them, numbered along the path; the angle is on
+  the side of the material, which lies left of the path for both kinds. Paint
+  runs move to the published path by projecting their ends, and each piece
+  takes the paint of the source point nearest to its middle: 0.01 mm is the
+  step of the written ends, not a bound of their error.
+- **File.** A layer whose loops equal those of the last layer written refers
+  to it with `data-same`. The fingerprint hashes the unrounded source records,
+  heights and paint included; the dump id hashes the file bytes with zeros in
+  its place, after `data-bytes` has settled on its own length. Above the limit
+  the file is built again with 2T, 4T and half of K; then it is not written.
+- **Writing.** The export stores the files in the `Print`; the GUI writes them
+  after a successful slice and after the project is saved, so a new folder
+  needs no slicing, and editing only the field re-runs the export alone. Each
+  file goes through a temporary one that then replaces it. Without a saved
+  project nothing is written and a notification says so; files of an older
+  name or a removed request stay.
+
 ## Data flow
 
 1. **Invalidation.** `Print::apply()` treats a change of Precise Seam volumes as

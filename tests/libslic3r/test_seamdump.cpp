@@ -1,9 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include "libslic3r/GCode/SeamDump.hpp"
+#include "libslic3r/GCode/SeamDumpPrint.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/libslic3r.h"
 
+#include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <cmath>
 #include <cstddef>
 #include <string>
@@ -211,4 +214,50 @@ TEST_CASE("Above the size limit the file is built again coarser, or not at all",
     const DumpResult none = write_seamdump(objects, tight);
     CHECK(none.svg.empty());
     CHECK_FALSE(none.error.empty());
+}
+
+TEST_CASE("Object file names are portable and numbered when equal", "[PreciseSeam][Seamdump]")
+{
+    CHECK(seamdump_object_names({"Boat"}) == std::vector<std::string>{"Boat"});
+    // Equal names, also without letter case, are all numbered in list order.
+    CHECK(seamdump_object_names({"Part", "Box", "part", "Part"}) == std::vector<std::string>{"Part (1)", "Box", "part (2)", "Part (3)"});
+    // Forbidden characters, trailing dots and spaces, reserved and empty names.
+    CHECK(seamdump_object_names({"A/B", "A\B"}) == std::vector<std::string>{"A_B (1)", "A_B (2)"});
+    CHECK(seamdump_object_names({"x. ", "CON", "", "a:b?"}) == std::vector<std::string>{"x", "_CON", "_", "a_b_"});
+    // A name already taken by another object gets the next free number.
+    CHECK(seamdump_object_names({"Name", "Name (1)", "Name"}) == std::vector<std::string>{"Name (1)", "Name (1) (1)", "Name (2)"});
+}
+
+TEST_CASE("seamdump files replace the old ones under their names", "[PreciseSeam][Seamdump]")
+{
+    const boost::filesystem::path folder = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("seamdump-%%%%-%%%%");
+    boost::filesystem::create_directories(folder);
+    const auto read = [&folder](const std::string &name) {
+        boost::nowide::ifstream in((folder / name).string(), std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    SeamdumpJob plate;
+    plate.files.push_back({{}, "<svg/>"});
+    CHECK(write_seamdump_files(plate, folder, "Project").empty());
+    CHECK(read("Project.seamdump.svg") == "<svg/>");
+    plate.request.file  = "Boat, v2.svg";
+    plate.files.front() = {{}, "<svg>2</svg>"};
+    CHECK(write_seamdump_files(plate, folder, "Project").empty());
+    CHECK(read("Boat, v2.svg") == "<svg>2</svg>");
+    // The old file under the default name stays.
+    CHECK(read("Project.seamdump.svg") == "<svg/>");
+    SeamdumpJob each;
+    each.request.each = true;
+    each.request.file = "boat.SVG";
+    each.files        = {{"Hull", "1"}, {"Cabin", "2"}, {"Hull", "3"}};
+    CHECK(write_seamdump_files(each, folder, "Project").empty());
+    CHECK(read("boat-Hull (1).svg") == "1");
+    CHECK(read("boat-Cabin.svg") == "2");
+    CHECK(read("boat-Hull (2).svg") == "3");
+    // No temporary file is left.
+    for (const auto &entry : boost::filesystem::directory_iterator(folder))
+        CHECK(entry.path().extension() != ".tmp");
+    // A missing folder fails each file.
+    CHECK(write_seamdump_files(plate, folder / "missing", "Project").size() == 1);
+    boost::filesystem::remove_all(folder);
 }
