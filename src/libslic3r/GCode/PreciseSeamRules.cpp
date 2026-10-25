@@ -141,6 +141,19 @@ public:
             return std::nullopt;
         return uint32_t(value);
     }
+    // A number of at most `max`, with leading zeros; a larger one is remembered as out of range.
+    std::optional<uint64_t> wide_uint(uint64_t max)
+    {
+        const size_t begin = m_pos;
+        uint64_t     value = 0;
+        for (; !done() && m_text[m_pos] >= '0' && m_text[m_pos] <= '9'; ++m_pos)
+            value = value > (max - uint64_t(m_text[m_pos] - '0')) / 10 ? max + 1 : value * 10 + uint64_t(m_text[m_pos] - '0');
+        if (m_pos == begin)
+            return std::nullopt;
+        if (value > max)
+            m_out_of_range = true;
+        return value;
+    }
     // A height in mm, "uint [. uint]", as nanometres. More than six decimals or a value above the limit is
     // out of range, which is remembered; long input saturates before that check.
     std::optional<int64_t> nanometres()
@@ -298,6 +311,125 @@ std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
     return set;
 }
 
+// One element of a source, trimmed. seamdump is read with its quoted string, in which commas do not end it.
+struct RawElement {
+    std::string_view raw;
+    bool             seamdump = false;
+    bool             unclosed = false; // seamdump whose string runs to the end of the source.
+};
+
+// Whether the element at `begin` starts with seamdump after normalization, looking no further than a comma.
+bool starts_seamdump(std::string_view text, size_t begin)
+{
+    constexpr std::string_view word    = "seamdump";
+    size_t                     matched = 0;
+    for (size_t pos = begin; pos < text.size() && text[pos] != ',' && matched < word.size(); ++pos)
+        if (!is_ascii_space(text[pos])) {
+            if (ascii_lower(text[pos]) != word[matched])
+                return false;
+            ++matched;
+        }
+    return matched == word.size();
+}
+
+// All elements, the empty ones too, so that their numbers count the commas outside quoted strings.
+std::vector<RawElement> split_elements(std::string_view text)
+{
+    std::vector<RawElement> out;
+    for (size_t begin = 0; begin <= text.size();) {
+        RawElement element;
+        size_t     end = begin;
+        if (starts_seamdump(text, begin)) {
+            element.seamdump = true;
+            // "" within a string closes and reopens it, which leaves the same state.
+            bool quoted = false;
+            for (; end < text.size() && (quoted || text[end] != ','); ++end)
+                if (text[end] == '"')
+                    quoted = !quoted;
+            element.unclosed = quoted;
+        } else
+            end = std::min(text.find(',', begin), text.size());
+        element.raw = trim(text.substr(begin, end - begin));
+        out.push_back(element);
+        begin = end + 1;
+    }
+    return out;
+}
+
+// seamdump = "seamdump" {flag} [string], flag = "t" decimal | "k" uint | "each" | "limit" uint, each flag at most
+// once. The flags are normalized as any element; the string is read from the original text, keeping its spaces,
+// letter case and commas, with "" for a quote. `out_of_range` is set for a number outside its range.
+std::optional<SeamdumpRequest> parse_seamdump(std::string_view raw, bool unclosed, bool &out_of_range)
+{
+    if (unclosed)
+        return std::nullopt;
+    const size_t      quote = raw.find('"');
+    const std::string head  = normalize(raw.substr(0, quote));
+    Cursor            c(head);
+    if (!c.eat("seamdump"))
+        return std::nullopt;
+    SeamdumpRequest request;
+    bool            tolerance = false, candidates = false, each = false, limit = false;
+    // The flags start with different letters, and a number ends at the first character that is not part of it.
+    while (!c.done()) {
+        if (!tolerance && c.eat('t')) {
+            tolerance                       = true;
+            const std::optional<int64_t> mm = c.nanometres();
+            // Off the grid is an error, not a value to round: t0.015 is not t0.02.
+            if (!mm || *mm % SeamdumpRequest::tolerance_grid != 0)
+                return std::nullopt;
+            if (*mm < SeamdumpRequest::tolerance_grid || *mm > nanometres_per_mm)
+                out_of_range = true;
+            request.tolerance = *mm;
+        } else if (!candidates && c.eat('k')) {
+            candidates                         = true;
+            const std::optional<int64_t> count = c.uint();
+            if (!count)
+                return std::nullopt;
+            if (*count > 64)
+                out_of_range = true;
+            request.candidates = int(std::min<int64_t>(*count, 64));
+        } else if (!each && c.eat("each")) {
+            each         = true;
+            request.each = true;
+        } else if (!limit && c.eat("limit")) {
+            limit = true;
+            // Kilobytes of 1000 bytes; the product must fit.
+            const std::optional<uint64_t> kilobytes = c.wide_uint(std::numeric_limits<uint64_t>::max() / 1000);
+            if (!kilobytes)
+                return std::nullopt;
+            request.limit = std::min(*kilobytes, std::numeric_limits<uint64_t>::max() / 1000) * 1000;
+        } else
+            return std::nullopt;
+    }
+    if (c.out_of_range())
+        out_of_range = true;
+    if (quote == std::string_view::npos)
+        return request;
+    // The closing quote exists: the element is not unclosed. Nothing may follow it; the element is trimmed.
+    std::string name;
+    size_t      pos = quote + 1;
+    for (;;) {
+        if (raw[pos] == '"') {
+            if (pos + 1 < raw.size() && raw[pos + 1] == '"') {
+                name.push_back('"');
+                pos += 2;
+                continue;
+            }
+            ++pos;
+            break;
+        }
+        name.push_back(raw[pos++]);
+    }
+    if (pos != raw.size() || !portable_file_name(name))
+        return std::nullopt;
+    // The extension is added unless the name has it in any letter case: a.txt is a.txt.svg.
+    if (name.size() < 4 || normalize(name.substr(name.size() - 4)) != ".svg")
+        name += ".svg";
+    request.file = std::move(name);
+    return request;
+}
+
 struct ParsedElement {
     enum class Kind { Mode, Set, Type, Priority, Off, Nowarn, Override, Relay, Magnet, Origin };
     Kind                        kind;
@@ -396,20 +528,32 @@ std::optional<ParsedElement> parse_element(Cursor &c)
 // sources.
 void parse_source(LayerRules &rules, std::string_view source_text, const RuleSource &source)
 {
-    bool   exclude = false;
-    bool   model   = false;
-    bool   first   = true; // No non-empty element seen yet.
-    size_t index   = 0;
-    for (size_t begin = 0; begin <= source_text.size(); ++index) {
-        const size_t           comma = std::min(source_text.find(',', begin), source_text.size());
-        const std::string_view raw   = trim(source_text.substr(begin, comma - begin));
-        begin                        = comma + 1;
-
-        const std::string normalized = normalize(raw);
+    bool                          exclude  = false;
+    bool                          model    = false;
+    bool                          first    = true; // No non-empty element seen yet.
+    const std::vector<RawElement> elements = split_elements(source_text);
+    for (size_t index = 0; index < elements.size(); ++index) {
+        const std::string_view raw        = elements[index].raw;
+        const std::string      normalized = normalize(raw);
         if (normalized.empty())
             continue;
         const size_t element_index = index + 1;
         const bool   first_element = std::exchange(first, false);
+        // seamdump writes a file for the whole plate: only the field may ask for it, never a name.
+        if (elements[index].seamdump) {
+            bool                           out_of_range = false;
+            std::optional<SeamdumpRequest> request      = parse_seamdump(raw, elements[index].unclosed, out_of_range);
+            if (!source.field)
+                rules.diagnostics.push_back({RuleDiagnosticCode::SeamdumpInName, source, element_index, std::string(raw)});
+            else if (!request || out_of_range)
+                rules.diagnostics.push_back({RuleDiagnosticCode::InvalidElement, source, element_index, std::string(raw)});
+            else if (!rules.seamdump) {
+                rules.seamdump         = std::move(request);
+                rules.seamdump_element = element_index;
+            } else if (*rules.seamdump != *request)
+                rules.diagnostics.push_back({RuleDiagnosticCode::SeamdumpConflict, source, element_index, std::string(raw)});
+            continue;
+        }
         // id: a name for external scripts. Any text may follow, so it is taken as a whole before the grammar;
         // no other keyword starts with "id". Repeats compare normalized, the trimmed original is kept.
         if (normalized.compare(0, 2, "id") == 0) {
@@ -483,13 +627,9 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
 // The first element that is not empty after normalization, as parse_source() reads it.
 std::string leading_element(std::string_view source_text)
 {
-    for (size_t begin = 0; begin <= source_text.size();) {
-        const size_t comma      = std::min(source_text.find(',', begin), source_text.size());
-        std::string  normalized = normalize(source_text.substr(begin, comma - begin));
-        if (!normalized.empty())
+    for (const RawElement &element : split_elements(source_text))
+        if (std::string normalized = normalize(element.raw); !normalized.empty())
             return normalized;
-        begin = comma + 1;
-    }
     return {};
 }
 
@@ -585,6 +725,38 @@ std::string relay_label_text(const RelayLabel &label)
     if (label.number != 0)
         text += std::to_string(label.number);
     return text;
+}
+
+bool portable_file_name(std::string_view name)
+{
+    if (name.empty() || name.back() == '.' || name.back() == ' ')
+        return false;
+    for (char c : name)
+        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f || std::string_view("<>:\"/\\|?*").find(c) != std::string_view::npos)
+            return false;
+    // Windows reserves these names whatever the extension: CON.svg is the console.
+    const std::string base = normalize(name.substr(0, name.find('.')));
+    if (base == "con" || base == "prn" || base == "aux" || base == "nul")
+        return false;
+    if (base.size() == 4 && (base.compare(0, 3, "com") == 0 || base.compare(0, 3, "lpt") == 0) && base[3] >= '1' && base[3] <= '9')
+        return false;
+    return true;
+}
+
+SeamdumpChoice choose_seamdump(const std::vector<const LayerRules*> &rules)
+{
+    SeamdumpChoice choice;
+    for (size_t i = 0; i < rules.size(); ++i) {
+        // An off volume takes no part, its seamdump neither.
+        if (rules[i]->off || !rules[i]->seamdump)
+            continue;
+        if (!choice.request) {
+            choice.request = rules[i]->seamdump;
+            choice.first   = i;
+        } else if (*choice.request != *rules[i]->seamdump)
+            choice.conflicts.push_back(i);
+    }
+    return choice;
 }
 
 bool has_rule_marker(std::string_view volume_name)

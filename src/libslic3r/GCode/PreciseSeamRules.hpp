@@ -32,7 +32,9 @@ enum class RuleDiagnosticCode {
     RelayConflict,       // A later relay label differs from the first one, which stays in effect.
     RelayGroupMixed,     // The relay group of the volume mixes strong and weak members, so it acts without relay.
     IdConflict,          // A later id differs from the first one, which stays in effect.
-    MagnetConflict       // A later magnet differs from the first one, which stays in effect.
+    MagnetConflict,      // A later magnet differs from the first one, which stays in effect.
+    SeamdumpInName,      // seamdump in a name block; only the field may request a dump.
+    SeamdumpConflict     // A later seamdump differs from the first one, which stays in effect.
 };
 
 // Relay group label. The four spaces relay, relayN, relay-random and relay-randomN never share a group.
@@ -55,6 +57,30 @@ struct MagnetRule {
     bool operator==(const MagnetRule &rhs) const { return limit == rhs.limit; }
     bool operator!=(const MagnetRule &rhs) const { return !(*this == rhs); }
 };
+
+// Heights are kept exactly, in nanometres (1e-6 mm), and converted to mm only when compared.
+inline constexpr int64_t nanometres_per_mm = 1000000;
+
+// seamdump: the plate's outer loops are written to an SVG file, for an external program to choose the seams.
+struct SeamdumpRequest {
+    static constexpr int64_t tolerance_grid = 10000; // 0.01 mm in nanometres.
+
+    int64_t                    tolerance  = 100000; // T in nanometres: 0.01 .. 1 mm on the 0.01 mm grid.
+    int                        candidates = 8;      // K: 0 .. 64 seam candidates per loop.
+    uint64_t                   limit      = 0;      // Size limit in bytes; 0 is none.
+    bool                       each       = false;  // One file per object instead of one for the plate.
+    std::optional<std::string> file;                // Name in the project folder, with .svg; none for the default.
+
+    bool operator==(const SeamdumpRequest &rhs) const
+    {
+        return tolerance == rhs.tolerance && candidates == rhs.candidates && limit == rhs.limit && each == rhs.each && file == rhs.file;
+    }
+    bool operator!=(const SeamdumpRequest &rhs) const { return !(*this == rhs); }
+};
+
+// Whether the name is a valid file name on every platform: not empty, no path, no character that Windows
+// forbids, no trailing dot or space, no reserved device name such as CON or COM1, also with an extension.
+bool portable_file_name(std::string_view name);
 
 // Name blocks are numbered from 1 in name order; the field always comes after them.
 struct RuleSource {
@@ -83,9 +109,6 @@ struct RuleLayerSet {
     bool    inside = false; // Height only: zin, the whole layer within [A, B]; a single height zA is zA-A.
 };
 
-// Heights are kept exactly, in nanometres (1e-6 mm), and converted to mm only when compared.
-inline constexpr int64_t nanometres_per_mm = 1000000;
-
 struct RuleLayerOperation {
     bool         exclude = false; // Mode in effect for this set.
     bool         model   = false; // Origin in effect for this set: model layers and heights instead of the bed.
@@ -104,6 +127,8 @@ struct LayerRules {
     std::optional<uint32_t>         relay_seed; // seed of that relay-random element; not part of the group label.
     std::optional<std::string>      id;         // Trimmed original text of the first id element; the language ignores it.
     std::optional<MagnetRule>       magnet;     // First magnet over all sources.
+    std::optional<SeamdumpRequest>  seamdump;   // First seamdump of the field.
+    size_t                          seamdump_element = 0; // Its element number in the field.
     bool                            off             = false;
     bool                            nowarn          = false;
     bool                            name_overridden = false; // override first in the field: the name took no part.
@@ -119,6 +144,15 @@ bool has_rule_marker(std::string_view volume_name);
 // Parses the name blocks, then the field, of one Precise Seam volume. When the first element of the field is
 // override, the name is not parsed at all.
 LayerRules parse_layer_rules(std::string_view volume_name, std::string_view field);
+
+// The seamdump of a plate from the rules of its Precise Seam volumes, objects then volumes in object list
+// order: the first one of a volume that is not off. Equal requests are one; a different one is a conflict.
+struct SeamdumpChoice {
+    std::optional<SeamdumpRequest> request;
+    size_t                         first = 0;  // Index of the volume whose request is in effect.
+    std::vector<size_t>            conflicts; // Indices of the volumes whose request differs from it.
+};
+SeamdumpChoice choose_seamdump(const std::vector<const LayerRules*> &rules);
 
 // Height band (bottom_z, print_z] in mm of one numbered model layer of the object.
 struct LayerBand {

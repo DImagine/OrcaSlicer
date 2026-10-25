@@ -507,6 +507,14 @@ std::vector<std::string> rule_warnings(const std::vector<ModifierDiagnostic> &di
             // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text, %4% its place, e.g. "rules field, element 2". Do not translate "magnet".
             message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": magnet \"%3%\" (%4%) differs from the first magnet in its rules and was ignored.")) % volume % object % text % location(d)).str();
             break;
+        case Code::SeamdumpInName:
+            // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text, %4% its place, e.g. "name block 1, element 2". Do not translate "seamdump".
+            message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": \"%3%\" (%4%) was ignored, as only the rules field may hold seamdump.")) % volume % object % text % location(d)).str();
+            break;
+        case Code::SeamdumpConflict:
+            // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text, %4% its place, e.g. "rules field, element 2". Do not translate "seamdump".
+            message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": seamdump \"%3%\" (%4%) differs from an earlier seamdump and was ignored.")) % volume % object % text % location(d)).str();
+            break;
         }
         // Equal texts also come from two blocks broken the same way, or equal rules in a source.
         const auto same = std::find_if(messages.begin(), messages.end(), [&message](const auto &m) { return m.first == message; });

@@ -904,6 +904,159 @@ TEST_CASE("id names a volume for scripts and changes nothing else", "[PreciseSea
     CHECK(apply_rules(late) == Layers{5});
 }
 
+TEST_CASE("seamdump takes flags in any order and a quoted file name", "[PreciseSeam][Rules][Seamdump]")
+{
+    const LayerRules plain = field("seamdump");
+    REQUIRE(plain.seamdump.has_value());
+    CHECK(*plain.seamdump == SeamdumpRequest{});
+    CHECK(plain.seamdump->tolerance == 100000);
+    CHECK(plain.seamdump->candidates == 8);
+    CHECK(plain.seamdump->limit == 0);
+    CHECK_FALSE(plain.seamdump->each);
+    CHECK_FALSE(plain.seamdump->file.has_value());
+    CHECK(plain.seamdump_element == 1);
+    CHECK(plain.diagnostics.empty());
+    // A seamdump changes no layers, mode, type or relay.
+    CHECK_FALSE(plain.restricts_layers());
+    CHECK(select({}, "excl,seamdump,odd") == range(2, 400, 2));
+
+    SeamdumpRequest full;
+    full.tolerance  = 200000;
+    full.candidates = 4;
+    full.limit      = 400000;
+    full.each       = true;
+    full.file       = "Boat, v2 final.svg";
+    // Flags in any order, with or without spaces; spaces, case and commas of the name are kept.
+    for (const std::string text : {"seamdump t0.2 k4 each limit400 \"Boat, v2 final.svg\"", "SeamDump limit400 each k4 t0.2\"Boat, v2 final\"",
+                                   "seamdumpt0.2k4eachlimit400\"Boat, v2 final.svg\"", " s e a m d u m p t 0.20 k 04 each limit 0400 \"Boat, v2 final.svg\" "}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(rules.diagnostics.empty());
+        REQUIRE(rules.seamdump.has_value());
+        CHECK(*rules.seamdump == full);
+    }
+    // "" is a quote in the name, which a file name cannot hold.
+    CHECK(count_code(field("seamdump \"a\"\"b\"").diagnostics, Code::InvalidElement) == 1);
+    // The extension is added unless it is there in any case.
+    CHECK(field("seamdump \"a.txt\"").seamdump->file == "a.txt.svg");
+    CHECK(field("seamdump \"a.SVG\"").seamdump->file == "a.SVG");
+    CHECK(field("seamdump \"\xD0\x9B\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xB0\"").seamdump->file == "\xD0\x9B\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xB0.svg");
+    // Bounds of the values.
+    CHECK(field("seamdump t0.01 k0").seamdump->tolerance == 10000);
+    CHECK(field("seamdump t1 k64").seamdump->candidates == 64);
+    CHECK(field("seamdump limit0").seamdump->limit == 0);
+    CHECK(field("seamdump limit18446744073709551").seamdump->limit == 18446744073709551000ull);
+}
+
+TEST_CASE("A broken seamdump is invalid as a whole", "[PreciseSeam][Rules][Seamdump]")
+{
+    for (const std::string text :
+         {"seamdump t", "seamdump t0", "seamdump t1.01", "seamdump t0.015", "seamdump t0.0000001", "seamdump t.5", "seamdump k", "seamdump k65",
+          "seamdump k4.0", "seamdump k-1", "seamdump limit", "seamdump limit18446744073709552", "seamdump x5", "seamdump t0.1t0.1",
+          "seamdump each each", "seamdump k4k4", "seamdump \"a\" k4", "seamdump \"a\" \"b\"", "seamdump \"\"", "seamdump \"a/b\"",
+          "seamdump \"a\\\\b\"", "seamdump \"c:x\"", "seamdump \"..\"", "seamdump \"a.\"", "seamdump \"a \"", "seamdump \"CON\"",
+          "seamdump \"con.svg\"", "seamdump \"Com1.txt\"", "seamdump \"a\tb\"", "seamdumpx", "seamdumps", "seamdump \"unclosed"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text + ",5");
+        CHECK_FALSE(rules.seamdump.has_value());
+        CHECK(count_code(rules.diagnostics, Code::InvalidElement) == 1);
+        // An unclosed string runs to the end of the source and takes the set with it: no set is left, so
+        // every layer stays selected.
+        CHECK(apply_rules(rules) == (text.back() == 'd' ? range(1, 400) : Layers{5}));
+    }
+    // Device names are reserved only as the whole base name.
+    CHECK(field("seamdump \"console\"").seamdump.has_value());
+    CHECK(field("seamdump \"com10\"").seamdump.has_value());
+    CHECK(field("seamdump \"lpt0\"").seamdump.has_value());
+    // A prefixed mode is no seamdump.
+    for (const std::string text : {"inclseamdump", "exclseamdump t0.2"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text + ",5");
+        CHECK_FALSE(rules.seamdump.has_value());
+        CHECK(count_code(rules.diagnostics, Code::InvalidElement) == 1);
+        CHECK(apply_rules(rules) == Layers{5});
+    }
+}
+
+TEST_CASE("Commas within a seamdump string do not end the element", "[PreciseSeam][Rules][Seamdump]")
+{
+    const LayerRules rules = field(",seamdump \"A,B.svg\",bad,5");
+    REQUIRE(rules.seamdump.has_value());
+    CHECK(rules.seamdump->file == "A,B.svg");
+    CHECK(rules.seamdump_element == 2);
+    REQUIRE(rules.diagnostics.size() == 1);
+    CHECK(rules.diagnostics.front().code == Code::InvalidElement);
+    CHECK(rules.diagnostics.front().element == 3);
+    CHECK(rules.diagnostics.front().text == "bad");
+    CHECK(apply_rules(rules) == Layers{5});
+    // The set after a quoted comma is a set of its own.
+    CHECK(select({}, "seamdump \"A,B.svg\",5") == Layers{5});
+    // A broken seamdump still takes its quoted commas: they make no rules.
+    const LayerRules broken = field("seamdump x \"1,2\",5");
+    CHECK(count_code(broken.diagnostics, Code::InvalidElement) == 1);
+    CHECK(apply_rules(broken) == Layers{5});
+    // Other elements and id take a quote as any character, as before.
+    const LayerRules id = field("id\"tag,5");
+    CHECK(id.id == "id\"tag");
+    CHECK(id.diagnostics.empty());
+    CHECK(apply_rules(id) == Layers{5});
+    const LayerRules id_pair = field("id\"a,b\",5");
+    CHECK(id_pair.id == "id\"a");
+    REQUIRE(id_pair.diagnostics.size() == 1);
+    CHECK(id_pair.diagnostics.front().element == 2);
+    CHECK(apply_rules(id_pair) == Layers{5});
+    // idseamdump is an id.
+    const LayerRules named = field("idseamdump \"x\"");
+    CHECK(named.id == "idseamdump \"x\"");
+    CHECK_FALSE(named.seamdump.has_value());
+    // override after a quoted comma is not the first element.
+    const LayerRules late = parse_layer_rules("-^ps=5=ps^-", "seamdump \"a,override\",override");
+    CHECK_FALSE(late.name_overridden);
+    CHECK(count_code(late.diagnostics, Code::InvalidElement) == 1);
+    CHECK(apply_rules(late) == Layers{5});
+}
+
+TEST_CASE("Only the field may hold seamdump, and the first one stays in effect", "[PreciseSeam][Rules][Seamdump]")
+{
+    const LayerRules named = parse_layer_rules("-^ps=seamdump t0.2,5=ps^-", {});
+    CHECK_FALSE(named.seamdump.has_value());
+    REQUIRE(named.diagnostics.size() == 1);
+    CHECK(named.diagnostics.front().code == Code::SeamdumpInName);
+    CHECK(named.diagnostics.front().source == RuleSource{false, 1});
+    CHECK(named.diagnostics.front().element == 1);
+    CHECK(apply_rules(named) == Layers{5});
+    // The word inside another element, or outside a block, is no request.
+    CHECK(parse_layer_rules("seamdump -^ps=idseamdump=ps^-", {}).diagnostics.empty());
+    // Requests compare by value: the defaults and the order of the flags do not count.
+    const LayerRules same = field("seamdump,seamdump k8 t0.1 limit0,seamdump t0.10");
+    CHECK(same.diagnostics.empty());
+    CHECK(*same.seamdump == SeamdumpRequest{});
+    const LayerRules reordered = field("seamdump k4 t0.2 \"a\",seamdump t0.2 k4 \"a.svg\"");
+    CHECK(reordered.diagnostics.empty());
+    // The file name keeps its case.
+    const LayerRules other = field("seamdump \"a\",seamdump \"A\",seamdump t0.2");
+    CHECK(other.seamdump->file == "a.svg");
+    CHECK(count_code(other.diagnostics, Code::SeamdumpConflict) == 2);
+    // A broken first one reserves nothing.
+    const LayerRules late = field("seamdump k99,seamdump k4");
+    CHECK(late.seamdump->candidates == 4);
+    CHECK(late.seamdump_element == 2);
+    CHECK(count_code(late.diagnostics, Code::InvalidElement) == 1);
+}
+
+TEST_CASE("The plate takes the first seamdump of a volume that is not off", "[PreciseSeam][Rules][Seamdump]")
+{
+    const LayerRules none = field("5"), off = field("off,seamdump \"x\""), first = field("seamdump t0.2"), same = field("seamdump t0.20 k8"),
+                     other = field("seamdump t0.3"), late = field("seamdump \"y\"");
+    const SeamdumpChoice choice = choose_seamdump({&none, &off, &first, &same, &other, &late});
+    REQUIRE(choice.request.has_value());
+    CHECK(choice.request->tolerance == 200000);
+    CHECK(choice.first == 2);
+    CHECK(choice.conflicts == std::vector<size_t>{4, 5});
+    CHECK_FALSE(choose_seamdump({&none, &off}).request.has_value());
+    CHECK(choose_seamdump({}).conflicts.empty());
+}
+
 TEST_CASE("Name markers and commas bound an id", "[PreciseSeam][Rules]")
 {
     // The name block ends at the first closing marker: off falls outside, and the second closing is stray.
