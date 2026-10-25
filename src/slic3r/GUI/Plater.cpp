@@ -7603,7 +7603,7 @@ struct Plater::priv
     void on_process_completed(SlicingProcessCompletedEvent&);
     // Precise Seam seamdump: writes the files of these plates' last finished exports into the project folder.
     void write_seamdumps(const std::vector<int> &plates);
-    // The model objects of a plate in object list order.
+    // The model objects that the plate prints, in object list order: the set its seamdump is built from.
     std::vector<const ModelObject *> seamdump_objects(int plate_index);
     void on_export_began(wxCommandEvent&);
     void on_export_finished(wxCommandEvent&);
@@ -14400,11 +14400,15 @@ std::vector<const ModelObject *> Plater::priv::seamdump_objects(int plate_index)
     PartPlate *plate = partplate_list.get_plate(plate_index);
     if (plate == nullptr)
         return objects;
-    // The plate lists an object once per instance; the object list gives the order.
-    const ModelObjectPtrs on_plate = plate->get_objects_on_this_plate();
-    for (const ModelObject *object : model.objects)
-        if (std::find(on_plate.begin(), on_plate.end(), object) != on_plate.end())
-            objects.push_back(object);
+    // Objects with a printable instance on the plate, as the print gets them, in object list order.
+    for (int o = 0; o < int(model.objects.size()); ++o) {
+        const ModelObject *object = model.objects[o];
+        for (int i = 0; i < int(object->instances.size()); ++i)
+            if (plate->contain_instance(o, i) && object->instances[i]->is_printable()) {
+                objects.push_back(object);
+                break;
+            }
+    }
     return objects;
 }
 
@@ -16444,8 +16448,9 @@ int Plater::save_project(bool saveAs)
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << __LINE__ << " call set_project_filename: " << filename;
     // The project folder is known now, or has changed: seamdumps of finished exports go there without slicing.
     if (p->printer_technology == ptFFF) {
-        // A pending edit reaches the current plate's print first, which invalidates what it changes.
-        p->update_background_process(false, true);
+        // A pending edit reaches the current plate's print first, which invalidates what it changes, and the
+        // background process restarts as the update timer would, which Save stopped.
+        p->update_restart_background_process(false, false);
         std::vector<int> plates(p->partplate_list.get_plate_count());
         std::iota(plates.begin(), plates.end(), 0);
         p->write_seamdumps(plates);
