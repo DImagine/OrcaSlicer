@@ -336,10 +336,11 @@ design.
   contour does not cross the layer.
 - **Geometry.** Each loop is made canonical first: outer counterclockwise,
   holes clockwise, starting at its lexicographically smallest rotation. RDP
-  and `ArcFitter` with T/2 simplify it, after RDP with T/8 has thinned the
-  points: `ArcFitter` takes three close points of a curve as straight, the result is put on the grid, and the
-  Hausdorff distance to the source, sampled at T/4 both ways, must stay within
-  T; otherwise the loop falls back to lines only, then to no simplification.
+  with T/8 thins its points first, since `ArcFitter` takes three close points
+  of a curve as straight; then RDP and `ArcFitter` with T/2 simplify it. The
+  result is put on the grid, and the Hausdorff distance to the source, sampled
+  at T/4 both ways, must stay within T; otherwise the loop falls back to lines
+  only, then to no simplification.
   Fitted arcs are cut into pieces of at most 90 degrees, since on the grid
   the centre of a longer arc with close ends, such as most of a circle, moves
   far with the rounding of its ends; a piece that bulges less than T/4 is a
@@ -356,7 +357,8 @@ design.
   from. `data-source-loop` is the index of the loop in the layer as the export
   walks the perimeters, for a later import to find it exactly.
 - **Candidates and paint.** Candidates are the vertices of the published path
-  with the largest turns, K of them, numbered along the path; the angle is on
+  with the largest turns, K of them, numbered along the path; a turn below 5
+  degrees is no corner, as joints of arcs keep a few degrees from the grid; the angle is on
   the side of the material, which lies left of the path for both kinds. Paint
   runs move to the published path by projecting their ends, and each piece
   takes the paint of the source point nearest to its middle: 0.01 mm is the

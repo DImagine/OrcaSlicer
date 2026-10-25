@@ -655,8 +655,8 @@ std::vector<Candidate> candidates(const Published &path, int count)
         c.turn   = turn;
         c.angle  = int(std::lround(180. - turn * 180. / PI));
         c.convex = turn > 0.;
-        // A vertex where the path runs straight on is no corner.
-        if (c.angle != 180)
+        // Below 5 degrees a turn is no corner: joints of arcs keep a few degrees from the grid.
+        if (std::abs(turn) >= 5. * PI / 180.)
             all.push_back(c);
     }
     std::stable_sort(all.begin(), all.end(), [](const Candidate &a, const Candidate &b) {
