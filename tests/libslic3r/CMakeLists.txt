@@ -16,6 +16,8 @@ add_executable(${_TEST_NAME}_tests
     test_seam_contour.cpp
     # Layer rules language: parsing and layer selection without a Print.
     test_precise_seam_rules.cpp
+    # seamdump: loops to SVG for an external seam choice, without a Print.
+    test_seamdump.cpp
     test_aabbindirect.cpp
     test_appconfig.cpp
     test_arachne_walls.cpp
