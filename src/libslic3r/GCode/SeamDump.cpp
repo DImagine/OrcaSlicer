@@ -327,18 +327,34 @@ std::optional<Published> publish(const CanonicalLoop &loop, Simplification mode,
     };
     for (PathFittingData &part : fitting) {
         if (part.is_arc_move() && part.arc_data.is_valid()) {
-            Segment s;
-            s.a     = grid(closed[part.start_point_index]);
-            s.b     = grid(closed[part.end_point_index]);
-            s.arc   = true;
-            s.r     = to_hundredths(unscale<double>(part.arc_data.radius));
-            s.ccw   = part.arc_data.direction == ArcDirection::Arc_Dir_CCW;
-            s.large = std::abs(part.arc_data.angle_radians) > PI;
-            // An arc whose ends meet on the grid, or whose radius SVG would enlarge, becomes a line.
-            if (s.a != s.b && derive_arc(s))
-                segments.push_back(s);
-            else
-                add_line(s.a, s.b);
+            // The fitted arc is cut into pieces of at most 90 degrees: on the grid, the center of a longer arc
+            // with close ends, such as most of a circle, moves far with the rounding of its ends.
+            const Vec2d  center = unscale(part.arc_data.center);
+            const double r      = unscale<double>(part.arc_data.radius);
+            const double angle  = std::abs(part.arc_data.angle_radians);
+            const bool   ccw    = part.arc_data.direction == ArcDirection::Arc_Dir_CCW;
+            const Vec2d  start  = unscale(closed[part.start_point_index]) - center;
+            const size_t pieces = std::max<size_t>(1, size_t(std::ceil(angle / (PI / 2.) - 1e-9)));
+            const double piece  = angle / double(pieces);
+            Vec2i64      from   = grid(closed[part.start_point_index]);
+            for (size_t k = 1; k <= pieces; ++k) {
+                const double turn = (ccw ? 1. : -1.) * piece * double(k);
+                const Vec2d  at   = center + Vec2d(start.x() * std::cos(turn) - start.y() * std::sin(turn), start.x() * std::sin(turn) + start.y() * std::cos(turn));
+                const Vec2i64 to  = k == pieces ? grid(closed[part.end_point_index]) : Vec2i64(to_hundredths(at.x()), to_hundredths(at.y()));
+                Segment s;
+                s.a   = from;
+                s.b   = to;
+                s.arc = true;
+                s.r   = to_hundredths(r);
+                s.ccw = ccw;
+                // A piece that bulges less than a quarter of T from its chord is a line. So is one whose ends meet
+                // on the grid, or whose radius SVG would enlarge.
+                if (r * (1. - std::cos(piece / 2.)) > tolerance / 4. && s.a != s.b && derive_arc(s))
+                    segments.push_back(s);
+                else
+                    add_line(s.a, s.b);
+                from = to;
+            }
         } else
             for (size_t i = part.start_point_index; i < part.end_point_index; ++i)
                 add_line(grid(closed[i]), grid(closed[i + 1]));
