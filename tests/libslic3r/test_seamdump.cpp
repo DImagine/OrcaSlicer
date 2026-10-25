@@ -222,7 +222,7 @@ TEST_CASE("Object file names are portable and numbered when equal", "[PreciseSea
     // Equal names, also without letter case, are all numbered in list order.
     CHECK(seamdump_object_names({"Part", "Box", "part", "Part"}) == std::vector<std::string>{"Part (1)", "Box", "part (2)", "Part (3)"});
     // Forbidden characters, trailing dots and spaces, reserved and empty names.
-    CHECK(seamdump_object_names({"A/B", "A\B"}) == std::vector<std::string>{"A_B (1)", "A_B (2)"});
+    CHECK(seamdump_object_names({"A/B", "A\\B"}) == std::vector<std::string>{"A_B (1)", "A_B (2)"});
     CHECK(seamdump_object_names({"x. ", "CON", "", "a:b?"}) == std::vector<std::string>{"x", "_CON", "_", "a_b_"});
     // A name already taken by another object gets the next free number.
     CHECK(seamdump_object_names({"Name", "Name (1)", "Name"}) == std::vector<std::string>{"Name (1)", "Name (1) (1)", "Name (2)"});

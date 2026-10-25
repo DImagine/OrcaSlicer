@@ -336,7 +336,8 @@ design.
   contour does not cross the layer.
 - **Geometry.** Each loop is made canonical first: outer counterclockwise,
   holes clockwise, starting at its lexicographically smallest rotation. RDP
-  and `ArcFitter` with T/2 simplify it, the result is put on the grid, and the
+  and `ArcFitter` with T/2 simplify it, after RDP with T/8 has thinned the
+  points: `ArcFitter` takes three close points of a curve as straight, the result is put on the grid, and the
   Hausdorff distance to the source, sampled at T/4 both ways, must stay within
   T; otherwise the loop falls back to lines only, then to no simplification.
   Fitted arcs are cut into pieces of at most 90 degrees, since on the grid

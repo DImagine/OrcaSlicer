@@ -311,8 +311,12 @@ std::optional<Published> publish(const CanonicalLoop &loop, Simplification mode,
     Points closed = loop.points;
     closed.push_back(loop.points.front());
     std::vector<PathFittingData> fitting;
-    if (mode == Simplification::Arcs)
+    if (mode == Simplification::Arcs) {
+        // ArcFitter takes three points closer to a line than 0.0001 mm2 as straight, which dense points of a
+        // curve always are: they are thinned first with T/8, as the G-code export fits arcs to simplified paths.
+        closed = MultiPoint::_douglas_peucker(closed, scale_(tolerance / 8.));
         ArcFitter::do_arc_fitting_and_simplify(closed, fitting, scale_(tolerance / 2.));
+    }
     else {
         if (mode == Simplification::Lines)
             closed = MultiPoint::_douglas_peucker(closed, scale_(tolerance / 2.));
