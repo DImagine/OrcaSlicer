@@ -7601,8 +7601,10 @@ struct Plater::priv
     void on_slicing_update(SlicingStatusEvent&);
     void on_slicing_completed(wxCommandEvent&);
     void on_process_completed(SlicingProcessCompletedEvent&);
-    // Precise Seam seamdump: writes the files of the plate's last finished export into the project folder.
-    void write_seamdump(int plate_index);
+    // Precise Seam seamdump: writes the files of these plates' last finished exports into the project folder.
+    void write_seamdumps(const std::vector<int> &plates);
+    // The plate's seamdump if its export is finished and still asks what the model asks now.
+    std::shared_ptr<const PreciseSeam::SeamdumpJob> current_seamdump(int plate_index);
     void on_export_began(wxCommandEvent&);
     void on_export_finished(wxCommandEvent&);
     void on_slicing_began();
@@ -13448,7 +13450,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
 
     // The export of this plate has just made its seamdump, if any.
     if (evt.success() && this->printer_technology == ptFFF && !this->background_process.empty())
-        this->write_seamdump(this->background_process.get_current_plate()->get_index());
+        this->write_seamdumps({this->background_process.get_current_plate()->get_index()});
 
     //BBS: update the action button according to the current plate's status
     bool ready_to_slice = !this->partplate_list.get_curr_plate()->is_slice_result_valid();
@@ -14392,30 +14394,84 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
     return bboxdata;
 }
 
-void Plater::priv::write_seamdump(int plate_index)
+std::shared_ptr<const PreciseSeam::SeamdumpJob> Plater::priv::current_seamdump(int plate_index)
 {
     PartPlate *plate = partplate_list.get_plate(plate_index);
     if (plate == nullptr || plate->fff_print() == nullptr)
-        return;
+        return nullptr;
     const Print &print = *plate->fff_print();
     // Only a finished export: the job of a print invalidated since then is stale.
     if (!print.is_step_done(psGCodeExport))
-        return;
-    const std::shared_ptr<const PreciseSeam::SeamdumpJob> job = print.seamdump_job();
+        return nullptr;
+    std::shared_ptr<const PreciseSeam::SeamdumpJob> job = print.seamdump_job();
     if (!job)
-        return;
-    if (m_project_folder.empty() || m_project_name.empty()) {
+        return nullptr;
+    // An edit of the rules may not have reached the print yet, e.g. right before a save: the job counts only
+    // while the model objects of the plate ask the same, in the order of the object list.
+    std::vector<const ModelObject *> objects;
+    for (const ModelObject *object : model.objects)
+        for (const PrintObject *print_object : print.objects())
+            if (print_object->model_object()->id() == object->id()) {
+                objects.push_back(object);
+                break;
+            }
+    const std::optional<PreciseSeam::SeamdumpRequest> request = PreciseSeam::seamdump_request(objects);
+    return request && *request == job->request ? job : nullptr;
+}
+
+void Plater::priv::write_seamdumps(const std::vector<int> &plates)
+{
+    // Targets of every plate whose seamdump is current, so that a name two plates share is found before any
+    // write; only the given plates are written.
+    struct Target {
+        int                                             plate;
+        boost::filesystem::path                         path;
+        std::shared_ptr<const PreciseSeam::SeamdumpJob> job;
+        size_t                                          file;
+    };
+    std::vector<Target> targets;
+    bool                needs_folder = false;
+    for (int plate = 0; plate < partplate_list.get_plate_count(); ++plate) {
+        const std::shared_ptr<const PreciseSeam::SeamdumpJob> job = current_seamdump(plate);
+        if (!job)
+            continue;
+        if (m_project_folder.empty() || m_project_name.empty()) {
+            needs_folder = needs_folder || std::find(plates.begin(), plates.end(), plate) != plates.end();
+            continue;
+        }
+        // Default names of several plates differ as their G-code names do.
+        std::string project = into_u8(m_project_name);
+        if (partplate_list.get_plate_count() > 1)
+            project += "_plate_" + std::to_string(plate + 1);
+        const std::vector<std::string> names = PreciseSeam::seamdump_file_names(*job, project);
+        for (size_t i = 0; i < names.size(); ++i)
+            targets.push_back({plate, m_project_folder / names[i], job, i});
+    }
+    if (needs_folder)
         notification_manager->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
                                                 // TRN: Precise Seam seamdump. Do not translate "seamdump".
                                                 _u8L("Precise Seam: seamdump writes into the project folder; save the project to write it."));
-        return;
+    std::map<std::string, size_t> uses;
+    for (const Target &target : targets)
+        ++uses[PreciseSeam::seamdump_fold(target.path.string())];
+    std::set<std::string> reported;
+    for (const Target &target : targets) {
+        if (std::find(plates.begin(), plates.end(), target.plate) == plates.end())
+            continue;
+        const std::string key = PreciseSeam::seamdump_fold(target.path.string());
+        // A file that two plates ask for is written by neither: which one it holds would depend on the order.
+        if (uses[key] > 1) {
+            if (reported.insert(key).second)
+                notification_manager->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+                    // TRN: Precise Seam seamdump. %1% is a file path. Do not translate "seamdump".
+                    (boost::format(_u8L("Precise Seam: seamdumps of several plates ask for \"%1%\", so none was written.")) % target.path.string()).str());
+            continue;
+        }
+        if (!PreciseSeam::write_seamdump_file(target.path, target.job->files[target.file].svg))
+            notification_manager->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+                // TRN: Precise Seam seamdump. %1% is a file path. Do not translate "seamdump".
+                (boost::format(_u8L("Precise Seam: seamdump could not write \"%1%\".")) % target.path.string()).str());
     }
-    // Default names of several plates differ as their G-code names do.
-    std::string project = into_u8(m_project_name);
-    if (partplate_list.get_plate_count() > 1)
-        project += "_plate_" + std::to_string(plate_index + 1);
-    for (const std::string &error : PreciseSeam::write_seamdump_files(*job, m_project_folder, project))
-        notification_manager->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel, error);
 }
 
 wxString Plater::priv::get_project_filename(const wxString& extension) const
@@ -16383,9 +16439,11 @@ int Plater::save_project(bool saveAs)
     p->set_project_filename(filename);
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << __LINE__ << " call set_project_filename: " << filename;
     // The project folder is known now, or has changed: seamdumps of finished exports go there without slicing.
-    if (p->printer_technology == ptFFF)
-        for (int plate = 0; plate < p->partplate_list.get_plate_count(); ++plate)
-            p->write_seamdump(plate);
+    if (p->printer_technology == ptFFF) {
+        std::vector<int> plates(p->partplate_list.get_plate_count());
+        std::iota(plates.begin(), plates.end(), 0);
+        p->write_seamdumps(plates);
+    }
 
     up_to_date(true, false);
     up_to_date(true, true);

@@ -79,7 +79,7 @@ struct SeamdumpRequest {
 };
 
 // Whether the name is a valid file name on every platform: not empty, no path, no character that Windows
-// forbids, no trailing dot or space, no reserved device name such as CON or COM1, also with an extension.
+// forbids, no "..", no trailing dot or space, no reserved device name such as CON or COM1, also with an extension.
 bool portable_file_name(std::string_view name);
 
 // Name blocks are numbered from 1 in name order; the field always comes after them.

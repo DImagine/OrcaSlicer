@@ -955,7 +955,8 @@ TEST_CASE("A broken seamdump is invalid as a whole", "[PreciseSeam][Rules][Seamd
           "seamdump k4.0", "seamdump k-1", "seamdump limit", "seamdump limit18446744073709552", "seamdump x5", "seamdump t0.1t0.1",
           "seamdump each each", "seamdump k4k4", "seamdump \"a\" k4", "seamdump \"a\" \"b\"", "seamdump \"\"", "seamdump \"a/b\"",
           "seamdump \"a\\\\b\"", "seamdump \"c:x\"", "seamdump \"..\"", "seamdump \"a.\"", "seamdump \"a \"", "seamdump \"CON\"",
-          "seamdump \"con.svg\"", "seamdump \"Com1.txt\"", "seamdump \"a\tb\"", "seamdumpx", "seamdumps", "seamdump \"unclosed"}) {
+          "seamdump \"con.svg\"", "seamdump \"Com1.txt\"", "seamdump \"CON .svg\"", "seamdump \"a..b\"", "seamdump \"a\tb\"", "seamdumpx",
+          "seamdumps", "seamdump \"unclosed"}) {
         CAPTURE(text);
         const LayerRules rules = field(text + ",5");
         CHECK_FALSE(rules.seamdump.has_value());
@@ -968,6 +969,7 @@ TEST_CASE("A broken seamdump is invalid as a whole", "[PreciseSeam][Rules][Seamd
     CHECK(field("seamdump \"console\"").seamdump.has_value());
     CHECK(field("seamdump \"com10\"").seamdump.has_value());
     CHECK(field("seamdump \"lpt0\"").seamdump.has_value());
+    CHECK(field("seamdump \"c o n\"").seamdump.has_value());
     // A prefixed mode is no seamdump.
     for (const std::string text : {"inclseamdump", "exclseamdump t0.2"}) {
         CAPTURE(text);

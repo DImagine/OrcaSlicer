@@ -9,6 +9,7 @@
 #include <boost/nowide/fstream.hpp>
 #include <cmath>
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -57,7 +58,7 @@ DumpObject object(std::vector<DumpLayer> layers)
 std::string dump(const std::vector<DumpObject> &objects, const DumpSettings &settings = {})
 {
     const DumpResult result = write_seamdump(objects, settings);
-    REQUIRE(result.error.empty());
+    REQUIRE_FALSE(result.svg.empty());
     return result.svg;
 }
 
@@ -207,13 +208,63 @@ TEST_CASE("Above the size limit the file is built again coarser, or not at all",
     DumpSettings                  enough;
     enough.limit = full.size();
     const DumpResult fits = write_seamdump(objects, enough);
-    CHECK(fits.error.empty());
+    CHECK_FALSE(fits.svg.empty());
     CHECK(fits.tolerance == 0.1);
     DumpSettings tight;
     tight.limit = 100;
     const DumpResult none = write_seamdump(objects, tight);
     CHECK(none.svg.empty());
-    CHECK_FALSE(none.error.empty());
+    CHECK(none.size > 100);
+    // A cancel stops the work.
+    DumpSettings cancelled;
+    cancelled.throw_if_canceled = [] { throw std::runtime_error("cancelled"); };
+    CHECK_THROWS(write_seamdump(objects, cancelled));
+}
+
+TEST_CASE("Loops that touch themselves or each other are left out", "[PreciseSeam][Seamdump]")
+{
+    // Two squares meeting in one point, as one loop.
+    const Polygon eight = polygon({{0, 0}, {2, 0}, {2, 2}, {0, 2}, {0, 0}, {-2, 0}, {-2, -2}, {0, -2}});
+    const std::string svg = dump({object({layer(1, {{eight}, {rectangle(10, 0, 12, 2)}})})});
+    CHECK(attribute(svg, "", "data-dropped") == "1");
+    CHECK(attribute(svg, "", "data-dropped-loops") == "O1-Z1-S0:topology");
+    CHECK(attribute(svg, "O1-Z1-L2", "data-source-loop") == "1");
+    // Two loops along one side.
+    const std::string side = dump({object({layer(1, {{rectangle(0, 0, 5, 5)}, {rectangle(5, 0, 10, 5)}, {rectangle(20, 0, 22, 2)}})})});
+    CHECK(attribute(side, "", "data-dropped") == "2");
+    // A hole that the rounding would move out of its outer loop: here it touches, and both go.
+    const std::string near = dump({object({layer(1, {{rectangle(0, 0, 10, 10)}, {rectangle(0.001, 2, 3, 3), true}})})});
+    CHECK(attribute(near, "", "data-dropped") != "0");
+}
+
+TEST_CASE("Corners turn at least 5 degrees", "[PreciseSeam][Seamdump]")
+{
+    // A bottom edge bent at its middle by about 4.6 or 6.9 degrees.
+    const std::string slight = dump({object({layer(1, {{polygon({{0, 0}, {5, -0.2}, {10, 0}, {10, 10}, {0, 10}})}})})});
+    CHECK(attribute(slight, "O1-Z1-L1", "data-c").find("5,-0.2,") == std::string::npos);
+    const std::string clear = dump({object({layer(1, {{polygon({{0, 0}, {5, -0.3}, {10, 0}, {10, 10}, {0, 10}})}})})});
+    CHECK(attribute(clear, "O1-Z1-L1", "data-c").find("5,-0.3,") != std::string::npos);
+}
+
+TEST_CASE("Paint that ends at M marks the candidate there", "[PreciseSeam][Seamdump]")
+{
+    DumpLoop square{rectangle(0, 0, 10, 10)};
+    square.paint = {{38., 40., false}};
+    const std::string svg = dump({object({layer(1, {square})})});
+    CHECK(attribute(svg, "O1-Z1-L1", "data-paint") == "enforce:38-40");
+    CHECK(attribute(svg, "O1-Z1-L1", "data-c").rfind("0,0,90,1,e;", 0) == 0);
+}
+
+TEST_CASE("The fingerprint records the paint source and the reach", "[PreciseSeam][Seamdump]")
+{
+    const DumpLoop square{rectangle(0, 0, 10, 10)};
+    const std::string base = attribute(dump({object({layer(1, {square})})}), "", "data-fingerprint");
+    DumpObject painted     = object({layer(1, {square})});
+    painted.paint_source   = "facets";
+    CHECK(attribute(dump({painted}), "", "data-fingerprint") != base);
+    DumpObject reach = object({layer(1, {square})});
+    reach.layers.front().loops.front().reach = 0.2;
+    CHECK(attribute(dump({reach}), "", "data-fingerprint") != base);
 }
 
 TEST_CASE("Object file names are portable and numbered when equal", "[PreciseSeam][Seamdump]")
@@ -226,9 +277,29 @@ TEST_CASE("Object file names are portable and numbered when equal", "[PreciseSea
     CHECK(seamdump_object_names({"x. ", "CON", "", "a:b?"}) == std::vector<std::string>{"x", "_CON", "_", "a_b_"});
     // A name already taken by another object gets the next free number.
     CHECK(seamdump_object_names({"Name", "Name (1)", "Name"}) == std::vector<std::string>{"Name (1)", "Name (1) (1)", "Name (2)"});
+    // Letter case beyond ASCII counts as file systems without case see it.
+    CHECK(seamdump_fold("\xD0\x94\xD0\xB5\xD1\x82\xD0\xB0\xD0\xBB\xD1\x8C") == "\xD0\xB4\xD0\xB5\xD1\x82\xD0\xB0\xD0\xBB\xD1\x8C");
+    CHECK(seamdump_object_names({"\xD0\x94\xD0\xB5\xD1\x82\xD0\xB0\xD0\xBB\xD1\x8C", "\xD0\xB4\xD0\xB5\xD1\x82\xD0\xB0\xD0\xBB\xD1\x8C"}) ==
+          std::vector<std::string>{"\xD0\x94\xD0\xB5\xD1\x82\xD0\xB0\xD0\xBB\xD1\x8C (1)", "\xD0\xB4\xD0\xB5\xD1\x82\xD0\xB0\xD0\xBB\xD1\x8C (2)"});
 }
 
-TEST_CASE("seamdump files replace the old ones under their names", "[PreciseSeam][Seamdump]")
+TEST_CASE("seamdump file names follow the request and the project", "[PreciseSeam][Seamdump]")
+{
+    SeamdumpJob plate;
+    plate.files.push_back({{}, "<svg/>"});
+    CHECK(seamdump_file_names(plate, "Project") == std::vector<std::string>{"Project.seamdump.svg"});
+    plate.request.file = "Boat, v2.svg";
+    CHECK(seamdump_file_names(plate, "Project") == std::vector<std::string>{"Boat, v2.svg"});
+    SeamdumpJob each;
+    each.request.each = true;
+    each.request.file = "boat.SVG";
+    each.files        = {{"Hull (1)", "1"}, {"Cabin", "2"}};
+    CHECK(seamdump_file_names(each, "Project") == std::vector<std::string>{"boat-Hull (1).svg", "boat-Cabin.svg"});
+    each.request.file.reset();
+    CHECK(seamdump_file_names(each, "Project") == std::vector<std::string>{"Project.seamdump-Hull (1).svg", "Project.seamdump-Cabin.svg"});
+}
+
+TEST_CASE("A seamdump file replaces the old one only when complete", "[PreciseSeam][Seamdump]")
 {
     const boost::filesystem::path folder = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("seamdump-%%%%-%%%%");
     boost::filesystem::create_directories(folder);
@@ -236,28 +307,16 @@ TEST_CASE("seamdump files replace the old ones under their names", "[PreciseSeam
         boost::nowide::ifstream in((folder / name).string(), std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     };
-    SeamdumpJob plate;
-    plate.files.push_back({{}, "<svg/>"});
-    CHECK(write_seamdump_files(plate, folder, "Project").empty());
-    CHECK(read("Project.seamdump.svg") == "<svg/>");
-    plate.request.file  = "Boat, v2.svg";
-    plate.files.front() = {{}, "<svg>2</svg>"};
-    CHECK(write_seamdump_files(plate, folder, "Project").empty());
+    const boost::filesystem::path target = folder / "Boat, v2.svg";
+    CHECK(write_seamdump_file(target, "<svg/>"));
+    CHECK(read("Boat, v2.svg") == "<svg/>");
+    // The same file again: replaced.
+    CHECK(write_seamdump_file(target, "<svg>2</svg>"));
     CHECK(read("Boat, v2.svg") == "<svg>2</svg>");
-    // The old file under the default name stays.
-    CHECK(read("Project.seamdump.svg") == "<svg/>");
-    SeamdumpJob each;
-    each.request.each = true;
-    each.request.file = "boat.SVG";
-    each.files        = {{"Hull", "1"}, {"Cabin", "2"}, {"Hull", "3"}};
-    CHECK(write_seamdump_files(each, folder, "Project").empty());
-    CHECK(read("boat-Hull (1).svg") == "1");
-    CHECK(read("boat-Cabin.svg") == "2");
-    CHECK(read("boat-Hull (2).svg") == "3");
-    // No temporary file is left.
+    // A write that cannot happen leaves the old file and no temporary one.
+    CHECK_FALSE(write_seamdump_file(folder / "missing" / "Boat, v2.svg", "<svg>3</svg>"));
+    CHECK(read("Boat, v2.svg") == "<svg>2</svg>");
     for (const auto &entry : boost::filesystem::directory_iterator(folder))
         CHECK(entry.path().extension() != ".tmp");
-    // A missing folder fails each file.
-    CHECK(write_seamdump_files(plate, folder / "missing", "Project").size() == 1);
     boost::filesystem::remove_all(folder);
 }

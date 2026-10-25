@@ -237,6 +237,8 @@ void Print::clear()
 	std::scoped_lock<std::mutex> lock(this->state_mutex());
     // The following call should stop background processing if it is running.
     this->invalidate_all_steps();
+    // A seamdump belongs to the export of the data cleared here.
+    this->set_seamdump_job(nullptr);
 	for (PrintObject *object : m_objects)
 		delete object;
 	m_objects.clear();
@@ -5677,6 +5679,8 @@ std::string Print::get_plate_number_formatted() const
 //BBS: add gcode file preload logic
 void Print::set_gcode_file_ready()
 {
+    // A G-code file made elsewhere has no seamdump of this print.
+    this->set_seamdump_job(nullptr);
     this->set_started(psGCodeExport);
 	this->set_done(psGCodeExport);
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ <<  boost::format(": done");

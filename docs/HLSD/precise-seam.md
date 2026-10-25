@@ -338,18 +338,22 @@ design.
   holes clockwise, starting at its lexicographically smallest rotation. RDP
   with T/8 thins its points first, since `ArcFitter` takes three close points
   of a curve as straight; then RDP and `ArcFitter` with T/2 simplify it. The
-  result is put on the grid, and the Hausdorff distance to the source, sampled
-  at T/4 both ways, must stay within T; otherwise the loop falls back to lines
-  only, then to no simplification.
+  result is put on the grid, and the Hausdorff distance to the source must
+  stay within T both ways. It is proved, not sampled: distance is 1-Lipschitz
+  along an edge, so its ends bound it there, and an edge is halved until the
+  bound holds; the polygonized arcs keep room for their chord error. Otherwise
+  the loop falls back to lines only, then to no simplification.
   Fitted arcs are cut into pieces of at most 90 degrees, since on the grid
   the centre of a longer arc with close ends, such as most of a circle, moves
   far with the rounding of its ends; a piece that bulges less than T/4 is a
   line. `d` is the only definition of a path: arc centres are derived from its
   rounded ends, radius and flags as an SVG reader does, an arc whose radius
   SVG would enlarge becomes a line, and `data-arcs` only repeats the centres.
-  Published loops of a layer must not cross and holes must stay inside their
-  outer loop; loops that break this fall back the same way and are dropped,
-  with a reason, only without simplification.
+  Published loops of a layer must keep apart: no two edges closer than 1 um,
+  but neighbours of one loop at their shared end, so a loop touching itself,
+  another loop or running along it is caught; and every pair of loops must
+  nest as in the source. Loops that break this fall back the same way and are
+  dropped, with a reason, only without simplification.
 - **Numbers.** `L<n>` is unique within an object across kinds. A loop keeps
   the number of the only loop of its kind it overlaps on the layer below, by
   area of the regions, when that one overlaps no other; every other loop gets
@@ -370,10 +374,16 @@ design.
   the file is built again with 2T, 4T and half of K; then it is not written.
 - **Writing.** The export stores the files in the `Print`; the GUI writes them
   after a successful slice and after the project is saved, so a new folder
-  needs no slicing, and editing only the field re-runs the export alone. Each
+  needs no slicing, and editing only the field re-runs the export alone. A job
+  counts only while its export is done and the plate's model objects still ask
+  for the same request, which an edit not yet applied to the print, right
+  before a save, would change; clearing the print or loading a ready G-code
+  drops it. The targets of all plates are gathered first, and a file that two
+  plates ask for, compared without letter case, is written by neither. Each
   file goes through a temporary one that then replaces it. Without a saved
   project nothing is written and a notification says so; files of an older
-  name or a removed request stay.
+  name or a removed request stay. The fingerprint also takes a digest of the
+  painted facets and the reach of every loop.
 
 ## Data flow
 

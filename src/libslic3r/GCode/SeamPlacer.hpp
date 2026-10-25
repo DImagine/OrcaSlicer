@@ -215,9 +215,12 @@ public:
   // seam placer bounds its painted ranges; without such ends, a loop wholly green is green, and otherwise the
   // points of the loop within `reach` of paint, sampled, make the runs.
   std::vector<PreciseSeam::DumpPaintRun> runs(const Polygon &loop, double z, double reach) const;
+  // SHA-256 of the painted facets in object coordinates, which their transformations moved there.
+  const std::string &digest() const { return m_digest; }
 
 private:
   std::unique_ptr<SeamPlacerImpl::GlobalModelInfo> m_info;
+  std::string m_digest;
 };
 
 } // namespace Slic3r

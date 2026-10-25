@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -13,11 +14,11 @@
 #include <utility>
 #include <vector>
 #include <openssl/sha.h>
+#include "libslic3r/AABBTreeIndirect.hpp"
 #include "libslic3r/AABBTreeLines.hpp"
 #include "libslic3r/ArcFitter.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
-#include "libslic3r/IntersectionPoints.hpp"
 #include "libslic3r/Line.hpp"
 #include "libslic3r/MultiPoint.hpp"
 #include "libslic3r/Point.hpp"
@@ -30,7 +31,9 @@ namespace PreciseSeam {
 namespace {
 
 constexpr int    format_version = 1;
-constexpr double tiny           = 1e-9; // mm; lengths below it are none.
+constexpr double tiny           = 1e-9;   // mm; lengths below it are none.
+constexpr double chord_error    = 0.0005; // mm; polygonized arcs leave them by at most this.
+constexpr double contact        = 0.001;  // mm; loops closer than this touch, above twice the chord error.
 
 int64_t to_hundredths(double mm) { return int64_t(std::llround(mm * 100.)); }
 double  from_hundredths(int64_t h) { return double(h) / 100.; }
@@ -48,12 +51,18 @@ std::string hex(const unsigned char *bytes, size_t size)
     return out;
 }
 
-std::string sha256(const std::string &data)
+} // namespace
+
+std::string seamdump_sha256(const std::string &data)
 {
     unsigned char digest[SHA256_DIGEST_LENGTH];
     SHA256(reinterpret_cast<const unsigned char *>(data.data()), data.size(), digest);
     return hex(digest, sizeof(digest));
 }
+
+namespace {
+
+std::string sha256(const std::string &data) { return seamdump_sha256(data); }
 
 std::string xml_escape(const std::string &text)
 {
@@ -285,7 +294,7 @@ struct Published {
         }
         return at;
     }
-    // The path as a polygon in mm: arcs split so that no chord leaves them by more than 0.5 um.
+    // The path as a polygon in mm: arcs split so that no chord leaves them by more than chord_error.
     std::vector<Vec2d> polygonize() const
     {
         std::vector<Vec2d> out;
@@ -293,7 +302,7 @@ struct Published {
             out.push_back(seg.start());
             if (seg.arc) {
                 const double r    = from_hundredths(seg.r);
-                const double step = 2. * std::acos(std::max(0., 1. - 0.0005 / r));
+                const double step = 2. * std::acos(std::max(0., 1. - chord_error / r));
                 const size_t n    = std::max<size_t>(2, size_t(std::ceil(seg.angle / std::max(step, 1e-3))));
                 for (size_t k = 1; k < n; ++k)
                     out.push_back(seg.point_at(seg.length() * double(k) / double(n)));
@@ -398,35 +407,67 @@ std::vector<Linef> closed_lines(const std::vector<Vec2d> &polygon)
     return lines;
 }
 
-// Points along a closed polygon, at most `step` apart, its vertices included.
-std::vector<Vec2d> sample(const std::vector<Vec2d> &polygon, double step)
+// Whether every point of the edges of `polygon` lies within `limit` of `to`. Distance is 1-Lipschitz along an
+// edge, so with d0 and d1 at its ends it stays below (d0 + d1 + length) / 2 on it; an edge where that bound is
+// too large is halved until it proves the limit, or a point beyond it is found.
+bool within(const std::vector<Vec2d> &polygon, const AABBTreeLines::LinesDistancer<Linef> &to, double limit)
 {
-    std::vector<Vec2d> out;
-    for (size_t i = 0; i < polygon.size(); ++i) {
-        const Vec2d &a = polygon[i], &b = polygon[(i + 1) % polygon.size()];
-        const size_t n = std::max<size_t>(1, size_t(std::ceil((b - a).norm() / step)));
-        for (size_t k = 0; k < n; ++k)
-            out.push_back(a + (b - a) * (double(k) / double(n)));
+    struct Piece {
+        Vec2d  a, b;
+        double da, db;
+        int    depth;
+    };
+    std::vector<Piece> stack;
+    const auto distance = [&to](const Vec2d &p) { return to.distance_from_lines<false>(p); };
+    std::vector<double> at(polygon.size());
+    for (size_t i = 0; i < polygon.size(); ++i)
+        at[i] = distance(polygon[i]);
+    for (size_t i = 0; i < polygon.size(); ++i)
+        stack.push_back({polygon[i], polygon[(i + 1) % polygon.size()], at[i], at[(i + 1) % polygon.size()], 0});
+    while (!stack.empty()) {
+        const Piece p = stack.back();
+        stack.pop_back();
+        if (p.da > limit || p.db > limit)
+            return false;
+        if ((p.da + p.db + (p.b - p.a).norm()) / 2. <= limit)
+            continue;
+        // A bound that halving cannot settle lies at the limit itself: refuse it.
+        if (p.depth == 40)
+            return false;
+        const Vec2d  m  = (p.a + p.b) / 2.;
+        const double dm = distance(m);
+        stack.push_back({p.a, m, p.da, dm, p.depth + 1});
+        stack.push_back({m, p.b, dm, p.db, p.depth + 1});
     }
-    return out;
+    return true;
 }
 
-// Whether the published path keeps within T of the source loop both ways, sampled at T/4 on either side, and
-// keeps the orientation of the loop with an area.
+// Whether the published path keeps within T of the source loop both ways, and the orientation of the loop with
+// an area. Its polygonized form stands for it, so the bound leaves room for the chord error.
 bool within_tolerance(const CanonicalLoop &loop, const std::vector<Vec2d> &published, double tolerance)
 {
     const double area = signed_area(published);
     if (std::abs(area) <= tiny || (area > 0.) == loop.hole)
         return false;
     const AABBTreeLines::LinesDistancer<Linef> to_source(closed_lines(loop.mm)), to_published(closed_lines(published));
-    const double step = tolerance / 4.;
-    for (const Vec2d &p : sample(published, step))
-        if (to_source.distance_from_lines<false>(p) > tolerance)
-            return false;
-    for (const Vec2d &p : sample(loop.mm, step))
-        if (to_published.distance_from_lines<false>(p) > tolerance)
-            return false;
-    return true;
+    const double limit = tolerance - chord_error;
+    return within(published, to_source, limit) && within(loop.mm, to_published, limit);
+}
+
+// Distance between two segments in mm, 0 where they cross.
+double segment_distance(const Vec2d &a0, const Vec2d &a1, const Vec2d &b0, const Vec2d &b1)
+{
+    const auto side = [](const Vec2d &o, const Vec2d &p, const Vec2d &q) { return cross2(p - o, q - o); };
+    const double s1 = side(a0, a1, b0), s2 = side(a0, a1, b1), s3 = side(b0, b1, a0), s4 = side(b0, b1, a1);
+    if (((s1 > 0.) != (s2 > 0.)) && ((s3 > 0.) != (s4 > 0.)) && s1 != 0. && s2 != 0. && s3 != 0. && s4 != 0.)
+        return 0.;
+    const auto to_segment = [](const Vec2d &p, const Vec2d &a, const Vec2d &b) {
+        const Vec2d  ab = b - a;
+        const double l2 = ab.squaredNorm();
+        const double t  = l2 > 0. ? std::clamp((p - a).dot(ab) / l2, 0., 1.) : 0.;
+        return (a + ab * t - p).norm();
+    };
+    return std::min({to_segment(a0, b0, b1), to_segment(a1, b0, b1), to_segment(b0, a0, a1), to_segment(b1, a0, a1)});
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -472,34 +513,57 @@ void publish_layer(BuiltLayer &layer, double tolerance)
         if (!l.path)
             layer.dropped.push_back("S" + std::to_string(l.loop.source) + ":tolerance");
     }
-    // Crossings and nesting: each loop involved falls back to milder simplification, until none is left.
+    // Contacts and nesting: each loop involved falls back to milder simplification, until none is left.
+    // Source nesting of every pair: whether the first point of loop i lies inside loop j.
+    std::vector<std::vector<bool>> inside(layer.loops.size(), std::vector<bool>(layer.loops.size(), false));
+    for (size_t i = 0; i < layer.loops.size(); ++i)
+        for (size_t j = 0; j < layer.loops.size(); ++j)
+            inside[i][j] = i != j && Polygon(layer.loops[j].loop.points).contains(layer.loops[i].loop.points.front());
     for (;;) {
         std::vector<bool> bad(layer.loops.size(), false);
-        Lines             lines;
-        std::vector<size_t> owner;
-        // A far, empty line between loops: the intersection search skips neighbouring lines.
-        const Point separator(std::numeric_limits<coord_t>::max() / 4, std::numeric_limits<coord_t>::max() / 4);
+        // Every edge of every published loop: edges closer than `contact` touch, but for neighbours of one loop
+        // at their shared end. So a loop that touches itself, another loop, or runs along it is caught.
+        std::vector<Linef>                  lines;
+        std::vector<std::pair<size_t, size_t>> owner; // Loop and edge index.
         for (size_t i = 0; i < layer.loops.size(); ++i) {
             const LayerLoop &l = layer.loops[i];
             if (!l.path)
                 continue;
             for (size_t k = 0; k < l.polygon.size(); ++k) {
-                lines.emplace_back(Point::new_scale(l.polygon[k]), Point::new_scale(l.polygon[(k + 1) % l.polygon.size()]));
-                owner.push_back(i);
+                lines.emplace_back(l.polygon[k], l.polygon[(k + 1) % l.polygon.size()]);
+                owner.emplace_back(i, k);
             }
-            lines.emplace_back(separator, separator);
-            owner.push_back(size_t(-1));
         }
-        for (const IntersectionLines &x : get_intersections(lines))
-            for (uint32_t li : {x.line_index1, x.line_index2})
-                if (owner[li] != size_t(-1))
-                    bad[owner[li]] = true;
-        for (size_t i = 0; i < layer.loops.size(); ++i) {
-            const LayerLoop &l = layer.loops[i];
-            if (l.path && l.parent && layer.loops[*l.parent].path &&
-                !scaled_polygon(layer.loops[*l.parent].polygon).contains(Point::new_scale(l.polygon.front())))
-                bad[i] = true;
+        if (!lines.empty()) {
+            const auto tree = AABBTreeLines::build_aabb_tree_over_indexed_lines(lines);
+            for (size_t e = 0; e < lines.size(); ++e) {
+                const Linef &line = lines[e];
+                Eigen::AlignedBox<double, 2> box(line.a.cwiseMin(line.b) - Vec2d(contact, contact), line.a.cwiseMax(line.b) + Vec2d(contact, contact));
+                AABBTreeIndirect::traverse(tree, AABBTreeIndirect::intersecting(box), [&](const auto &node) {
+                    const size_t o = node.idx;
+                    if (o <= e)
+                        return true;
+                    const auto [li, ki] = owner[e];
+                    const auto [lo, ko] = owner[o];
+                    const size_t n = layer.loops[li].polygon.size();
+                    if (li == lo && (ko == ki + 1 || (ki == 0 && ko == n - 1)))
+                        return true;
+                    if (segment_distance(line.a, line.b, lines[o].a, lines[o].b) <= contact)
+                        bad[li] = bad[lo] = true;
+                    return true;
+                });
+            }
         }
+        // The published loops must nest as the source ones do.
+        std::vector<Polygon> scaled(layer.loops.size());
+        for (size_t i = 0; i < layer.loops.size(); ++i)
+            if (layer.loops[i].path)
+                scaled[i] = scaled_polygon(layer.loops[i].polygon);
+        for (size_t i = 0; i < layer.loops.size(); ++i)
+            for (size_t j = 0; j < layer.loops.size(); ++j)
+                if (i != j && layer.loops[i].path && layer.loops[j].path &&
+                    scaled[j].contains(Point::new_scale(layer.loops[i].polygon.front())) != inside[i][j])
+                    bad[i] = true;
         bool changed = false;
         for (size_t i = 0; i < layer.loops.size(); ++i)
             if (bad[i]) {
@@ -617,14 +681,23 @@ void find_parents(BuiltLayer &layer)
     for (LayerLoop &l : layer.loops) {
         if (!l.loop.hole)
             continue;
+        // Islands nest, so several outer loops may contain a hole: the smallest one is its direct parent.
+        // Two of the same area leave it open.
         double best = std::numeric_limits<double>::max();
+        bool   tie  = false;
         for (size_t i = 0; i < layer.loops.size(); ++i) {
             const CanonicalLoop &outer = layer.loops[i].loop;
-            if (!outer.hole && outer.area < best && Polygon(outer.points).contains(l.loop.points.front())) {
+            if (outer.hole || !Polygon(outer.points).contains(l.loop.points.front()))
+                continue;
+            if (outer.area < best) {
                 best     = outer.area;
                 l.parent = i;
-            }
+                tie      = false;
+            } else if (outer.area == best)
+                tie = true;
         }
+        if (tie)
+            l.parent.reset();
     }
 }
 
@@ -769,9 +842,11 @@ LoopText loop_text(const std::string &object_id, size_t layer_number, const Laye
         if (!c.empty())
             c += ";";
         const int64_t s    = to_hundredths(cand.s);
+        const int64_t len  = to_hundredths(path.length());
         char          mark = 0;
+        // M is at 0 and at the length: an interval that ends at M covers it too.
         for (const PaintInterval &p : paint)
-            if (s >= p.a && s <= p.b && (mark != 'b'))
+            if (((s >= p.a && s <= p.b) || (s == 0 && len >= p.a && len <= p.b)) && mark != 'b')
                 mark = p.blocked ? 'b' : 'e';
         c += number(cand.at.x()) + "," + number(cand.at.y()) + "," + std::to_string(cand.angle) + "," + (cand.convex ? "1" : "0");
         if (mark)
@@ -816,20 +891,20 @@ LoopText loop_text(const std::string &object_id, size_t layer_number, const Laye
 }
 
 // Source records of the objects, unrounded, for the fingerprint: a later import compares them with its slicing.
-std::string fingerprint_text(const std::vector<DumpObject> &objects, const DumpSettings &settings)
+std::string fingerprint_text(const std::vector<DumpObject> &objects)
 {
     const auto nm = [](double mm) { return std::to_string(std::llround(mm * 1e6)); };
-    std::string text = "orca-seamdump-fingerprint " + std::to_string(format_version) + "\nreach " + nm(settings.reach) + "\n";
+    std::string text = "orca-seamdump-fingerprint " + std::to_string(format_version) + "\n";
     for (size_t o = 0; o < objects.size(); ++o) {
         const DumpObject &object = objects[o];
-        text += "object " + std::to_string(o + 1) + " " + object.name + "\n";
+        text += "object " + std::to_string(o + 1) + " " + object.name + "\npaint-source " + object.paint_source + "\n";
         for (const Vec2d &shift : object.instances)
             text += "instance " + nm(shift.x()) + " " + nm(shift.y()) + "\n";
         for (const DumpLayer &layer : object.layers) {
             text += "layer " + std::to_string(layer.number) + " " + nm(layer.slice_z) + " " + nm(layer.print_z) + " " + nm(layer.height) + "\n";
             for (size_t l = 0; l < layer.loops.size(); ++l) {
                 const DumpLoop &loop = layer.loops[l];
-                text += "loop " + std::to_string(l) + (loop.hole ? " hole" : " outer");
+                text += "loop " + std::to_string(l) + (loop.hole ? " hole" : " outer") + " reach " + nm(loop.reach);
                 for (const Point &p : loop.polygon.points)
                     text += " " + std::to_string(p.x()) + "," + std::to_string(p.y());
                 text += "\n";
@@ -848,14 +923,19 @@ struct Built {
     std::string dropped_list;
 };
 
-Built build(const std::vector<DumpObject> &objects, double tolerance, int count)
+Built build(const std::vector<DumpObject> &objects, double tolerance, int count, const std::function<void()> &throw_if_canceled)
 {
     Built out;
+    const auto check = [&throw_if_canceled]() {
+        if (throw_if_canceled)
+            throw_if_canceled();
+    };
     for (size_t o = 0; o < objects.size(); ++o) {
         const DumpObject &object    = objects[o];
         const std::string object_id = "O" + std::to_string(o + 1);
         std::vector<BuiltLayer> layers(object.layers.size());
         for (size_t li = 0; li < object.layers.size(); ++li) {
+            check();
             BuiltLayer &layer = layers[li];
             layer.source      = &object.layers[li];
             for (size_t s = 0; s < layer.source->loops.size(); ++s) {
@@ -973,7 +1053,7 @@ std::string seamdump_number(int64_t hundredths)
 
 DumpResult write_seamdump(const std::vector<DumpObject> &objects, const DumpSettings &settings)
 {
-    const std::string fingerprint = sha256(fingerprint_text(objects, settings));
+    const std::string fingerprint = sha256(fingerprint_text(objects));
     // Above the limit: 2T, 4T, then half of K once; K never grows.
     std::vector<std::pair<double, int>> steps{{settings.tolerance, settings.candidates}};
     if (settings.limit != 0) {
@@ -985,7 +1065,7 @@ DumpResult write_seamdump(const std::vector<DumpObject> &objects, const DumpSett
     DumpResult result;
     size_t     size = 0;
     for (const auto &[tolerance, count] : steps) {
-        const Built built = build(objects, tolerance, count);
+        const Built built = build(objects, tolerance, count, settings.throw_if_canceled);
         std::string svg   = assemble(built, fingerprint, tolerance, count);
         size              = svg.size();
         if (settings.limit == 0 || size <= settings.limit) {
@@ -996,7 +1076,7 @@ DumpResult write_seamdump(const std::vector<DumpObject> &objects, const DumpSett
             return result;
         }
     }
-    result.error = "seamdump: " + std::to_string(size) + " bytes, above the limit of " + std::to_string(settings.limit) + " bytes";
+    result.size = size;
     return result;
 }
 

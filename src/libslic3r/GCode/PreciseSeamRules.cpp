@@ -729,13 +729,18 @@ std::string relay_label_text(const RelayLabel &label)
 
 bool portable_file_name(std::string_view name)
 {
-    if (name.empty() || name.back() == '.' || name.back() == ' ')
+    // ".." anywhere, not only as the whole name: the rule is simpler than any exception.
+    if (name.empty() || name.back() == '.' || name.back() == ' ' || name.find("..") != std::string_view::npos)
         return false;
     for (char c : name)
         if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f || std::string_view("<>:\"/\\|?*").find(c) != std::string_view::npos)
             return false;
-    // Windows reserves these names whatever the extension: CON.svg is the console.
-    const std::string base = normalize(name.substr(0, name.find('.')));
+    // Windows reserves these names whatever the extension and trailing spaces: "CON .svg" is the console.
+    std::string base(name.substr(0, name.find('.')));
+    while (!base.empty() && base.back() == ' ')
+        base.pop_back();
+    for (char &c : base)
+        c = ascii_lower(c);
     if (base == "con" || base == "prn" || base == "aux" || base == "nul")
         return false;
     if (base.size() == 4 && (base.compare(0, 3, "com") == 0 || base.compare(0, 3, "lpt") == 0) && base[3] >= '1' && base[3] <= '9')

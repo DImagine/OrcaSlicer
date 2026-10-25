@@ -217,6 +217,7 @@ src/libslic3r/GCodeWriter.cpp
 src/libslic3r/GCode/ToolOrdering.cpp
 src/libslic3r/GCode/SeamPlacer.cpp
 src/libslic3r/GCode/PreciseSeamRulesApply.cpp
+src/libslic3r/GCode/SeamDumpPrint.cpp
 src/libslic3r/GCode/GCodeStatistics.cpp
 src/libslic3r/ExtrusionEntity.cpp
 src/libslic3r/Flow.cpp

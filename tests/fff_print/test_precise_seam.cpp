@@ -10,6 +10,7 @@
 #include "libslic3r/GCode/PreciseSeam.hpp"
 #include "libslic3r/GCode/PreciseSeamRules.hpp"
 #include "libslic3r/GCode/PreciseSeamRulesApply.hpp"
+#include "libslic3r/GCode/SeamDumpPrint.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 
@@ -2807,4 +2808,47 @@ TEST_CASE("model counts layers and heights from the model, so a raft does not mo
         CHECK(seam_on_front_helper(loops[i]) == expected);
     }
     CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("seamdump takes the final outer walls at the export and follows a change of the request alone", "[PreciseSeam][Rules][Seamdump]")
+{
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front");
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "seamdump t0.2 \"cube\"";
+    fixture.export_gcode();
+    const std::shared_ptr<const PreciseSeam::SeamdumpJob> job = fixture.print.seamdump_job();
+    REQUIRE(job);
+    CHECK(job->request.tolerance == 200000);
+    CHECK(job->request.file == "cube.svg");
+    REQUIRE(job->files.size() == 1);
+    const std::string &svg = job->files.front().svg;
+    CHECK(svg.find("data-tolerance=\"0.2\"") != std::string::npos);
+    // Ten layers of one square outer wall: the first is written, the others repeat it.
+    CHECK(svg.find("id=\"O1-Z1-L1\" data-source-loop=\"0\" data-kind=\"outer\"") != std::string::npos);
+    CHECK(svg.find("id=\"O1-Z10\" data-layer=\"10\"") != std::string::npos);
+    CHECK(svg.find("data-same=\"O1-Z") != std::string::npos);
+    CHECK(svg.find("data-kind=\"hole\"") == std::string::npos);
+    CHECK(fixture.warning().empty());
+    // The wall lies within the cube of 20 mm: its length is about four times 19.6 mm.
+    const size_t len = svg.find("data-len=\"");
+    REQUIRE(len != std::string::npos);
+    CHECK(std::abs(std::stod(svg.substr(len + 10)) - 78.4) < 0.5);
+
+    // Only the request changes: the perimeters stay, and the export builds the new file.
+    const Layer *first_layer = fixture.print.get_object(0)->get_layer(0);
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "seamdump t0.3 \"cube\"";
+    fixture.export_gcode();
+    CHECK(fixture.print.get_object(0)->get_layer(0) == first_layer);
+    REQUIRE(fixture.print.seamdump_job());
+    CHECK(fixture.print.seamdump_job()->request.tolerance == 300000);
+    CHECK(fixture.print.seamdump_job()->files.front().svg.find("data-tolerance=\"0.3\"") != std::string::npos);
+    // The request of the model is what the job holds.
+    CHECK(PreciseSeam::seamdump_request({fixture.model.objects.front()}) == fixture.print.seamdump_job()->request);
+
+    // Without a request there is no job; in a name block it is reported.
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules.clear();
+    fixture.model.objects.front()->volumes.back()->name = "front -^ps=seamdump=ps^-";
+    fixture.export_gcode();
+    CHECK_FALSE(fixture.print.seamdump_job());
+    CHECK(fixture.warning().find("only the rules field may hold seamdump") != std::string::npos);
 }

@@ -1643,6 +1643,14 @@ Vec3f place_on_loop(const std::vector<SeamCandidate> &points, size_t index, cons
 SeamPaint::SeamPaint(const PrintObject &object) : m_info(std::make_unique<SeamPlacerImpl::GlobalModelInfo>())
 {
   SeamPlacerImpl::gather_enforcers_blockers(*m_info, &object);
+  // The facets are already transformed, so their bytes stand for the paint and its transformations alike.
+  std::string bytes;
+  for (const indexed_triangle_set *set : {&m_info->enforcers, &m_info->blockers}) {
+    bytes += "set " + std::to_string(set->vertices.size()) + " " + std::to_string(set->indices.size()) + "\n";
+    bytes.append(reinterpret_cast<const char *>(set->vertices.data()), set->vertices.size() * sizeof(set->vertices.front()));
+    bytes.append(reinterpret_cast<const char *>(set->indices.data()), set->indices.size() * sizeof(set->indices.front()));
+  }
+  m_digest = PreciseSeam::seamdump_sha256(bytes);
 }
 
 SeamPaint::~SeamPaint() = default;
@@ -1682,10 +1690,12 @@ std::vector<PreciseSeam::DumpPaintRun> SeamPaint::runs(const Polygon &loop, doub
       add(0., length, false);
       continue;
     }
-    // Otherwise the points within reach of paint, every half reach; a run spans its first to its last point.
+    // Otherwise the points within reach of paint, every half reach; a run spans its first to its last point,
+    // and one still open at the end of the loop runs to it, as the loop closes there.
     const double step = std::max(reach / 2., 0.05);
     std::optional<double> begin;
     double last = 0.;
+    bool painted_at_start = false;
     for (size_t i = 0; i < xy.size(); ++i) {
       const double edge = arc[i + 1] - arc[i];
       const size_t n = std::max<size_t>(1, size_t(std::ceil(edge / step)));
@@ -1694,6 +1704,8 @@ std::vector<PreciseSeam::DumpPaintRun> SeamPaint::runs(const Polygon &loop, doub
         const Vec2d p = xy[i] + (xy[(i + 1) % xy.size()] - xy[i]) * (double(k) / double(n));
         const Vec3f at(float(p.x()), float(p.y()), float(z));
         const bool painted = blocked ? m_info->is_blocked(at, float(reach)) : m_info->is_enforced(at, float(reach));
+        if (i == 0 && k == 0)
+          painted_at_start = painted;
         if (painted) {
           if (!begin)
             begin = s;
@@ -1705,7 +1717,7 @@ std::vector<PreciseSeam::DumpPaintRun> SeamPaint::runs(const Polygon &loop, doub
       }
     }
     if (begin)
-      add(*begin, last, blocked);
+      add(*begin, painted_at_start ? length : last, blocked);
   }
   return out;
 }

@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 #include "libslic3r/Point.hpp"
@@ -26,7 +27,8 @@ struct DumpPaintRun {
 // One outer loop of a layer: the outer contour or a hole of an island.
 struct DumpLoop {
     Polygon                   polygon; // Plate coordinates of the first instance, scaled.
-    bool                      hole = false;
+    bool                      hole  = false;
+    double                    reach = 0.; // Paint projection distance in mm, which the fingerprint records.
     std::vector<DumpPaintRun> paint;
 };
 
@@ -41,28 +43,33 @@ struct DumpLayer {
 
 struct DumpObject {
     std::string            name;
-    std::vector<Vec2d>     instances; // Shifts in mm of the other instances from the first one.
-    std::vector<DumpLayer> layers;    // Every model layer in order, with loops or without.
+    std::vector<Vec2d>     instances;    // Shifts in mm of the other instances from the first one.
+    std::string            paint_source; // Digest of the painted facets and their transformations.
+    std::vector<DumpLayer> layers;       // Every model layer in order, with loops or without.
 };
 
 struct DumpSettings {
     double   tolerance  = 0.1; // T in mm.
     int      candidates = 8;   // K.
     uint64_t limit      = 0;   // Bytes; 0 is none.
-    double   reach      = 0.;  // Paint projection distance in mm; recorded in the fingerprint.
+    // Called between layers; it throws to cancel.
+    std::function<void()> throw_if_canceled;
 };
 
 struct DumpResult {
-    std::string svg;   // Empty on an error.
-    std::string error; // Why no file fits the limit.
+    std::string svg;      // Empty when no file fits the limit.
+    size_t      size = 0; // Bytes of the last, coarsest file built when none fits.
     double      tolerance  = 0.; // T and K of the file written.
     int         candidates = 0;
     size_t      dropped    = 0; // Loops left out.
 };
 
 // The SVG of the objects, numbered O1, O2, ... in the given order. Above the limit, the file is built again
-// with 2T, 4T and then half of K; if none fits, only the error is set.
+// with 2T, 4T and then half of K; if none fits, `svg` is empty.
 DumpResult write_seamdump(const std::vector<DumpObject> &objects, const DumpSettings &settings);
+
+// SHA-256 of the bytes as 64 hexadecimal digits.
+std::string seamdump_sha256(const std::string &data);
 
 // A number of hundredths of a millimetre as the file writes it: no trailing zeros, no exponent.
 std::string seamdump_number(int64_t hundredths);
