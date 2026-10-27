@@ -1324,14 +1324,16 @@ void GCodeWriter::extrude_to_xy(std::string &out, const Vec2d &point, double dE,
     } else {
         w.emit_xy(point_on_plate);
     }
+    // Orca: E as written, also for the extrusion capture. E_to_emit() advances the rounding carry, so call it once.
+    const double emitted_e = force_no_extrusion ? 0. : filament()->E_to_emit(high_precision);
     if (!force_no_extrusion)
-        w.emit_e(filament()->E_to_emit(high_precision));
+        w.emit_e(emitted_e);
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
     w.append_to(out);
 
     if (m_extrusion_capture && !force_no_extrusion)
-        capture_extrusion(capture_from, { point_on_plate(0), point_on_plate(1), m_pos(2) }, capture_e, false);
+        capture_extrusion(capture_from, { point_on_plate(0), point_on_plate(1), m_pos(2) }, capture_e, emitted_e, false, high_precision);
 }
 
 // Approximate an arc with linear extrusions, for machine mappings that cannot
@@ -1413,14 +1415,16 @@ void GCodeWriter::extrude_arc_to_xy(std::string &out, const Vec2d& point, const 
     GCodeG2G3Formatter w(is_ccw, high_precision);
     w.emit_xy(point_on_plate);
     w.emit_ij(center_offset);
+    // Orca: E as written, also for the extrusion capture. E_to_emit() advances the rounding carry, so call it once.
+    const double emitted_e = force_no_extrusion ? 0. : filament()->E_to_emit(high_precision);
     if (!force_no_extrusion)
-        w.emit_e(filament()->E_to_emit(high_precision));
+        w.emit_e(emitted_e);
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
     w.append_to(out);
 
     if (m_extrusion_capture && !force_no_extrusion)
-        capture_extrusion(capture_from, { point_on_plate(0), point_on_plate(1), m_pos(2) }, capture_e, true);
+        capture_extrusion(capture_from, { point_on_plate(0), point_on_plate(1), m_pos(2) }, capture_e, emitted_e, true, high_precision);
 }
 
 std::string GCodeWriter::extrude_to_xyz(const Vec3d &point, double dE, const std::string &comment, bool force_no_extrusion)
@@ -1462,24 +1466,28 @@ void GCodeWriter::extrude_to_xyz(std::string &out, const Vec3d &point, double dE
     } else {
         w.emit_xy(Vec2d(point_on_plate.x(), point_on_plate.y()));
     }
+    // Orca: E as written, also for the extrusion capture. E_to_emit() advances the rounding carry, so call it once.
+    const double emitted_e = force_no_extrusion ? 0. : filament()->E_to_emit(high_precision);
     if (!force_no_extrusion)
-        w.emit_e(filament()->E_to_emit(high_precision));
+        w.emit_e(emitted_e);
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
     w.append_to(out);
 
     if (m_extrusion_capture && !force_no_extrusion)
-        capture_extrusion(capture_from, point_on_plate, capture_e, false);
+        capture_extrusion(capture_from, point_on_plate, capture_e, emitted_e, false, high_precision);
 }
 
-void GCodeWriter::capture_extrusion(const Vec3d &from, const Vec3d &to, double e_before, bool arc)
+void GCodeWriter::capture_extrusion(const Vec3d &from, const Vec3d &to, double e_before, double e_after, bool arc, bool high_precision)
 {
     // Mirror GCodeProcessor: a move prints only if the emitted E grows and XY changes. E is
     // compared at the single precision GCodeReader passes to the processor.
-    if (float(GCodeFormatter::quantize_e(filament()->E())) <= float(GCodeFormatter::quantize_e(e_before)))
+    if (float(GCodeFormatter::quantize_e(e_after, high_precision)) <= float(GCodeFormatter::quantize_e(e_before, high_precision)))
         return;
-    auto quantize = [](const Vec3d &p) {
-        return Vec3d(GCodeFormatter::quantize_xyzf(p.x()), GCodeFormatter::quantize_xyzf(p.y()), GCodeFormatter::quantize_xyzf(p.z()));
+    // Outer walls are never forced to the standard precision, so their Z was written with this precision as well.
+    auto quantize = [high_precision](const Vec3d &p) {
+        return Vec3d(GCodeFormatter::quantize_xyz(p.x(), high_precision), GCodeFormatter::quantize_xyz(p.y(), high_precision),
+                     GCodeFormatter::quantize_xyz(p.z(), high_precision));
     };
     const Vec3d a = quantize(from);
     const Vec3d b = quantize(to);

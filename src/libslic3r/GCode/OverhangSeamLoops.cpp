@@ -19,8 +19,9 @@ static constexpr size_t MAX_LOGGED_PROBLEMS = 10;
 
 OverhangSeamKey OverhangSeamKey::from_gcode(double x, double y, double z, int filament)
 {
-    // One grid step is the last digit the G-code writer emits for X, Y and Z.
-    static const double scale = std::pow(10., GCodeFormatter::XYZF_EXPORT_DIGITS);
+    // One grid step is the last digit the G-code writer emits for X, Y and Z with high precision G-code;
+    // standard precision values lie on the same grid.
+    static const double scale = std::pow(10., GCodeFormatter::xyz_digits(true));
     return { std::llround(x * scale), std::llround(y * scale), std::llround(z * scale), filament };
 }
 

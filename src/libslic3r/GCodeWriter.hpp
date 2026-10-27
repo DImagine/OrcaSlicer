@@ -334,8 +334,9 @@ private:
     std::optional<ExtrusionCapture> m_extrusion_capture;
     // E as last emitted before a move: relative E restarts from zero.
     double emitted_e_before_move() const { return config.use_relative_e_distances ? 0. : filament()->E(); }
-    // `from`/`to` in command coordinates; `arc` moves even when its ends coincide.
-    void   capture_extrusion(const Vec3d &from, const Vec3d &to, double e_before, bool arc);
+    // `from`/`to` in command coordinates, `e_before`/`e_after` the E written before and by the move,
+    // `high_precision` the precision of the move; `arc` moves even when its ends coincide.
+    void   capture_extrusion(const Vec3d &from, const Vec3d &to, double e_before, double e_after, bool arc, bool high_precision);
 
 };
 
