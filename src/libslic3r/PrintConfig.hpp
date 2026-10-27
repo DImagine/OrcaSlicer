@@ -234,6 +234,13 @@ enum class PowerLossRecoveryMode {
     Disable,
 };
 
+// Orca
+enum class ArcFittingMode {
+    Disabled,
+    Enabled,
+    SparseInfill,
+};
+
 // BBS
 enum class WallSequence {
     InnerOuter,
@@ -823,6 +830,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PowerLossRecoveryMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ArcFittingMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SurfaceFillOrder)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AdaptiveInfillMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AdaptiveInfillGradient)
@@ -1441,6 +1449,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,  print_extruder_variant))
     ((ConfigOptionInt,                  bottom_shell_layers))
     ((ConfigOptionFloat,                bottom_shell_thickness))
+    ((ConfigOptionInt,                  bottom_color_penetration_layers))
     ((ConfigOptionFloat,                bridge_angle))
     ((ConfigOptionFloat,                internal_bridge_angle)) // ORCA: Internal bridge angle override
     ((ConfigOptionBool,                 relative_bridge_angle)) // ORCA: Relative bridge angle flag
@@ -1549,6 +1558,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent, top_surface_line_width))
     ((ConfigOptionInt, top_shell_layers))
     ((ConfigOptionFloat, top_shell_thickness))
+    ((ConfigOptionInt, top_color_penetration_layers))
     ((ConfigOptionFloat, top_surface_expansion))
     ((ConfigOptionFloat, top_surface_expansion_margin))
     ((ConfigOptionEnum<TopSurfaceExpansionDirection>, top_surface_expansion_direction))
@@ -1693,7 +1703,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,              printing_by_object_gcode))
     ((ConfigOptionFloats,              deretraction_speed))
     //BBS
-    ((ConfigOptionBool,                enable_arc_fitting))
+    ((ConfigOptionEnum<ArcFittingMode>, enable_arc_fitting))
     ((ConfigOptionString,              machine_end_gcode))
     ((ConfigOptionStrings,             filament_end_gcode))
     ((ConfigOptionFloatsNullable,      filament_flow_ratio))
@@ -1764,6 +1774,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPoints,              thumbnail_size))
     // ((ConfigOptionBool,                spaghetti_detector))
     ((ConfigOptionBool,                gcode_add_line_number))
+    ((ConfigOptionBool,                high_precision_gcode))
     ((ConfigOptionBool,                bbl_bed_temperature_gcode))
     ((ConfigOptionEnum<GCodeFlavor>,   gcode_flavor))
     ((ConfigOptionBool,                gcode_skip_config_block))
@@ -1828,7 +1839,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             filament_change_extrusion_role_gcode))
     ((ConfigOptionFloatsNullable,      travel_speed))
     ((ConfigOptionFloatsNullable,      travel_speed_z))
-    ((ConfigOptionBool,                silent_mode))
     ((ConfigOptionString,              machine_pause_gcode))
     ((ConfigOptionString,              template_custom_gcode))
     //BBS

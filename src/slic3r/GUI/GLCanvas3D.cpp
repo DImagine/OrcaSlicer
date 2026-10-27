@@ -120,6 +120,10 @@
 #include "slic3r/Utils/RetinaHelper.hpp"
 #endif
 
+#ifdef __APPLE__
+#include "MacIME.hpp"
+#endif
+
 #include <glad/gl.h>
 
 #include <wx/glcanvas.h>
@@ -1961,6 +1965,14 @@ static std::pair<bool, bool> construct_extruder_unprintable_error(ObjectFilament
         output_text = tips[idx];
     }
 
+    // Conflicts on extruders beyond the left/right pair (3+ tool machines) have
+    // no bucket above; without a message the slice would be blocked silently.
+    if (left_unprintable_objects.empty() && right_unprintable_objects.empty()) {
+        left_extruder_unprintable_text = _u8L("The position or size of some models exceeds the assigned extruder's printable range. "
+                                              "Please check and adjust the part's position or size to fit the printable range.");
+        return { true, false };
+    }
+
     return { !left_unprintable_objects.empty(),!right_unprintable_objects.empty() };
 }
 
@@ -2900,6 +2912,11 @@ void GLCanvas3D::_render_scene(const Camera& camera, const Size& cnv_size)
     if (_is_ssao_enabled()) {
         _render_ssao_pass(static_cast<unsigned int>(cnv_size.get_width()), static_cast<unsigned int>(cnv_size.get_height()));
         m_frame_profiler.mark("ssao");
+    }
+
+    if (m_canvas_type == ECanvasType::CanvasPreview && m_render_preview) {
+        _render_gcode_translucent(cnv_size.get_width(), cnv_size.get_height());
+        m_frame_profiler.mark("gcode translucent");
     }
 
     // After the occlusion pass, which would shade it as the surface behind it.
@@ -3899,9 +3916,31 @@ void GLCanvas3D::bind_event_handlers()
                 // The key-up that would commit a keyboard edit goes to whatever took the focus.
                 if (m_selection_edit.kind != SelectionEdit::None)
                     finish_selection_edit();
+                release_held_modifiers();
+                wxGetApp().imgui()->forget_key_claims();
+#ifdef __APPLE__
+                // ImGuiWrapper stops updating the view once it is no longer the IME target.
+                if (ImGui::GetIO().ImeWindowHandle == m_canvas->GetHandle()) {
+                    mac_ime_set_active(m_canvas->GetHandle(), false);
+                    ImGui::GetIO().ImeWindowHandle = nullptr;
+                }
+#endif
                 ImGui::SetWindowFocus(nullptr);
                 render();
                 evt.Skip();
+            });
+        // ORCA If the mouse capture is lost while a button is held (Alt+Tab, dialog, lock screen), the button-up
+        // never arrives and ImGui keeps the widget active. Cancel the interaction: clear the active widget
+        // before releasing the buttons so the release is not taken as a click.
+        m_canvas->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent&) {
+                if (GImGui != nullptr) {
+                    ImGui::ClearActiveID();
+                    ImGuiIO& io = ImGui::GetIO();
+                    for (bool& down : io.MouseDown)
+                        down = false;
+                }
+                m_navigator_dragging = false;
+                render();
             });
         m_event_handlers_bound = true;
 
@@ -4032,11 +4071,12 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
     // see include/wx/defs.h enum wxKeyCode
     int keyCode = evt.GetKeyCode();
 
-    auto imgui = wxGetApp().imgui();
-    if (imgui->update_key_data(evt)) {
+    auto       imgui         = wxGetApp().imgui();
+    const bool imgui_claimed = imgui->claim_key_event(evt);
+    if (imgui->update_key_data(evt) || imgui_claimed)
         render();
+    if (imgui_claimed)
         return;
-    }
 
     // Design tab: Delete, Esc, Ctrl+Z/Y and F are NOT handled here. DesignPanel's CHAR_HOOK owns
     // them (one route per key, whatever holds focus) and only lets a key through to this canvas
@@ -4181,15 +4221,11 @@ bool GLCanvas3D::handle_shortcut(const KeyChord& chord)
         m_dirty = true;
         break;
     case Shortcut::Mouse3DSettings: {
-#ifdef _WIN32
-        if (wxGetApp().app_config->get("use_legacy_3DConnexion") == "true") {
-#endif //_WIN32
-            Mouse3DController& controller = wxGetApp().plater()->get_mouse3d_controller();
+        Mouse3DController& controller = wxGetApp().plater()->get_mouse3d_controller();
+        if (controller.can_show_settings_dialog()) {
             controller.show_settings_dialog(!controller.is_settings_dialog_shown());
             m_dirty = true;
-#ifdef _WIN32
         }
-#endif //_WIN32
         break;
     }
     case Shortcut::ReloadDevicePage:
@@ -4327,20 +4363,41 @@ static bool key_repeats(int key)
 
 static void key_released(int key) { s_keys_down.erase(key); }
 
+void GLCanvas3D::release_held_modifiers()
+{
+    for (const int key : { WXK_SHIFT, WXK_CONTROL, WXK_ALT }) {
+        if (s_keys_down.count(key) == 0)
+            continue;
+        wxKeyEvent release(wxEVT_KEY_UP);
+        release.m_keyCode = key;
+        on_key(release);
+    }
+}
+
 void GLCanvas3D::on_key(wxKeyEvent& evt)
 {
+#ifdef __APPLE__
+    // A key the input method used for a composition must not also edit the text field: Esc would revert
+    // it, Backspace delete a character, Enter add a line.
+    if (evt.GetEventType() == wxEVT_KEY_DOWN && mac_ime_owns_key(m_canvas->GetHandle()))
+        return;
+#endif
 
-    const int keyCode = evt.GetKeyCode();
+    auto       imgui         = wxGetApp().imgui();
+    const int  keyCode       = evt.GetKeyCode();
+    const bool imgui_claimed = imgui->claim_key_event(evt);
     if (evt.GetEventType() == wxEVT_KEY_DOWN)
         m_key_down = { keyCode, key_repeats(keyCode) };
     else if (evt.GetEventType() == wxEVT_KEY_UP)
         key_released(keyCode);
     const bool alt_wheel_released = evt.GetEventType() == wxEVT_KEY_UP && keyCode == WXK_ALT && std::exchange(m_alt_wheel_used, false);
 
-    auto imgui = wxGetApp().imgui();
-    if (imgui->update_key_data(evt))
+    // ImGui closes a popup on Esc only through keyboard navigation, which is off.
+    if (imgui_claimed && evt.GetEventType() == wxEVT_KEY_DOWN && keyCode == WXK_ESCAPE)
+        imgui->close_top_popup();
+    if (imgui->update_key_data(evt) || imgui_claimed)
         render();
-    else
+    if (!imgui_claimed)
     {
         // Before the gizmos and the selection, which Esc also closes.
         if (evt.GetEventType() == wxEVT_KEY_DOWN && keyCode == WXK_ESCAPE && std::exchange(m_section_view->panel_open, false)) {
@@ -5495,6 +5552,10 @@ void GLCanvas3D::force_set_focus() {
 
 void GLCanvas3D::on_set_focus(wxFocusEvent& evt)
 {
+#ifdef __APPLE__
+    // The focused canvas is the one whose view takes input-method text (see ImGuiWrapper::end_frame()).
+    ImGui::GetIO().ImeWindowHandle = m_canvas->GetHandle();
+#endif
     m_tooltip_enabled = false;
     _refresh_if_shown_on_screen();
     m_tooltip_enabled = true;
@@ -9572,6 +9633,7 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
         // Set on every use: the program is shared, so a canvas that leaves it unset would inherit
         // the last canvas's choice.
         shader->set_uniform("lighting_model", studio ? 1 : 0);
+        shader->set_uniform("translucent_gloss", realistic_mode);
         if (studio) {
             const Transform3d& view = wxGetApp().plater()->get_camera().get_view_matrix();
             shader->set_uniform("world_up_eye", Vec3f((view.matrix().block<3, 3>(0, 0) * Vec3d::UnitZ()).cast<float>()));
@@ -9840,7 +9902,9 @@ void GLCanvas3D::_render_wireframe_overlay()
     glsafe(::glPolygonMode(GL_FRONT_AND_BACK, GL_LINE));
 #endif
 
-    m_volumes.render(GLVolumeCollection::ERenderType::Opaque, false, view_matrix, proj_matrix, sz);
+    m_volumes.render(GLVolumeCollection::ERenderType::All, false, view_matrix, proj_matrix, sz, [](const GLVolume& volume) {
+        return !volume.render_color.is_transparent() || (volume.visible && !volume.is_modifier && volume.color.is_transparent());
+    });
 
 #if !SLIC3R_OPENGL_ES
     glsafe(::glPolygonMode(GL_FRONT_AND_BACK, GL_FILL));
@@ -9854,13 +9918,8 @@ void GLCanvas3D::_render_gcode(int canvas_width, int canvas_height)
     // Realistic view: the toolpaths receive the same depth map they were rendered into by
     // _render_shadows, which is what gives them object-on-object and self shadows. Intensity 0
     // short-circuits the lookup in the shader, so this is inert whenever the map is missing.
-    const bool receive_shadows = m_shadow_map_valid && m_shadow_map_texture_id != 0 && m_shadow_map_size != 0;
-    if (receive_shadows) {
-        glsafe(::glActiveTexture(GL_TEXTURE4));
-        glsafe(::glBindTexture(GL_TEXTURE_2D, m_shadow_map_texture_id));
-        glsafe(::glActiveTexture(GL_TEXTURE0));
+    if (_bind_gcode_shadow_map(true))
         m_gcode_viewer.set_shadow_map(4, m_shadow_light_vp, 0.35f, 1.0f / static_cast<float>(m_shadow_map_size));
-    }
     else
         m_gcode_viewer.set_shadow_map(4, Transform3d::Identity(), 0.0f, 0.0f);
 
@@ -9872,14 +9931,27 @@ void GLCanvas3D::_render_gcode(int canvas_width, int canvas_height)
                               (_shadow_mode() != EShadowMode::Off || cfg->get_bool(SETTING_OPENGL_PHONG_SSAO));
     m_gcode_viewer.set_tone(lossy_passes ? 1.1f : 1.0f, 1.15f);
     m_gcode_viewer.set_light_top_dir(_static_light_dir_eye().value_or(Vec3d(-0.4574957, 0.4574957, 0.7624929)));
+    m_gcode_viewer.set_gloss(_is_realistic_view_enabled() && cfg != nullptr && cfg->get_bool(SETTING_OPENGL_REALISTIC_GLOSS));
 
     m_gcode_viewer.render_scene(canvas_width, canvas_height);
+    _bind_gcode_shadow_map(false);
+}
 
-    if (receive_shadows) {
-        glsafe(::glActiveTexture(GL_TEXTURE4));
-        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
-        glsafe(::glActiveTexture(GL_TEXTURE0));
-    }
+void GLCanvas3D::_render_gcode_translucent(int canvas_width, int canvas_height)
+{
+    _bind_gcode_shadow_map(true);
+    m_gcode_viewer.render_translucent_toolpaths(canvas_width, canvas_height);
+    _bind_gcode_shadow_map(false);
+}
+
+bool GLCanvas3D::_bind_gcode_shadow_map(bool bind) const
+{
+    if (!m_shadow_map_valid || m_shadow_map_texture_id == 0 || m_shadow_map_size == 0)
+        return false;
+    glsafe(::glActiveTexture(GL_TEXTURE4));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, bind ? m_shadow_map_texture_id : 0));
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+    return true;
 }
 
 void GLCanvas3D::_render_gcode_overlay(int canvas_width, int canvas_height)
@@ -12318,9 +12390,10 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
                 extruder_name += (boost::format(_u8L("Tool %d"))%extruder_id).str();
             }
 
-            text += (boost::format(into_u8(_L_PLURAL("Filament %s is placed in the %s, but the generated G-code path exceeds the printable range of the %s.",
-                                                     "Filaments %s are placed in the %s, but the generated G-code path exceeds the printable range of the %s.",
-                                                     error_iter->second.size()))) %filaments %extruder_name %extruder_name).str();
+            text += format(_L_PLURAL("Filament %1% is placed in the %2%, but the generated G-code path exceeds the printable range of the %2%.",
+                                     "Filaments %1% are placed in the %2%, but the generated G-code path exceeds the printable range of the %2%.",
+                                     error_iter->second.size()),
+                           filaments, extruder_name);
         }
         error = ErrorType::SLICING_LIMIT_ERROR;
         break;
@@ -12368,9 +12441,10 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
                 }
             }
             std::string extruder_name = extruder_name_list[extruder_id-1];
-            text += (boost::format(into_u8(_L_PLURAL("Filament %s is placed in the %s, but the generated G-code path exceeds the printable height of the %s.",
-                                                     "Filaments %s are placed in the %s, but the generated G-code path exceeds the printable height of the %s.",
-                                                     filament_ids.size()))) % filaments % extruder_name % extruder_name).str();
+            text += format(_L_PLURAL("Filament %1% is placed in the %2%, but the generated G-code path exceeds the printable height of the %2%.",
+                                     "Filaments %1% are placed in the %2%, but the generated G-code path exceeds the printable height of the %2%.",
+                                     filament_ids.size()),
+                           filaments, extruder_name);
         }
         if (!text.empty()) {
             text += "\n";
@@ -12535,7 +12609,9 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
                     try_pop_up_before_slice(false, plater, partplate, true); // ignore the return value
                     return false;
                 };
-                notification_manager.push_slicing_customize_error_notification(NotificationType::BBLFilamentPrintableError, NotificationLevel::ErrorNotificationLevel, text,  _u8L("Click here to regroup"), callback);
+                // Only Bambu printers can regroup; without the link the callback is unreachable.
+                const std::string regroup = wxGetApp().preset_bundle->is_bbl_vendor() ? _u8L("Click here to regroup") : "";
+                notification_manager.push_slicing_customize_error_notification(NotificationType::BBLFilamentPrintableError, NotificationLevel::ErrorNotificationLevel, text,  regroup, callback);
             }
             else
                 notification_manager.close_slicing_customize_error_notification(NotificationType::BBLFilamentPrintableError, NotificationLevel::ErrorNotificationLevel);
