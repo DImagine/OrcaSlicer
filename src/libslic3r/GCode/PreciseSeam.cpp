@@ -696,22 +696,40 @@ std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, c
     const Lines      lines     = to_lines(perimeter);
     const ArcLengths arcs(lines);
     const double     tolerance = double(TOLERANCE_LINEAR);
-    // The modifier touches the perimeter in the middle of the crossing; a segment runs forward from begin to end.
+    // The region that holds the touch, by the middle of the crossing; a segment runs forward from begin to end.
     const double begin  = arcs.along(touch.begin);
     double       middle = begin + arcs.forward(begin, arcs.along(touch.end)) / 2.;
     if (middle >= arcs.total())
         middle -= arcs.total();
-    PerimeterPosition position = arcs.position(middle);
-    if (position.parameter == 1.)
-        position = {(position.edge_index + 1) % perimeter.size(), 0.};
-    const MagnetPoint found{Point(arcs.point(lines, middle)), position};
-    if (!apex)
-        return found;
-    // apex looks from the centroid of the region that holds the touch.
-    const auto region = std::find_if(modifier.begin(), modifier.end(), [&found](const ModifierRegion &r) {
-        return r.bounds.contains(found.point) && r.polygon.contains(found.point);
+    const Point middle_point(arcs.point(lines, middle));
+    const auto  region = std::find_if(modifier.begin(), modifier.end(), [&middle_point](const ModifierRegion &r) {
+        return r.bounds.contains(middle_point) && r.polygon.contains(middle_point);
     });
-    if (region == modifier.end() || region->polygon.contour.area() == 0.)
+    // Without a region with a centroid the middle of the crossing stands for the touch.
+    if (region == modifier.end() || region->polygon.contour.area() == 0.) {
+        PerimeterPosition position = arcs.position(middle);
+        if (position.parameter == 1.)
+            position = {(position.edge_index + 1) % perimeter.size(), 0.};
+        return MagnetPoint{middle_point, position};
+    }
+    // The touch is the point of the perimeter nearest to the centroid of that region: on a side it is the foot
+    // of the perpendicular, so the rays of apex run along the side. Equally near points go to the rear and left one.
+    const Vec2d centre = region->polygon.contour.centroid().cast<double>();
+    std::optional<MagnetPoint> nearest;
+    double                     nearest_distance = std::numeric_limits<double>::infinity();
+    for (size_t edge = 0; edge < lines.size(); ++edge) {
+        const auto [point, parameter] = project_on_segment(centre, lines[edge].a.cast<double>(), lines[edge].b.cast<double>());
+        const double distance = (point - centre).norm();
+        const Point  rounded(point);
+        if (nearest && (distance > nearest_distance + tolerance ||
+                        (distance >= nearest_distance - tolerance && !rear_then_left(rounded, nearest->point))))
+            continue;
+        nearest          = MagnetPoint{rounded, parameter == 1. ? PerimeterPosition{(edge + 1) % lines.size(), 0.} :
+                                                                  PerimeterPosition{edge, parameter}};
+        nearest_distance = std::min(nearest_distance, distance);
+    }
+    const MagnetPoint found = *nearest;
+    if (!apex)
         return found;
     Lines modifier_lines;
     for (const ModifierRegion &r : modifier) {

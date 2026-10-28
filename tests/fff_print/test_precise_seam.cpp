@@ -2746,7 +2746,7 @@ TEST_CASE("A magnet with apex that touches a corner over its tip takes the tip, 
     rule.magnet_apex_length = scale_(1.);
     effective.emplace(volume, rule);
     Polygon perimeter = rectangle(0, 0, 20, 20);
-    // The touch is the middle of the crossing, the corner; the ends of the crossing lie nearest to the circle.
+    // The touch is the point nearest to the centroid, the corner; the ends of the crossing lie nearest to the circle.
     CHECK(PreciseSeam::insert_strong_seam_point({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
                                                 fixture.cache, nullptr, &effective) == mm(20, 20));
 }
