@@ -81,6 +81,7 @@
 #include <wx/chartype.h>
 #include <wx/dataobj.h>
 #include <wx/dnd.h>
+#include <wx/textdlg.h>
 #include <wx/busycursor.h>
 #include <wx/msgdlg.h>
 #include <wx/accel.h>
@@ -1250,6 +1251,9 @@ void ObjectList::update_name_in_model(const wxDataViewItem& item) const
 
     const std::string previous_name = obj->volumes[volume_id]->name;
     obj->volumes[volume_id]->name = name;
+    // The name of a Precise Seam volume may hold layer rules, which the G-code export reads.
+    if (obj->volumes[volume_id]->is_precise_seam())
+        wxGetApp().plater()->schedule_background_process();
 
     LifecycleEventContext ctx;
     ctx.name = name;

@@ -67,6 +67,7 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
     vol->set_type(type);
 
     vol->name = src_volume->name + suffix;
+    vol->precise_seam_rules = src_volume->precise_seam_rules;
     // Don't copy the config's ID.
     vol->config.assign_config(src_volume->config);
     assert(vol->config.id().valid());

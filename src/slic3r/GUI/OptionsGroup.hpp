@@ -355,6 +355,8 @@ public:
     void        Show(const bool show);
     bool        is_visible(ConfigOptionMode mode);
     bool        update_visibility(ConfigOptionMode mode);
+    // Hides the whole group while it returns false, whatever the mode; unset for groups of options.
+    std::function<bool()> visibility_condition;
     void        msw_rescale();
     void        sys_color_changed();
     void        refresh();

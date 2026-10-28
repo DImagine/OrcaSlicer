@@ -222,6 +222,7 @@
 #include "Camera.hpp"
 #include "Mouse3DController.hpp"
 #include "Tab.hpp"
+#include "PreciseSeamRulesEditor.hpp"
 #include "Jobs/OrientJob.hpp"
 #include "Jobs/ArrangeJob.hpp"
 #include "Jobs/FillBedJob.hpp"
@@ -11111,6 +11112,8 @@ void Plater::priv::delete_all_objects_from_model()
 
 void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
 {
+    // A pending Precise Seam rules edit belongs to the project being closed.
+    reset_precise_seam_rules_edit();
     // TakeSnapshot below and load_current_presets() further down each re-evaluate the
     // aggregate dirty flag against a baseline that hasn't been reset yet, so they can toggle
     // is_dirty() back and forth several times before it settles; coalesce those into one event.
@@ -12157,6 +12160,7 @@ bool Plater::priv::replace_volume_with_stl(int object_idx, int volume_idx, const
     ModelVolume* new_volume = old_model_object->volumes.back();
     new_volume->set_new_unique_id();
     new_volume->config.apply(old_volume->config);
+    new_volume->precise_seam_rules = old_volume->precise_seam_rules;
     new_volume->set_type(old_volume->type());
     new_volume->set_material_id(old_volume->material_id());
     new_volume->set_transformation(old_volume->get_transformation());
@@ -12691,6 +12695,7 @@ void Plater::priv::reload_from_disk()
                 
                 new_volume->set_new_unique_id();
                 new_volume->config.apply(old_volume->config);
+                new_volume->precise_seam_rules = old_volume->precise_seam_rules;
                 new_volume->set_type(old_volume->type());
                 new_volume->set_material_id(old_volume->material_id());
 
@@ -12775,6 +12780,7 @@ void Plater::priv::reload_from_disk()
                 ModelVolume* new_volume = old_model_object->volumes.back();
                 new_volume->set_new_unique_id();
                 new_volume->config.apply(old_volume->config);
+                new_volume->precise_seam_rules = old_volume->precise_seam_rules;
                 new_volume->set_type(old_volume->type());
                 new_volume->set_material_id(old_volume->material_id());
                 new_volume->set_transformation(old_volume->get_transformation());
@@ -15745,6 +15751,9 @@ bool Plater::priv::up_to_date(bool saved, bool backup)
 
 void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator it_snapshot)
 {
+    // A pending Precise Seam rules edit belongs to the model being replaced; a late focus loss must not
+    // write it back.
+    reset_precise_seam_rules_edit();
     // Make sure that no updating function calls take_snapshot until we are done.
     SuppressSnapshots snapshot_supressor(q);
 
@@ -15903,6 +15912,8 @@ void Plater::priv::update_after_undo_redo(const UndoRedo::Snapshot& snapshot, bo
         this->view3D->get_canvas3d()->get_gizmos_manager().update_after_undo_redo(snapshot);
 
     wxGetApp().obj_list()->update_after_undo_redo();
+    // The rules field shows the restored rules, also when the selection stays.
+    reset_precise_seam_rules_edit();
 
     if (wxGetApp().get_mode() == comSimple && model_has_advanced_features(this->model)) {
         // If the user jumped to a snapshot that require user interface with advanced features, switch to the advanced mode without asking.
@@ -16652,6 +16663,8 @@ void Plater::load_project(wxString const& filename2,
 // BBS: save logic
 int Plater::save_project(bool saveAs)
 {
+    // Save may be a shortcut while the focus stays in the Precise Seam rules field.
+    commit_precise_seam_rules_edit();
     //if (up_to_date(false, false)) // should we always save
     //    return;
     auto filename = get_project_filename(".3mf");
@@ -19623,6 +19636,8 @@ void Plater::reset_with_confirm()
 // BBS: save logic
 int GUI::Plater::close_with_confirm(std::function<bool(bool)> second_check, std::function<void()>* deferred_close)
 {
+    // Text still in the Precise Seam rules field is a change to save or discard, not to lose silently.
+    commit_precise_seam_rules_edit();
     // A caller that may still keep the current project runs these steps itself once it is replaced.
     auto close = [deferred_close](std::function<void()> steps) {
         if (deferred_close != nullptr)
@@ -19925,6 +19940,8 @@ void Plater::apply_cut_object_to_model(size_t obj_idx, const ModelObjectPtrs& ne
 
 void Plater::export_gcode(bool prefer_removable)
 {
+    // A shortcut leaves the focus in the Precise Seam rules field, so its pending edit is applied here.
+    commit_precise_seam_rules_edit();
     if (p->model.objects.empty())
         return;
 
@@ -20891,6 +20908,9 @@ void publish(Model &model, SaveStrategy strategy) {
 int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy strategy, int export_plate_idx, Export3mfProgressFn proFn)
 {
     int ret = 0;
+    // A shortcut leaves the focus in the Precise Seam rules field; a backup does not apply text being typed.
+    if (!(strategy & SaveStrategy::Backup))
+        commit_precise_seam_rules_edit();
     //if (p->model.objects.empty()) {
     //    MessageDialog dialog(nullptr, _L("No objects to export."), _L("Save project"), wxYES);
     //    if (dialog.ShowModal() == wxYES)
@@ -21235,6 +21255,8 @@ bool Plater::is_multi_extruder_ams_empty()
 //BBS: add multiple plate reslice logic
 void Plater::reslice()
 {
+    // A shortcut leaves the focus in the Precise Seam rules field, so its pending edit is applied here.
+    commit_precise_seam_rules_edit();
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter, process_completed_with_error=%2%")%__LINE__ %p->process_completed_with_error;
     // There is "invalid data" button instead "slice now"
     if (p->process_completed_with_error == p->partplate_list.get_curr_plate_index())
