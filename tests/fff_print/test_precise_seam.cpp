@@ -15,6 +15,7 @@
 #include "libslic3r/GCode/PreciseSeamInternal.hpp"
 #include "libslic3r/GCode/PreciseSeamRules.hpp"
 #include "libslic3r/GCode/PreciseSeamRulesApply.hpp"
+#include "libslic3r/GCode/PreciseSeamRulesGeometry.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"

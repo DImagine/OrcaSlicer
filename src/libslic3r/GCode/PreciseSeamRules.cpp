@@ -459,6 +459,13 @@ struct FlagWord {
 struct OverrideWord {
     struct Payload {};
     static ParseStatus parse(Cursor &c, Payload &) { return c.eat("override") ? ParseStatus::Ok : ParseStatus::NotMine; }
+    // The whole normalized element is override, as read_word() would accept it; for the look ahead at the name.
+    static bool whole(std::string_view normalized)
+    {
+        Cursor  c(normalized);
+        Payload payload;
+        return parse(c, payload) == ParseStatus::Ok && c.done() && !c.out_of_range();
+    }
     static void commit(const Payload &, LayerRules &rules, SourceState &, const ElementRef &element)
     {
         if (element.source.field && element.first)
@@ -729,7 +736,7 @@ LayerRules parse_layer_rules(std::string_view volume_name, std::string_view fiel
 {
     LayerRules rules;
     // override first in the field replaces the name: neither its rules nor its diagnostics take part.
-    if (leading_element(field) != "override") {
+    if (!OverrideWord::whole(leading_element(field))) {
         NameBlocks name   = extract_name_blocks(volume_name);
         rules.diagnostics = std::move(name.diagnostics);
         for (size_t i = 0; i < name.blocks.size(); ++i)
