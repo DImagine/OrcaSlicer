@@ -2368,7 +2368,7 @@ struct WeakInit {
         std::vector<const ModelVolume*> strong;
         bool                            has_strong = false;
         PreciseSeam::RuleContext context = PreciseSeam::prepare_rule_context(strong, weak, has_strong, *fixture.model.objects.front(),
-                                                                             numbering, fixture.print.objects().front()->layers(),
+                                                                             &numbering, fixture.print.objects().front()->layers(),
                                                                              diagnostics);
         effective = std::move(context.effective);
         relay     = std::move(context.relay);

@@ -69,14 +69,15 @@ struct RuleContext {
                                                      std::vector<const ModelVolume*> &buffer) const;
 };
 
-// Rule numbers of `object`: its entry in `plan`, the numbering of the export (SeamPlacer::PreciseSeamNumbering),
-// which has one for every object that uses rules; without a plan (direct calls, tests) its own layers from 1.
-LayerNumbering object_numbering(const PrintObject &object, const std::unordered_map<const PrintObject*, LayerNumbering> *plan);
+// Rule numbers of `object` in `plan`, the numbering of the export (SeamPlacer::PreciseSeamNumbering), which has
+// an entry for every object that uses rules; nullptr without a plan (direct calls, tests).
+const LayerNumbering *object_numbering(const PrintObject &object, const std::unordered_map<const PrintObject*, LayerNumbering> *plan);
 
 // init_precise_seam_data() for an object that uses layer rules: strong volumes in priority order, weak ones
 // in application order, with their effective type and layers in the context. Volumes switched off or excluded
 // from every layer are left out. Diagnostics are appended to `diagnostics_out` in volume, source and element
-// order. `model_layers` are the layers of the print object that `numbering` numbers, in the same order.
+// order. `model_layers` are the layers of the print object that `plan_numbering` numbers, in the same order;
+// without it the object numbers them itself from 1.
 // A relay group stands in `strong_volumes_out` at the place of its most senior member, its members in queue
 // order; the context gets it without holders. A weak group stands likewise in `weak_volumes_out`, and its
 // holders are set here: each member keeps the layers it holds.
@@ -84,7 +85,7 @@ RuleContext prepare_rule_context(std::vector<const ModelVolume*> &strong_volumes
                                  std::vector<const ModelVolume*> &weak_volumes_out,
                                  bool &has_strong_out,
                                  const ModelObject &model_object,
-                                 const LayerNumbering &numbering,
+                                 const LayerNumbering *plan_numbering,
                                  const ConstLayerPtrsAdaptor &model_layers,
                                  std::vector<ModifierDiagnostic> &diagnostics_out);
 
