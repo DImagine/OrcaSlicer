@@ -1249,6 +1249,7 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
     vol->set_type(type);
 
     vol->name = src_volume->name + suffix;
+    vol->precise_seam_rules = src_volume->precise_seam_rules;
     // Don't copy the config's ID.
     vol->config.assign_config(src_volume->config);
     assert(vol->config.id().valid());
@@ -2021,6 +2022,7 @@ void ModelObject::convert_units(ModelObjectPtrs& new_objects, ConversionType con
 
             ModelVolume* vol = new_object->add_volume(mesh);
             vol->name = volume->name;
+            vol->precise_seam_rules = volume->precise_seam_rules;
             vol->set_type(volume->type());
             // Don't copy the config's ID.
             vol->config.assign_config(volume->config);
@@ -4281,6 +4283,16 @@ bool model_custom_seam_data_changed(const ModelObject& mo, const ModelObject& mo
     return model_property_changed(mo, mo_new,
         [](const ModelVolumeType t) { return t == ModelVolumeType::MODEL_PART; },
         [](const ModelVolume &mv_old, const ModelVolume &mv_new){ return mv_old.seam_facets.timestamp_matches(mv_new.seam_facets); });
+}
+
+bool model_precise_seam_rules_changed(const ModelObject& mo, const ModelObject& mo_new)
+{
+    // Layer rules come from the name blocks and the rules field of each Precise Seam volume.
+    return model_property_changed(mo, mo_new,
+        [](const ModelVolumeType t) { return is_precise_seam(t); },
+        [](const ModelVolume &mv_old, const ModelVolume &mv_new) {
+            return mv_old.name == mv_new.name && mv_old.precise_seam_rules == mv_new.precise_seam_rules;
+        });
 }
 
 bool model_mmu_segmentation_data_changed(const ModelObject& mo, const ModelObject& mo_new)

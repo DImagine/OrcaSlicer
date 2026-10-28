@@ -905,6 +905,8 @@ void ConfigOptionsGroup::Show(const bool show)
 
 bool ConfigOptionsGroup::is_visible(ConfigOptionMode mode)
 {
+    if (visibility_condition && !visibility_condition())
+        return false;
     if (m_options_mode.empty())
         return true;
     if (m_options_mode.size() == 1)
@@ -920,6 +922,14 @@ bool ConfigOptionsGroup::is_visible(ConfigOptionMode mode)
 
 bool ConfigOptionsGroup::update_visibility(ConfigOptionMode mode)
 {
+    if (visibility_condition) {
+        const bool show = visibility_condition();
+        // Before activation there is nothing to show or hide yet.
+        if (sizer)
+            Show(show);
+        if (!show || m_options_mode.empty())
+            return show;
+    }
     if (m_options_mode.empty() || !m_grid_sizer)
         return true;
 

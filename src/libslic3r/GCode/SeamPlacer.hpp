@@ -20,7 +20,7 @@ namespace Slic3r {
 
 class PrintObject;
 namespace SeamContour { class Resolver; }
-namespace PreciseSeam { struct PreciseSeamWarnings; }
+namespace PreciseSeam { struct PreciseSeamWarnings; struct LayerNumbering; }
 class ExtrusionLoop;
 class Print;
 class Layer;
@@ -162,15 +162,24 @@ public:
   //The following data structures hold all perimeter points for all PrintObject.
   std::unordered_map<const PrintObject*, PrintObjectSeamData> m_seam_per_object;
 
-  void init(const Print &print, std::function<void(void)> throw_if_canceled_func);
+  // Rule numbers of the layers of each print object, for Precise Seam layer rules. The export passes an
+  // entry for every object that uses rules; without the map (direct calls, e.g. tests) such an object
+  // numbers its own layers from 1.
+  using PreciseSeamNumbering = std::unordered_map<const PrintObject*, PreciseSeam::LayerNumbering>;
+
+  void init(const Print &print, std::function<void(void)> throw_if_canceled_func,
+            const PreciseSeamNumbering *numbering = nullptr);
 
   // Precise Seam user warning prepared by the last init(), empty if there is none. init() does not
   // change the Print: the caller issues the warning where a print step is active (G-code export).
   const std::string &precise_seam_warning() const { return m_precise_seam_warning; }
+  // Layer rule warnings of the last init(), one message each, so the export dialog shows them all.
+  const std::vector<std::string> &precise_seam_rule_warnings() const { return m_precise_seam_rule_warnings; }
 
   void place_seam(const Layer *layer, ExtrusionLoop &loop, const Point &last_pos, float& overhang) const;
 private:
   std::string m_precise_seam_warning;
+  std::vector<std::string> m_precise_seam_rule_warnings;
 
   void gather_seam_candidates(const PrintObject *po, const SeamPlacerImpl::GlobalModelInfo &global_model_info,
                               PreciseSeam::PreciseSeamWarnings* warnings = nullptr);

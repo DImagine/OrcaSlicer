@@ -66,6 +66,7 @@ namespace GUI {
 
 class TabPresetComboBox;
 class OG_CustomCtrl;
+class PreciseSeamRulesEditor;
 
 std::vector<InputShaperType> input_shaper_types_for_flavor(GCodeFlavor flavor);
 
@@ -617,6 +618,9 @@ protected:
 
 	virtual void	update_custom_dirty(std::vector<std::string> &dirty_options, std::vector<std::string> &nonsys_options) override;
 
+	// Called by set_model_config() once the configs of the new selection are known.
+	virtual void	on_model_config_set() {}
+
 protected:
 	std::vector<std::string> m_keys;
 	PresetCollection m_prints;
@@ -661,9 +665,17 @@ class TabPrintPart : public TabPrintModel
 public:
 	//BBS: GUI refactor
 	TabPrintPart(ParamsPanel* parent);
-	~TabPrintPart() {}
+	~TabPrintPart();
+	void build() override;
+	void clear_pages() override;
+	void msw_rescale() override;
+	void sys_color_changed() override;
+	PreciseSeamRulesEditor &precise_seam_rules() { return *m_precise_seam_rules; }
 protected:
 	virtual void    notify_changed(ObjectBase * object) override;
+	void            on_model_config_set() override;
+private:
+	std::unique_ptr<PreciseSeamRulesEditor> m_precise_seam_rules;
 };
 
 class TabPrintLayer : public TabPrintModel

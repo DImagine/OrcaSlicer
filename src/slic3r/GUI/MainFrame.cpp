@@ -90,6 +90,7 @@
 #include "I18N.hpp"
 #include "GLCanvas3D.hpp"
 #include "Plater.hpp"
+#include "PreciseSeamRulesEditor.hpp"
 #ifdef SLIC3R_CAD
 #include "slic3r/GUI/CAD/DesignPanel.hpp"
 #include "slic3r/GUI/CAD/McpControl.hpp"
@@ -1923,9 +1924,10 @@ bool  MainFrame::can_add_models() const
 
 bool MainFrame::can_save() const
 {
+    // A pending Precise Seam rules edit is a change, which save_project() applies first.
     return (m_plater != nullptr) &&
         !m_plater->get_view3D_canvas3D()->get_gizmos_manager().is_in_editing_mode(false) &&
-        m_plater->is_project_dirty() && !m_plater->using_exported_file() && !m_plater->only_gcode_mode();
+        (m_plater->is_project_dirty() || precise_seam_rules_edit_pending()) && !m_plater->using_exported_file() && !m_plater->only_gcode_mode();
 }
 
 bool MainFrame::can_save_as() const

@@ -89,6 +89,7 @@ src/slic3r/GUI/GUI_AuxiliaryList.cpp
 src/slic3r/GUI/GUI_Init.cpp
 src/slic3r/GUI/GUI_Factories.cpp
 src/slic3r/GUI/GUI_ObjectList.cpp
+src/slic3r/GUI/PreciseSeamRulesEditor.cpp
 src/slic3r/GUI/GUI_ObjectSettings.cpp
 src/slic3r/GUI/GUI_ObjectLayers.cpp
 src/slic3r/GUI/GUI_ObjectTable.cpp
@@ -215,6 +216,7 @@ src/libslic3r/GCode.cpp
 src/libslic3r/GCodeWriter.cpp
 src/libslic3r/GCode/ToolOrdering.cpp
 src/libslic3r/GCode/SeamPlacer.cpp
+src/libslic3r/GCode/PreciseSeamRulesApply.cpp
 src/libslic3r/GCode/GCodeStatistics.cpp
 src/libslic3r/ExtrusionEntity.cpp
 src/libslic3r/Flow.cpp

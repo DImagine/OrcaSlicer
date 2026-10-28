@@ -87,6 +87,268 @@ there.
 A strong modifier without a usable segment, even one whose fragments were all
 discarded, passes the turn to the next one.
 
+Layer rules can override both the type and the place in this order (see
+[Layer rules](#layer-rules)).
+
+## Layer rules
+
+A short language limits a modifier to some layers and can set its type and
+priority. The language is experimental and its syntax may change; the group
+title and the help say so. It is read only from Precise Seam volumes, from two sources: blocks
+between `-^ps=` and `=ps^-` in the volume name, so that a CAD model can carry
+the rules through repeated exports, and the volume's rules field
+(`ModelVolume::precise_seam_rules`). Name blocks apply left to right, then the
+field. The parser is `GCode/PreciseSeamRules.cpp`; it has no dependency on the
+print and is tested on its own.
+
+- **Elements.** Elements are separated by commas; whitespace is removed and
+  ASCII letters are lowered first. Layer sets are `N`, `A-B`, `A-BstepS`,
+  `kx+b` (x from 0), `odd`, `even`, `topK`, `all` and the heights `zA-B`,
+  `zinA-B`, `zA`, `zA-BstepS` and `zkx+b` (see Heights below). `incl` and `excl` switch
+  between adding and subtracting the following sets, and may prefix one set
+  (`excl129-312`). `model` and `bed` switch the origin of the following sets
+  in the same way (see Origin below). Labels `center`, `left`, `right`, `green`, `red`,
+  `gray`/`grey` set the type; `prN` and `pr-N` set the priority; `off`
+  disables the modifier; `blank` takes it out of seam placement the same way,
+  whatever else its rules say, for a volume that only holds rules (commands
+  added later act from it, unlike from `off`); and `nowarn` silences the warnings about differences
+  from the object list. A keyword is followed directly by its number or set:
+  `pr.1` is not an element. `override` as the first element of the field
+  replaces the name, so that the behaviour can change without renaming the
+  volume: the name is then not parsed and reports nothing. Anywhere else it is
+  an invalid element. `relayN` and a bare `relay` put the volume into a relay
+  group, `relay-randomN` and `relay-random` into a random one (see Relay
+  below); `seedS` after the latter, as in `relay-random1seed7`, gives a seed. `magnet` and `magnetN` (N in mm, a decimal as for heights) draw the
+  modifier to the nearest point of a perimeter it does not cross (see Magnet
+  below); `apex` after them, as in `magnet2apex`, moves that point to the tip of
+  a corner the modifier stands in. An element that starts with `id` names the volume for external
+  scripts: it is taken as a whole, with any text after `id`, before the
+  grammar, and changes nothing. The first id keeps its trimmed original text
+  with its case; a later id that differs after normalization is a warning.
+- **Atomic elements.** An element that does not match the grammar as a whole,
+  or has a number above 1 000 000, is dropped with a warning and changes
+  nothing, not even the mode. Numbers are bounded before any arithmetic and a
+  formula is evaluated only over the range of x that lands on existing layers.
+- **Evaluation.** Every source starts in `incl` mode; the accumulated set, the
+  type and the priority carry over. The first valid set picks the initial set:
+  every layer in `excl` mode, none otherwise. Without any valid set the
+  modifier acts on every layer, as a volume without rules does. The first type
+  and the first priority win; a different later one is a warning. The same
+  holds for the relay label and the magnet, whose distances compare as numbers.
+- **Layer numbers.** Rules count the layers as the preview slider does. When
+  printing by layer, every event of the export plan
+  (`GCode::collect_layers_to_print(const Print&)`) whose tools have extruders,
+  or that is a belt brim apron layer, takes the next number, so support-only
+  events take numbers but have no perimeters. When printing by object, the
+  numbers are the object's own events from 1, the same for all its copies,
+  because the copies share one seam cache; from the second object on they
+  differ from the slider. A by-object print with a wipe tower is exported by
+  layer and is numbered by layer as well: the plan always follows the export
+  branch. `topK` picks the top K numbered layers of the object itself. When
+  rules are used, the plan is built once before `SeamPlacer::init()` and the
+  export prints that same plan, since collecting it raises warnings and errors:
+  by layer for the whole plate, by object only for the objects with rules.
+- **Heights.** A height set selects the numbered model layers of the object by
+  their band `(bottom_z, print_z]`, measured from the bed in the coordinates of
+  the preview, so it keeps its place in mm when the layer height changes. `zA-B`
+  takes the layers whose band meets `[A, B]`, `zinA-B` those wholly inside it;
+  a single height `zA` is `zA-A`, the layer that holds that level, and `zinA` is
+  always empty. A level on the border of two layers belongs to the lower one.
+  The intersection is `print_z >= A - EPSILON` and `bottom_z < B - EPSILON`,
+  so both its bounds lean towards the lower layer (`z10.00005` takes the layer
+  that ends at 10.0); the inclusion is `bottom_z >= A - EPSILON` and
+  `print_z <= B + EPSILON`. Heights are parsed exactly, in nanometres,
+  with at most six decimals. `zA-BstepS` and `zkx+b` give levels, A, A+S, ...
+  up to B, or k*x+b for whole x >= 0 above zero; each level selects as `zA`
+  does, and a formula has no upper bound of its own (technically INT64_MAX
+  nanometres). k and b take a sign, k is 1 when omitted (`zx`); `zin` takes
+  neither a step nor a formula. A formula without a level above zero is a valid
+  empty set. The selection takes no time per level: for each band a binary
+  search finds the first level above its bottom, and checking that level is
+  sufficient: if it is above the band's top, all later levels are too. Bands come from the object's own layers, not from
+  the plan events, so the grid of another object never moves them; support-only
+  events have no band and are never selected by height. The selected layers
+  then act as a set of their numbers.
+- **Origin.** Every source (each name block, then the field) starts from the
+  bed, and `model` or `bed` sets the origin of the sets after it, as the mode
+  does; each set keeps the origin it was read with, and other elements ignore
+  it. From the model, layer i is the i-th model layer of the object, so raft
+  and support-only events take no number, and heights are measured from the
+  bottom of the first model layer, above the raft and its gap. A model set is
+  evaluated over the model layers and turned into their plan numbers through
+  the original map, where a layer without a number is 0 and selects nothing;
+  the numbers of the layers above it do not move down. The result then enters
+  the usual left-to-right chain over the plan numbers, so exclusion still
+  starts from every number, and an empty set is reported after this mapping.
+  `topK` is the same in both origins. Numbers agree only where the map is the
+  identity, heights only where the model bottom is 0: a raft, other objects and
+  supports with their own heights give the map gaps.
+- **Effective order.** Volumes are grouped by their effective type. Within a
+  group the order is `pr1, pr2, ...`, then the volumes without priority in
+  object order, then `pr-1, pr-2, ...`; ties keep the object order. The strong
+  group still precedes the weak one, so a priority acts only within its group.
+  The object list and the stored order are never changed.
+- **Application.** `init_precise_seam_data_by_rules()` resolves the rules of
+  each object once, before the parallel phase, into the effective type and one
+  active flag per object layer for each volume. Extraction skips a modifier on
+  an inactive layer before recording any usage, so a layer excluded by rules is
+  never reported as "no effect". A volume that is off or active on no layer is
+  left out entirely.
+- **Relay.** Strong volumes of one print object with the same relay label
+  (`relay1`, or the bare `relay`, which is a group of its own) take the seam in
+  turn, layer by layer. `relay1` and `relay-random1` are different groups. The
+  group stands as one block at the place of its most
+  senior member in the effective strong order, also when that member acts on no
+  layer; the queue inside is the object list order, not the priority. On every
+  model layer the holder is the first member, in circular order from the turn,
+  that wins: places a seam on an outer perimeter that its seniors leave free.
+  The seniors are the strong volumes before the block and the blocks of senior
+  groups, each turned to its own holder. The turn then passes to the member
+  after the holder; a layer without a winner keeps it. On every perimeter the
+  block is tried from the holder round the queue, so another member stands in
+  where the holder cannot, without spending the turn; the volumes after the
+  block follow it. A stand-in never changes the holder: the block starts with
+  the holder on every perimeter and tries a stand-in only where the holder
+  fails. Members whose rules exclude the layer neither hold nor stand in. A
+  group that mixes strong and weak members acts without relay, and every
+  member is reported. A group is local to a print object, so the copies of an
+  object share one schedule, and a group of one member is that member alone.
+- **Weak relay.** A group of weak volumes has no winners: the turn passes over
+  the layers where some member's rules keep the layer, whatever its zone meets,
+  with the holder chosen as above from these members (`relay-random` too).
+  The holders depend on the layer sets only, so
+  `init_precise_seam_data_by_rules()` sets them at once: the block stands at
+  the place of its most senior member in the effective weak order, and every
+  member keeps just the layers it holds. Only the holder's zone acts, there is
+  no stand-in, and a turn is spent also where the zone misses the perimeters
+  or a strong modifier takes them. The relay pre-pass and the main pass do not
+  see weak groups.
+- **Random relay.** A `relay-random` group differs only in the choice of the
+  holder, from the same table: the winners of a strong group, the active
+  members of a weak one. The holder is one of them other than the holder of
+  the last layer that had one, unless that holder is the only one. The
+  choice is `hash % candidates` over the candidates in queue order, where the
+  hash is splitmix64 of the group seed mixed with the object layer index. The
+  group seed is splitmix64 of the group number; when some member has a seed,
+  each member in queue order, also one whose rules exclude every layer, then
+  mixes in its seed plus one, or zero without one. A seed of any member thus
+  takes part with its place, and a group without seeds keeps its old
+  holders. Another seed is another draw, not a promise of other holders: with
+  few winners several seeds give the same ones, and two members always
+  alternate after the first free choice. It
+  uses unsigned 64-bit arithmetic only, as the result of a standard library
+  distribution differs between platforms, so every export and platform gives
+  the same seams. The hash ignores the volume IDs, so the schedule survives
+  saving and loading.
+- **Magnet.** On a perimeter whose boundary the modifier's slice does not cross
+  (no segment and no discarded fragment, or full containment, which comes first
+  as it keeps a closed segment), a magnet acts on one point: the point of the
+  perimeter nearest to the boundaries of the slice, contours and holes alike.
+  Nesting either way is therefore no crossing. Where the boundary is crossed,
+  the type acts as usual; where only discarded fragments remain, the modifier
+  does not act, as before. A strong magnet puts the seam at that point through
+  the usual insertion, whatever its Center, Left or Right type; a weak one is a
+  zone of that single point, with boundaries at one vertex, so it types one
+  candidate and no edge is subdivided. With `magnetN` a perimeter farther than
+  N, compared with the snapping tolerance (`TOLERANCE_LINEAR`, 1000 units: 1 µm,
+  10 µm on large beds), is left to the next modifier;
+  `magnet0` thus takes a touch, which on an inclined edge computes slightly
+  above zero. The modifier still needs a slice on the layer.
+  `find_magnet_point()` first finds the minimum distance from vertex queries in
+  two AABB trees of lines, as a nearest pair always has a vertex of one
+  contour. It then collects every point of the minimum: the perimeter vertices
+  that near, with all loops within that distance; the projections of the
+  modifier vertices that near onto all perimeter edges within it, not just the
+  tree's one answer; and, on the edges of these candidates, the projection of
+  each candidate loop's centroid where it is that near to the same loop, which
+  is the best point of an interval of parallel edges. The tolerance only
+  equates computed distances; points of the continuous band within it are not
+  candidates. Each rule then keeps the candidates within the tolerance of its
+  fixed best: the distance to the centroid of the candidate's own loop (skipped
+  when some candidate has no loop with an area), the distance to the centroid of
+  the perimeter, and finally the bed axes, rear then left, exactly as for equal
+  strong segments, so far regions of the modifier and the start of the
+  perimeter do not move the point. Radius queries take 2 units more than the
+  distance, as the tree truncates a query point to whole units, and every hit
+  is checked exactly. The cost is two tree builds per perimeter and modifier,
+  the vertex queries, the hits within the distance in both directions and one
+  check per pair of edge and loop for the centroid projections; the hits grow
+  for nearly equidistant shapes and for many short or repeated boundaries. A
+  magnet reaches a perimeter where it finds a point or, on a crossing, acts by
+  its type; full containment gives it no warning. Relay groups take magnets as they are: a found point is a win.
+- **Magnet apex.** Inside an angle the nearest point lies on a side, never at
+  the tip: from a centre at distance d from the tip, on the bisector of an angle
+  2α, a side is d·sin α away and the tip d. `apex` therefore starts from the
+  nearest point P and looks from the centroid C of the modifier loop P is
+  nearest to (no centroid: P stays). Two rays from C square to CP give Q, the
+  nearer first crossing with the same perimeter; Q must be within N of the
+  modifier's boundaries, as P is, which keeps P outside a corner, at a wall and
+  against a far crossing of a complex perimeter. The ray halfway between CP and
+  CQ crosses the perimeter at R, which picks the part of the loop from P to Q
+  that holds the corner. The farthest point from C on a polyline is a vertex,
+  so the vertices strictly inside that part are compared; when the deepest is
+  not deeper than both ends by more than the tolerance there is no corner, and
+  P stays. Equally deep vertices go to the one nearest the perimeter centroid,
+  then rear and left. A rounded corner works the same way, its deepest vertex
+  winning; a modifier at the very centre of a rounding or of a round hole gets
+  a point decided by the polygon, which the help covers by asking for a
+  modifier wider than the rounding. The cost is a pass over the edges per ray
+  and one over the vertices, after the magnet's own search.
+  Full containment counts as no crossing here too. A modifier moved close to a
+  corner crosses both sides, and the tip lies outside it, between the
+  crossings: where the magnet gives way to the type, `find_crossing_apex()`
+  still looks for the tip. Each crossing segment is bound to the region that
+  holds its middle; a region crossed once, a discarded fragment or a middle no
+  region holds leaves the type to act, as one crossing does without apex. For
+  each region crossed two or more times the middles are sorted along the
+  perimeter, and the part that holds them all without its longest gap, the
+  shortest such part, is searched as above from the region's contour centroid,
+  its ends being the outer middles. Of the tips of several regions the one
+  nearest its own centroid wins, then rear and left; with no tip deeper than
+  its ends the type acts. Regions that do not cross take no part then.
+  A length after `apex`, as in `magnet2apex0.5`, takes a single crossing
+  shorter than it for a touch, so the magnet acts: nearing a corner, the
+  modifier touches one side before the other, and the type would move the
+  seam for that moment. The default 0 checks no length, as a good default
+  depends on the modifier's size. The point of a touch (`find_touch_point()`)
+  is the one its type takes on the crossing, its start for Left, its end for
+  Right, its middle for Center and the weak types, and apex then looks from
+  it; not the point nearest to the boundary: over a crossing those are the
+  crossing's ends, and a corner poking into the modifier lies closer to its
+  centroid than they do.
+- **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
+  `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
+  the layers it takes the perimeters as the main pass extracts them, and runs
+  the strong driver on a fresh copy of each, first with the seniors, then on a
+  free perimeter with each member alone until it wins. These probes are quiet:
+  no log, no counters, no usage flags, so the real pass reports everything once.
+  The queue then runs sequentially from the bottom layer up. One function,
+  `relay_strong_volumes()`, builds both the seniors of a probe and the strong
+  order of a layer in the main pass, where each worker rebuilds one list per
+  layer, so both passes see the same occupation. This rests on the contract of
+  the strong driver: the first success ends a perimeter, and weak modifiers act
+  only without a strong result. Without a strong group of two or more members
+  nothing of this runs. With such groups, perimeters are extracted again and clipping
+  repeats for the members and their seniors, an ordinary senior up to once per
+  group.
+- **Isolation.** Few prints use rules, so the language is a separate branch
+  (`GCode/PreciseSeamRulesApply.cpp`) and the export stages of a print without
+  rules stay in their usual order. The branch is taken per object when a
+  Precise Seam volume has a non-empty rules field or a block marker in its
+  name; the check reads the raw text and parses nothing, and broken rules still
+  take the branch so that they are reported. Without rules there is no early
+  plan or numbering, no parsing or evaluation and no rule messages, and
+  `init_precise_seam_data()` collects the volumes as it does for Precise Seam
+  alone. What remains on that path is the check itself, empty containers, and
+  in the strong and weak loops an optional `EffectiveModifiers` whose lookup is
+  skipped when it is null. The layer numbering is an adapter of the export
+  plan and stays next to it in `GCode.cpp`; when printing by layer it keeps
+  rows only for the objects with rules, while every event of the plate still
+  takes a number. The price is a
+  second collection of the volumes in the branch; a test checks that rules
+  which keep every layer and type give the seams of no rules. Dependencies go
+  one way: the geometric core (`PreciseSeam.hpp`) does not include the language.
+
 ## Data flow
 
 1. **Invalidation.** `Print::apply()` treats a change of Precise Seam volumes as
@@ -94,7 +356,8 @@ discarded, passes the turn to the next one.
    resliced (see [Print invalidation](#print-invalidation)).
 2. **Modifier slices.** `SeamPlacer::init()` collects each object's Precise Seam
    volumes once, slices every volume separately and caches its regions with
-   their bounding boxes.
+   their bounding boxes. An object with relay groups then gets their schedule
+   from the relay pre-pass.
 3. **Perimeters.** Seam candidates are gathered in parallel over the layers.
    For objects with Precise Seam volumes, each external perimeter polygon is
    normalized and prepared once for all modifiers.
@@ -110,7 +373,13 @@ discarded, passes the turn to the next one.
 7. **Selection and restoration.** The configured seam position chooses the
    seams and aligns them. Afterwards the exact strong points are restored.
 8. **Warnings.** After all objects are processed, `SeamPlacer::init()` prepares
-   one combined warning text if any problem was found; G-code export issues it.
+   one combined warning text if any problem was found, and the rules branch one
+   single-line message per layer rule diagnostic; G-code export issues them, each rule
+   message as its own warning so that the export dialog lists every one. A rule
+   message names the element's source and position, escapes control characters
+   of the user's text, and counts equal texts (equal names) instead of dropping
+   them; the log adds the volume ID. `nowarn` hides the differences from the
+   object list in the user warnings only; the log still records them.
 
 ## Modifier slices
 
@@ -246,6 +515,9 @@ follows seam painting, where a whole perimeter can be painted in either color:
 - **Seam Center, Left and Right** are skipped with the full-containment warning:
   there is no intersection to place the point on.
 
+A magnet (see [Layer rules](#layer-rules)) treats full containment as no
+crossing and acts on its nearest point instead, without the warning.
+
 Enforced, Neutral and Blocked take part in the usual priority order (see
 [Weak modifiers](#weak-modifiers)).
 
@@ -286,6 +558,7 @@ Arc length is the sum of Euclidean edge lengths, not the chord or a vertex count
 `insert_strong_seam_point()` selects the longest segment of the first modifier
 that has one. Exactly equal lengths are resolved by the prepared target points:
 greater bed Y first, then smaller X; a complete tie keeps the first segment.
+The same order (`rear_then_left()`) settles the last tie of a magnet point.
 Slice coordinates already include instance rotation and have the bed axes;
 centering and XY translation do not change this order. Nearly equal lengths are
 not treated as equal, so exact ties occur mainly on axis-aligned geometry.
@@ -504,6 +777,12 @@ which has no effect on the print. The current reader restores the keys only when
 the volume ends up as a Precise Seam type, so the settings return when the user
 changes the type back.
 
+The layer rules field is written under `precise_seam_rules` whenever it is not
+empty, whatever the volume type, so that it returns with the Precise Seam type.
+Earlier readers drop the key as an unknown option. A release with Precise Seam
+but without rules opens such a project and applies the stored type on every
+layer in object order, so the seam may differ.
+
 ### Print invalidation
 
 `Print::apply()` compares the Precise Seam volumes of each object by type, ID
@@ -524,6 +803,12 @@ cached.
 Removing the last helper of a single-part object reslices it, as removing any
 last modifier would.
 
+The name and the rules field of a Precise Seam volume hold its layer rules, so a
+change of either invalidates `psGCodeExport` as well
+(`model_precise_seam_rules_changed()`), checked before the new data is copied
+into the print's model. The layer numbers come from the export plan and are
+rebuilt on every export.
+
 ### User interface
 
 - *Add Precise Seam* in the object menu creates a Center modifier from a
@@ -540,6 +825,23 @@ last modifier would.
   Right; green, red and gray for Enforced, Blocked and Neutral. The three strong
   colors are close shades of one orange because all three mark strong
   modifiers; the object list icons tell the modes apart.
+- The part settings edit the rules field of a Precise Seam volume, three lines
+  high, in a *Precise Seam Rules (experimental)* group on the Frequent and the Others page, for
+  a single selected Precise Seam volume only; there is no separate menu item.
+  Renaming such a volume also updates the print, since the name may hold rules. The field is no config option: the part tab adds
+  the groups after its option filter, and a visibility condition of the group
+  hides them for other selections. `PreciseSeamRulesEditor` keeps the shown
+  volume and a pending edit by volume ID; typing changes only the draft, which
+  is applied to its own volume when the field loses focus, on Ctrl+Enter, when
+  the selection changes, before the pages of the tab are cleared, and before
+  saving, closing, slicing and exporting, which may be started by a shortcut
+  while the focus stays in the field; Save also counts it as a change. A backup
+  does not apply it. Undo, redo and a new project drop the
+  draft first, so a late focus loss cannot write it back, and the field shows
+  the restored rules after undo and redo, also when the selection stays.
+  `apply_precise_seam_rules()` writes the text: one snapshot when it differs,
+  then a background update. The group title shows the help of the language as
+  its tooltip. The settings search does not find the field.
 - Precise Seam volumes have no filament and cannot be pasted into SLA objects.
   Python plugins see them as `ModelVolumeType` values and through the
   `is_precise_seam*()` methods.
@@ -579,7 +881,9 @@ last modifier would.
   zones over painting's oversampled candidates, the warning type masks, usage
   tracking for the "had no effect" and whole-perimeter Blocked warnings, volume
   sorting of strong and weak groups, restoration of strong points after
-  alignment, raft layer indexing and structured slices. End-to-end tests slice
+  alignment, raft layer indexing and structured slices; magnet points with
+  their limit, touch, nesting, holes and every tie-break rule, and the strong
+  and weak magnet paths. End-to-end tests slice
   a real object with Precise Seam
   volumes and check the outer wall starts in the exported G-code: every strong
   mode under several seam positions and with a raft, Enforced and Blocked zones,

@@ -260,6 +260,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_ObjectList.hpp
     GUI/GUI_ObjectSettings.cpp
     GUI/GUI_ObjectSettings.hpp
+    GUI/PreciseSeamRulesEditor.cpp
+    GUI/PreciseSeamRulesEditor.hpp
     GUI/GUI_ObjectTable.cpp
     GUI/GUI_ObjectTable.hpp
     GUI/GUI_ObjectTableSettings.cpp

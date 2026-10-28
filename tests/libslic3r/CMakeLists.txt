@@ -14,6 +14,8 @@ add_executable(${_TEST_NAME}_tests
     test_precise_seam.cpp
     # Contour correspondence is pure geometry; Print integration stays in fff_print.
     test_seam_contour.cpp
+    # Layer rules language: parsing and layer selection without a Print.
+    test_precise_seam_rules.cpp
     test_aabbindirect.cpp
     test_appconfig.cpp
     test_arachne_walls.cpp

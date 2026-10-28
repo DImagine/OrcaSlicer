@@ -7,6 +7,9 @@
 #include "Flow.hpp"
 #include "GCode/ThumbnailData.hpp"
 #include "GCode/ToolOrdering.hpp"
+#include "GCode/PreciseSeamRules.hpp"
+#include "GCode/PreciseSeamRulesApply.hpp"
+#include "GCode/SeamPlacer.hpp"
 #include "GCode/SpiralVase.hpp"
 #include "GCode/PressureEqualizer.hpp"
 #include "GCode/SmallAreaInfillFlowCompensator.hpp"
@@ -86,6 +89,7 @@
 #include <string>
 #include <system_error>
 #include <unordered_set>
+#include <unordered_map>
 #include <type_traits>
 #include <utility>
 #include <string_view>
@@ -2523,6 +2527,62 @@ std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> GCode::collec
     return layers_to_print;
 }
 
+// Precise Seam layer rules count the layers as the preview slider does: one number per event of the
+// export plan that prints something. An event prints when its tools have extruders, as process_layer()
+// requires, or when it is a belt brim apron layer, which is handled before that check.
+static SeamPlacer::PreciseSeamNumbering precise_seam_numbering(
+    const Print &print, const ToolOrdering &tool_ordering,
+    const std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> &layers_to_print)
+{
+    // Rows only for the objects with rules; the events of all objects take numbers.
+    SeamPlacer::PreciseSeamNumbering numbering;
+    for (const PrintObject *object : print.objects())
+        if (PreciseSeam::uses_precise_seam_rules(*object->model_object()))
+            numbering[object].object_layers.assign(object->layers().size(), 0);
+    size_t count = 0;
+    for (const auto &[print_z, layers] : layers_to_print) {
+        const bool belt_brim_only =
+            std::none_of(layers.begin(), layers.end(), [](const GCode::LayerToPrint &l) { return l.object_layer || l.support_layer; }) &&
+            std::any_of(layers.begin(), layers.end(), [](const GCode::LayerToPrint &l) { return l.belt_brim_band != nullptr; });
+        if (!belt_brim_only && tool_ordering.tools_for_layer(print_z).extruders.empty())
+            continue;
+        ++count;
+        // Entries follow print.objects(); an event can hold the support of one object and a model layer of another.
+        for (size_t i = 0; i < layers.size(); ++i)
+            if (const Layer *layer = layers[i].object_layer)
+                if (const auto row = numbering.find(print.objects()[i]); row != numbering.end()) {
+                    const size_t index = layer->id() - row->first->slicing_parameters().raft_layers();
+                    if (index < row->second.object_layers.size())
+                        row->second.object_layers[index] = count;
+                }
+    }
+    for (auto &entry : numbering)
+        entry.second.count = count;
+    return numbering;
+}
+
+// Printing by object: the object's own events from 1, the same for all its copies, so that they share
+// one seam cache. Only events that write something are numbered, as when printing by layer.
+static PreciseSeam::LayerNumbering precise_seam_numbering(const PrintObject &object, const std::vector<GCode::LayerToPrint> &layers_to_print)
+{
+    PreciseSeam::LayerNumbering numbering;
+    numbering.object_layers.assign(object.layers().size(), 0);
+    for (const GCode::LayerToPrint &ltp : layers_to_print) {
+        const bool prints = (ltp.object_layer && belt_object_layer_prints_something(object, *ltp.object_layer)) ||
+                            (ltp.support_layer && ltp.support_layer->has_extrusions()) ||
+                            (ltp.belt_brim_band && !ltp.belt_brim_band->fills.empty());
+        if (!prints)
+            continue;
+        ++numbering.count;
+        if (ltp.object_layer) {
+            const size_t index = ltp.object_layer->id() - object.slicing_parameters().raft_layers();
+            if (index < numbering.object_layers.size())
+                numbering.object_layers[index] = numbering.count;
+        }
+    }
+    return numbering;
+}
+
 // free functions called by GCode::do_export()
 namespace DoExport {
 //    static void update_print_estimated_times_stats(const GCodeProcessor& processor, PrintStatistics& print_statistics)
@@ -4468,14 +4528,37 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     DoExport::init_ooze_prevention(print, m_ooze_prevention);
     print.throw_if_canceled();
 
+    // Precise Seam layer rules take their layer numbers from the layer plan. Only when rules are used is the
+    // plan collected here, once, and reused by the export below: collect_layers_to_print() raises warnings
+    // and errors, so it is not repeated. Without rules the export collects it where it always did.
+    std::optional<std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>>> layers_to_print_by_layer;
+    std::unordered_map<const PrintObject*, std::vector<LayerToPrint>> layers_to_print_by_object;
+    SeamPlacer::PreciseSeamNumbering precise_seam_layer_numbering;
+    const auto uses_rules = [](const PrintObject *object) { return PreciseSeam::uses_precise_seam_rules(*object->model_object()); };
+    // The same condition as the export below: with a wipe tower, a by-object print is exported by layer.
+    if (print.config().print_sequence == PrintSequence::ByObject && !has_wipe_tower) {
+        for (const PrintObject *object : print.objects())
+            if (uses_rules(object)) {
+                const std::vector<LayerToPrint> &layers = layers_to_print_by_object[object] = collect_layers_to_print(*object, belt);
+                precise_seam_layer_numbering[object] = precise_seam_numbering(*object, layers);
+            }
+    } else if (std::any_of(print.objects().begin(), print.objects().end(), uses_rules)) {
+        // Printing by layer, the numbers count the events of the whole plate, objects without rules included.
+        layers_to_print_by_layer = collect_layers_to_print(print);
+        precise_seam_layer_numbering = precise_seam_numbering(print, tool_ordering, *layers_to_print_by_layer);
+    }
+
     // Collect custom seam data from all objects.
     std::function<void(void)> throw_if_canceled_func = [&print]() { print.throw_if_canceled(); };
-    m_seam_placer.init(print, throw_if_canceled_func);
+    m_seam_placer.init(print, throw_if_canceled_func, &precise_seam_layer_numbering);
     // Precise Seam: init() only prepares its warning; issue it here, inside the active export step.
     if (!m_seam_placer.precise_seam_warning().empty())
         print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
                                       m_seam_placer.precise_seam_warning(),
                                       PrintStateBase::SlicingPreciseSeamWarning);
+    // Each layer rule message is its own warning, so the export dialog lists all of them.
+    for (const std::string &warning : m_seam_placer.precise_seam_rule_warnings())
+        print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, warning);
 
     // BBS: get path for change filament
     if (m_writer.multiple_extruders) {
@@ -4684,7 +4767,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                 // and export G-code into file.
                 tool_ordering.cal_most_used_extruder(print.config());
                 m_printed_objects.emplace_back(&object);
-                this->process_layers(print, tool_ordering, collect_layers_to_print(object, print.config().belt_printer.value), *print_object_instance_sequential_active - object.instances().data(), file,
+                const auto collected = layers_to_print_by_object.find(&object);
+                this->process_layers(print, tool_ordering,
+                                     collected != layers_to_print_by_object.end() ? collected->second : collect_layers_to_print(object, print.config().belt_printer.value),
+                                     *print_object_instance_sequential_active - object.instances().data(), file,
                                      prime_extruder);
                 {
                     // save the flush statitics stored in tool ordering by object
@@ -4713,7 +4799,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         } else {
             // Sort layers by Z.
             // All extrusion moves with the same top layer height are extruded uninterrupted.
-            std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>> layers_to_print = collect_layers_to_print(print);
+            std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>> layers_to_print =
+                layers_to_print_by_layer ? std::move(*layers_to_print_by_layer) : collect_layers_to_print(print);
             // Prusa Multi-Material wipe tower.
             if (has_wipe_tower && ! layers_to_print.empty()) {
                 m_wipe_tower.reset(new WipeTowerIntegration(print.config(), print.get_plate_index(), print.get_plate_origin(), *print.wipe_tower_data().priming.get(),

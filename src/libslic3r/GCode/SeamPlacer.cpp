@@ -54,6 +54,8 @@
 
 #include "libslic3r/Utils.hpp"
 #include "PreciseSeam.hpp"
+#include "PreciseSeamRules.hpp"
+#include "PreciseSeamRulesApply.hpp"
 
 //#define DEBUG_FILES
 
@@ -370,6 +372,10 @@ struct GlobalModelInfo {
 
   // Slice each modifier once; both consumers share structured regions and source provenance.
   PreciseSeam::ModifierRegionsCache precise_seam_slices;
+  // Effective type and active layers of the modifiers above, only for an object that uses layer rules.
+  std::optional<PreciseSeam::EffectiveModifiers> precise_seam_effective;
+  // Relay groups of that object and their holders, only when some group has two members or more.
+  std::optional<PreciseSeam::RelayOrder> precise_seam_relay;
 
   bool is_enforced(const Vec3f &position, float radius) const {
     if (enforcers.empty()) {
@@ -670,10 +676,12 @@ std::vector<PaintedInterval> exact_painted_intervals(const std::vector<Vec2d> &l
 // For each vertex: computes position, angle, and type (Enforcer / Blocker / Neutral).
 // When Precise Seam modifiers are present: inserts strong seam point,
 // oversamples enforcer edges, applies weak modifiers, marks one enforced point as central for alignment.
+// `layer_strong_volumes`, when given, replaces the object's strong list with the order of this layer (relay).
 void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const LayerRegion *region,
                                const GlobalModelInfo &global_model_info, PrintObjectSeamData::LayerSeams &result,
                                PreciseSeam::PreciseSeamWarnings* warnings = nullptr,
-                               std::optional<bool> boundary_hole = std::nullopt) {
+                               std::optional<bool> boundary_hole = std::nullopt,
+                               const std::vector<const ModelVolume*> *layer_strong_volumes = nullptr) {
   if (orig_polygon.size() == 0) {
     return;
   }
@@ -684,7 +692,7 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   const Layer* layer = region ? region->layer() : nullptr;
 
   // Use pre-computed Precise Seam volumes from global_model_info (computed once in init)
-  const auto& strong_volumes = global_model_info.precise_seam_strong_volumes;
+  const auto& strong_volumes = layer_strong_volumes ? *layer_strong_volumes : global_model_info.precise_seam_strong_volumes;
   const auto& weak_volumes = global_model_info.precise_seam_weak_volumes;
 
   std::optional<Point> seam_point;
@@ -693,11 +701,14 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     // Share validation, bounds and clipping line across all modifiers while the polygon is unchanged.
     // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
     const PreciseSeam::PreparedPerimeter prepared(polygon);
+    // Only an object with layer rules passes their effective types and layers.
+    const PreciseSeam::EffectiveModifiers *effective =
+        global_model_info.precise_seam_effective ? &*global_model_info.precise_seam_effective : nullptr;
     seam_point = PreciseSeam::insert_strong_seam_point(
-        strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
+        strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings, effective);
     if (!seam_point.has_value())
       weak_segments = PreciseSeam::collect_weak_modifier_segments(
-          weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
+          weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings, effective);
   }
 
   // Store the inserted point position for marking as central_enforcer later.
@@ -1641,6 +1652,10 @@ void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerI
   tbb::parallel_for(tbb::blocked_range<size_t>(0, po->layers().size()),
                     [po, &global_model_info, &seam_data, warnings]
                     (tbb::blocked_range<size_t> r) {
+                      // Strong order of one layer with relay groups, reused for the layers of this range.
+                      const PreciseSeam::RelayOrder *relay =
+                          global_model_info.precise_seam_relay ? &*global_model_info.precise_seam_relay : nullptr;
+                      std::vector<const ModelVolume*> layer_strong_volumes;
                       for (size_t layer_idx = r.begin(); layer_idx < r.end(); ++layer_idx) {
                         PrintObjectSeamData::LayerSeams &layer_seams = seam_data.layers[layer_idx];
                         const Layer *layer = po->get_layer(layer_idx);
@@ -1651,10 +1666,13 @@ void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerI
                         const bool has_precise_seam_modifiers = !global_model_info.precise_seam_strong_volumes.empty() ||
                                                                !global_model_info.precise_seam_weak_volumes.empty();
                         Polygons polygons = extract_perimeter_polygons(layer, regions, boundary_types, has_precise_seam_modifiers);
+                        if (relay)
+                          PreciseSeam::relay_strong_volumes(*relay, *global_model_info.precise_seam_effective, layer_idx,
+                                                            relay->entries.size(), layer_strong_volumes);
                         for (size_t poly_index = 0; poly_index < polygons.size(); ++poly_index) {
                           process_perimeter_polygon(polygons[poly_index], unscaled_z,
                                                     regions[poly_index], global_model_info, layer_seams,
-                                                    warnings, boundary_types[poly_index]);
+                                                    warnings, boundary_types[poly_index], relay ? &layer_strong_volumes : nullptr);
                         }
                         auto functor = SeamCandidateCoordinateFunctor { layer_seams.points };
                         seam_data.layers[layer_idx].points_tree =
@@ -2112,13 +2130,17 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
 
 }
 
-void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_canceled_func) {
+void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_canceled_func,
+                      const PreciseSeamNumbering *numbering) {
   using namespace SeamPlacerImpl;
   m_seam_per_object.clear();
   m_precise_seam_warning.clear();
+  m_precise_seam_rule_warnings.clear();
 
   // Warning flags for Precise Seam processing — shared across all objects
   PreciseSeam::PreciseSeamWarnings precise_seam_warnings;
+  // Layer rule diagnostics of all objects; print objects of one model object repeat them.
+  std::vector<PreciseSeam::ModifierDiagnostic> rule_diagnostics;
 
   for (const PrintObject *po : print.objects()) {
     throw_if_canceled_func();
@@ -2128,11 +2150,39 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
     {
       GlobalModelInfo global_model_info { };
       gather_enforcers_blockers(global_model_info, po);
-      PreciseSeam::init_precise_seam_data(
-          global_model_info.precise_seam_strong_volumes,
-          global_model_info.precise_seam_weak_volumes,
-          m_seam_per_object[po].has_precise_seam_strong_volumes,
-          po->model_object());
+      if (PreciseSeam::uses_precise_seam_rules(*po->model_object())) {
+          // Layer rules: their own branch, see PreciseSeamRulesApply.hpp.
+          PreciseSeam::LayerNumbering own_layers;
+          const PreciseSeam::LayerNumbering *object_numbering = &own_layers;
+          if (numbering != nullptr) {
+              // The export numbers every object that uses rules. Asserted, not checked at run time: an
+              // invariant that cannot fail in the export is documented, not handled.
+              const auto it = numbering->find(po);
+              assert(it != numbering->end());
+              if (it != numbering->end())
+                  object_numbering = &it->second;
+          } else {
+              // Called without the export plan (tests): the object numbers its own layers from 1.
+              own_layers.count = po->layers().size();
+              for (size_t i = 0; i < own_layers.count; ++i)
+                  own_layers.object_layers.push_back(i + 1);
+          }
+          PreciseSeam::init_precise_seam_data_by_rules(
+              global_model_info.precise_seam_strong_volumes,
+              global_model_info.precise_seam_weak_volumes,
+              m_seam_per_object[po].has_precise_seam_strong_volumes,
+              *po->model_object(),
+              *object_numbering,
+              po->layers(),
+              global_model_info.precise_seam_effective.emplace(),
+              global_model_info.precise_seam_relay,
+              rule_diagnostics);
+      } else
+          PreciseSeam::init_precise_seam_data(
+              global_model_info.precise_seam_strong_volumes,
+              global_model_info.precise_seam_weak_volumes,
+              m_seam_per_object[po].has_precise_seam_strong_volumes,
+              po->model_object());
 
       // Slice each Precise Seam modifier once per object; both consumers read the cache.
       for (const ModelVolume* vol : global_model_info.precise_seam_strong_volumes)
@@ -2145,6 +2195,25 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
           precise_seam_warnings.modifier_usage.try_emplace(vol);
       for (const ModelVolume* vol : global_model_info.precise_seam_weak_volumes)
           precise_seam_warnings.modifier_usage.try_emplace(vol);
+      // Relay: who holds the turn of each group on each layer, from the same perimeters as the main pass.
+      if (global_model_info.precise_seam_relay)
+          PreciseSeam::schedule_relay(*global_model_info.precise_seam_relay, *po, *global_model_info.precise_seam_effective,
+              global_model_info.precise_seam_slices,
+              [](const Layer &layer) {
+                  std::vector<const LayerRegion*> regions;
+                  // Boundary types only mark the perimeter after the seam point is chosen; the probe needs none.
+                  std::vector<std::optional<bool>> boundary_types;
+                  // An object with relay groups has strong modifiers, so the main pass normalizes too.
+                  Polygons polygons = extract_perimeter_polygons(&layer, regions, boundary_types, true);
+                  // Without a region the main pass leaves Precise Seam out, as for the placeholder of a layer
+                  // without perimeters.
+                  Polygons out;
+                  for (size_t i = 0; i < polygons.size(); ++i)
+                      if (regions[i] != nullptr && !polygons[i].empty())
+                          out.push_back(std::move(polygons[i]));
+                  return out;
+              },
+              throw_if_canceled_func);
 
       throw_if_canceled_func();
       if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {
@@ -2316,6 +2385,11 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
           m_precise_seam_warning = std::move(warning_text);
       }
   }
+
+  // Layer rule diagnostics: each one is a separate single-line warning, in object, volume, source and
+  // element order. Only objects with rules produce them.
+  if (!rule_diagnostics.empty())
+      m_precise_seam_rule_warnings = PreciseSeam::rule_warnings(rule_diagnostics);
 }
 
 void SeamPlacer::place_seam(const Layer *layer, ExtrusionLoop &loop,
