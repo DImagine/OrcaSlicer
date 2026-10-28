@@ -294,6 +294,18 @@ print and is tested on its own.
   a point decided by the polygon, which the help covers by asking for a
   modifier wider than the rounding. The cost is a pass over the edges per ray
   and one over the vertices, after the magnet's own search.
+  Full containment counts as no crossing here too. A modifier moved close to a
+  corner crosses both sides, and the tip lies outside it, between the
+  crossings: where the magnet gives way to the type, `find_crossing_apex()`
+  still looks for the tip. Each crossing segment is bound to the region that
+  holds its middle; a region crossed once, a discarded fragment or a middle no
+  region holds leaves the type to act, as one crossing does without apex. For
+  each region crossed two or more times the middles are sorted along the
+  perimeter, and the part that holds them all without its longest gap, the
+  shortest such part, is searched as above from the region's contour centroid,
+  its ends being the outer middles. Of the tips of several regions the one
+  nearest its own centroid wins, then rear and left; with no tip deeper than
+  its ends the type acts. Regions that do not cross take no part then.
 - **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
   `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, and runs

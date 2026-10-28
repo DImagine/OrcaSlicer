@@ -154,6 +154,13 @@ struct MagnetPoint {
 std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                              std::optional<double> limit, bool apex = false);
 
+// magnet apex across crossings: where every region of the modifier that crosses the perimeter does so two or
+// more times, the tip of the corner between the middles of its crossings, on the shortest part of the
+// perimeter that holds them all; the tip nearest the centroid of its region wins. nullopt where the type acts:
+// fewer than two crossings, a region crossed once, a discarded fragment, or no vertex deeper than the ends.
+std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
+                                              const SegmentExtraction &extracted);
+
 // Result of weak modifier segment processing
 struct WeakModifierSegment {
     SeamPlacerImpl::EnforcedBlockedSeamPoint type;  // Enforced/Blocked/Neutral

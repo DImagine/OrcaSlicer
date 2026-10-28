@@ -554,6 +554,71 @@ static std::pair<Vec2d, double> project_on_segment(const Vec2d &point, const Vec
     return {a + t * ab, t};
 }
 
+// Positions along a perimeter as arc lengths from vertex 0.
+struct ArcLengths {
+    std::vector<double> start; // Of each vertex, and the total length last.
+
+    explicit ArcLengths(const Lines &lines) : start(lines.size() + 1, 0.)
+    {
+        for (size_t edge = 0; edge < lines.size(); ++edge)
+            start[edge + 1] = start[edge] + lines[edge].length();
+    }
+    double total() const { return start.back(); }
+    double along(const PerimeterPosition &p) const
+    {
+        return start[p.edge_index] + p.parameter * (start[p.edge_index + 1] - start[p.edge_index]);
+    }
+    // The length forward from one position to another, around the start.
+    double forward(double from, double to) const { return to >= from ? to - from : to - from + total(); }
+    // The point at an arc length.
+    Vec2d point(const Lines &lines, double at) const
+    {
+        const size_t edge = std::min<size_t>(std::upper_bound(start.begin(), start.end(), at) - start.begin(), lines.size()) - 1;
+        const double length = start[edge + 1] - start[edge];
+        const double t      = length > 0. ? std::clamp((at - start[edge]) / length, 0., 1.) : 0.;
+        return lines[edge].a.cast<double>() + t * (lines[edge].b - lines[edge].a).cast<double>();
+    }
+};
+
+// The tip of a corner: the vertex strictly inside the part `span` long forward from `from` that is farthest
+// from `centre`, when it lies deeper than `ends` (the depth of the part's ends) by more than the tolerance.
+// The distance along a segment is convex, so no point between vertices lies deeper. Equally deep vertices go
+// to the one nearest the perimeter centroid, then to the rear and left one.
+static std::optional<size_t> deepest_vertex(const Polygon &perimeter, const ArcLengths &arcs, double from, double span,
+                                            const Vec2d &centre, double ends, double tolerance)
+{
+    std::vector<std::pair<size_t, double>> inside;
+    double                                 deepest = 0.;
+    for (size_t k = 0; k < perimeter.size(); ++k) {
+        const double offset = arcs.forward(from, arcs.start[k]);
+        if (offset <= 0. || offset >= span)
+            continue;
+        const double distance = (perimeter[k].cast<double>() - centre).norm();
+        inside.emplace_back(k, distance);
+        deepest = std::max(deepest, distance);
+    }
+    if (inside.empty() || deepest <= ends + tolerance)
+        return std::nullopt;
+    std::vector<size_t> candidates;
+    for (const auto &[k, distance] : inside)
+        if (distance >= deepest - tolerance)
+            candidates.push_back(k);
+    if (perimeter.area() != 0.) {
+        const Vec2d centroid    = perimeter.centroid().cast<double>();
+        const auto  to_centroid = [&](size_t k) { return (perimeter[k].cast<double>() - centroid).norm(); };
+        double      nearest     = std::numeric_limits<double>::infinity();
+        for (size_t k : candidates)
+            nearest = std::min(nearest, to_centroid(k));
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](size_t k) { return to_centroid(k) > nearest + tolerance; }),
+                         candidates.end());
+    }
+    size_t best = candidates.front();
+    for (size_t k : candidates)
+        if (rear_then_left(perimeter[k], perimeter[best]))
+            best = k;
+    return best;
+}
+
 // magnet apex: the vertex of the corner the modifier stands in, from its loop centroid `centre` and the
 // nearest point `nearest`, or nullopt to keep that point. Q is the first crossing of a ray from the centre
 // square to the line to P, within the limit as P is; the ray halfway between them picks which part of the
@@ -602,53 +667,76 @@ static std::optional<MagnetPoint> find_apex_point(const Polygon &perimeter, cons
     if (!r)
         return std::nullopt;
 
-    // Positions as arc lengths from vertex 0; the part from P to Q that holds R, forward or backward.
-    std::vector<double> start(count + 1, 0.);
-    for (size_t edge = 0; edge < count; ++edge)
-        start[edge + 1] = start[edge] + perimeter_lines[edge].length();
-    const double total   = start[count];
-    const auto   along   = [&start](const PerimeterPosition &p) {
-        return start[p.edge_index] + p.parameter * (start[p.edge_index + 1] - start[p.edge_index]);
-    };
-    const auto   forward = [total](double from, double to) { return to >= from ? to - from : to - from + total; };
-    const double sp      = along(nearest.position);
-    const double sq      = along(q->position);
-    const bool   ahead   = forward(sp, along(r->position)) <= forward(sp, sq);
-    const double span    = ahead ? forward(sp, sq) : forward(sq, sp);
-
-    // The distance along a segment is convex, so the farthest point is a vertex strictly inside the part.
-    std::vector<std::pair<size_t, double>> inside;
-    double                                 deepest = 0.;
-    for (size_t k = 0; k < count; ++k) {
-        const double offset = ahead ? forward(sp, start[k]) : forward(start[k], sp);
-        if (offset <= 0. || offset >= span)
-            continue;
-        const double distance = (perimeter[k].cast<double>() - centre).norm();
-        inside.emplace_back(k, distance);
-        deepest = std::max(deepest, distance);
-    }
-    // No corner deeper than both ends: the nearest point stays.
-    if (inside.empty() || deepest <= std::max(to_p.norm(), q->distance) + tolerance)
+    // The part from P to Q that holds R, taken forward: backward from P is forward from Q.
+    const ArcLengths arcs(perimeter_lines);
+    const double     sp    = arcs.along(nearest.position);
+    const double     sq    = arcs.along(q->position);
+    const bool       ahead = arcs.forward(sp, arcs.along(r->position)) <= arcs.forward(sp, sq);
+    const double     ends  = std::max(to_p.norm(), q->distance);
+    const std::optional<size_t> tip = ahead ? deepest_vertex(perimeter, arcs, sp, arcs.forward(sp, sq), centre, ends, tolerance) :
+                                              deepest_vertex(perimeter, arcs, sq, arcs.forward(sq, sp), centre, ends, tolerance);
+    if (!tip)
         return std::nullopt;
-    // Equally deep vertices go to the one nearest the perimeter centroid, then to the rear and left one.
-    std::vector<size_t> candidates;
-    for (const auto &[k, distance] : inside)
-        if (distance >= deepest - tolerance)
-            candidates.push_back(k);
-    if (perimeter.area() != 0.) {
-        const Vec2d  centroid = perimeter.centroid().cast<double>();
-        const auto   to_centroid = [&](size_t k) { return (perimeter[k].cast<double>() - centroid).norm(); };
-        double       best        = std::numeric_limits<double>::infinity();
-        for (size_t k : candidates)
-            best = std::min(best, to_centroid(k));
-        candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](size_t k) { return to_centroid(k) > best + tolerance; }),
-                         candidates.end());
+    return MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
+}
+
+std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
+                                              const SegmentExtraction &extracted)
+{
+    if (!prepared.valid || !extracted.valid || extracted.full_containment || extracted.discarded_fragments > 0 ||
+        extracted.segments.size() < 2)
+        return std::nullopt;
+    const Polygon   &perimeter = prepared.polygon;
+    const Lines      lines     = to_lines(perimeter);
+    const ArcLengths arcs(lines);
+    const double     tolerance = double(TOLERANCE_LINEAR);
+    // The middle of each crossing, by the region it lies in. Segments run forward from begin to end.
+    std::vector<std::vector<double>> middles(modifier.size());
+    for (const PerimeterSegment &segment : extracted.segments) {
+        const double begin  = arcs.along(segment.begin);
+        double       middle = begin + arcs.forward(begin, arcs.along(segment.end)) / 2.;
+        if (middle >= arcs.total())
+            middle -= arcs.total();
+        const Point point(arcs.point(lines, middle));
+        const auto  region = std::find_if(modifier.begin(), modifier.end(), [&point](const ModifierRegion &r) {
+            return r.bounds.contains(point) && r.polygon.contains(point);
+        });
+        // A crossing that no region holds cannot be placed: the type acts.
+        if (region == modifier.end())
+            return std::nullopt;
+        middles[region - modifier.begin()].push_back(middle);
     }
-    size_t best = candidates.front();
-    for (size_t k : candidates)
-        if (rear_then_left(perimeter[k], perimeter[best]))
-            best = k;
-    return MagnetPoint{perimeter[best], PerimeterPosition{best, 0.}};
+    // A region crossed once makes the type act, apex or not.
+    if (std::any_of(middles.begin(), middles.end(), [](const std::vector<double> &m) { return m.size() == 1; }))
+        return std::nullopt;
+    std::optional<MagnetPoint> best;
+    double                     best_distance = std::numeric_limits<double>::infinity();
+    for (size_t r = 0; r < modifier.size(); ++r) {
+        std::vector<double> &m = middles[r];
+        if (m.size() < 2 || modifier[r].polygon.contour.area() == 0.)
+            continue;
+        std::sort(m.begin(), m.end());
+        // The shortest part that holds every middle leaves out the longest gap between neighbours.
+        size_t gap = 0;
+        for (size_t i = 1; i < m.size(); ++i)
+            if (arcs.forward(m[i], m[(i + 1) % m.size()]) > arcs.forward(m[gap], m[(gap + 1) % m.size()]))
+                gap = i;
+        const double from   = m[(gap + 1) % m.size()];
+        const double span   = arcs.total() - arcs.forward(m[gap], from);
+        const Vec2d  centre = modifier[r].polygon.contour.centroid().cast<double>();
+        const double ends   = std::max((arcs.point(lines, from) - centre).norm(), (arcs.point(lines, m[gap]) - centre).norm());
+        const std::optional<size_t> tip = deepest_vertex(perimeter, arcs, from, span, centre, ends, tolerance);
+        if (!tip)
+            continue;
+        // Tips of several regions: the one nearest the centroid of its own region, then the rear and left one.
+        const double distance = (perimeter[*tip].cast<double>() - centre).norm();
+        if (!best || distance < best_distance - tolerance ||
+            (distance <= best_distance + tolerance && rear_then_left(perimeter[*tip], best->point))) {
+            best          = MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
+            best_distance = distance;
+        }
+    }
+    return best;
 }
 
 std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
@@ -1066,6 +1154,14 @@ std::optional<Point> insert_strong_seam_point(
             return seam_point;
         }
         record_extraction(warnings, modifier, type, extracted);
+        // apex: two or more crossings put the seam at the tip of the corner between them.
+        if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet->magnet_apex)
+            if (const std::optional<MagnetPoint> tip = find_crossing_apex(prepared, it->second[layer_id], extracted)) {
+                const auto [seam_point, seam_index] = insert_point_into_perimeter(tip->point, tip->position.edge_index, polygon);
+                refine_at_vertex(seam_index, +1, polygon);
+                refine_at_vertex(seam_index, -1, polygon);
+                return seam_point;
+            }
         // Full containment leaves no intersection to place the point on: skipped with a warning.
         if (extracted.full_containment) {
             if (warnings)
@@ -1315,6 +1411,12 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
             continue;
         }
         record_extraction(warnings, modifier_volume, volume_type, extracted);
+        // apex: two or more crossings type the tip of the corner between them only.
+        if (const EffectiveModifier *magnet = magnet_of(effective, modifier_volume); magnet != nullptr && magnet->magnet_apex)
+            if (const std::optional<MagnetPoint> tip = find_crossing_apex(prepared, it->second[layer_id], extracted)) {
+                result.push_back({type, tip->point, tip->position, tip->point, tip->position, false, modifier_volume});
+                continue;
+            }
         // Full containment works like seam painting all round: the whole perimeter takes the type.
         // A perimeter left whole Blocked also gets a warning (see apply_weak_modifiers_to_perimeter()).
         if (extracted.full_containment) {

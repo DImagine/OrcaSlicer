@@ -2664,6 +2664,73 @@ TEST_CASE("A magnet with apex keeps the nearest point where no corner holds the 
     CHECK(magnet_point(hole, Polygons{dot}, std::nullopt, true) == magnet_point(hole, Polygons{dot}));
 }
 
+namespace {
+// The tip that magnet apex finds between the crossings of the perimeter with the modifier loops.
+std::optional<Point> crossing_apex(const Polygon &perimeter, const Polygons &loops)
+{
+    ExPolygons regions;
+    for (const Polygon &loop : loops)
+        regions.emplace_back(loop);
+    const PreciseSeam::PreparedPerimeter prepared(perimeter);
+    const PreciseSeam::ModifierRegions   modifier  = PreciseSeam::prepare_modifier_regions(std::move(regions));
+    const PreciseSeam::SegmentExtraction extracted = PreciseSeam::extract_perimeter_segments(prepared, modifier,
+                                                                                             ModelVolumeType::PRECISE_SEAM_ENFORCED);
+    const std::optional<PreciseSeam::MagnetPoint> found = PreciseSeam::find_crossing_apex(prepared, modifier, extracted);
+    return found ? std::optional<Point>(found->point) : std::nullopt;
+}
+
+// 40 x 20 mm with a V notch from the top, its tip at (20, 10) and its sides at x = 20 -+ (y - 10) / 2.
+Polygon notched() { return Polygon(Points{mm(0, 0), mm(40, 0), mm(40, 20), mm(25, 20), mm(20, 10), mm(15, 20), mm(0, 20)}); }
+} // namespace
+
+TEST_CASE("A magnet with apex that crosses both sides of a corner takes its tip", "[PreciseSeam][Magnet]")
+{
+    const size_t shift = GENERATE(0, 3, 5);
+    CAPTURE(shift);
+    const Polygon perimeter = rotated(notched(), shift);
+    // Across both sides above the tip: the middles of the crossings are (18, 14) and (22, 14), 2 mm from the
+    // centroid, and the tip 4 mm; the short part between them holds the tip, the long one the whole body.
+    const Polygon across = rectangle(17, 13, 23, 15);
+    CHECK(crossing_apex(perimeter, {across}) == mm(20, 10));
+    // Over the tip the modifier crosses once, and its type acts.
+    CHECK_FALSE(crossing_apex(perimeter, {rectangle(18, 8, 22, 12)}).has_value());
+    // So it does when another loop of the modifier crosses once, here the bottom edge.
+    CHECK_FALSE(crossing_apex(perimeter, {across, rectangle(5, -1, 7, 1)}).has_value());
+    // A loop that does not cross takes no part; the crossing one still finds the tip.
+    CHECK(crossing_apex(perimeter, {across, rectangle(5, 2, 7, 4)}) == mm(20, 10));
+}
+
+TEST_CASE("Strong and weak magnets with apex act on the tip between two crossings", "[PreciseSeam][Magnet]")
+{
+    SeamFixture                     fixture;
+    PreciseSeam::EffectiveModifiers effective;
+    const auto add = [&](ModelVolumeType type, bool apex) {
+        const ModelVolume *volume = fixture.add(type, {rectangle(17, 13, 23, 15)});
+        PreciseSeam::EffectiveModifier rule = magnet_rule(type);
+        rule.magnet_apex = apex;
+        effective.emplace(volume, rule);
+        return volume;
+    };
+    const auto strong = [&](const ModelVolume *volume) {
+        Polygon perimeter = notched();
+        return PreciseSeam::insert_strong_seam_point({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
+                                                     fixture.cache, nullptr, &effective);
+    };
+    CHECK(strong(add(ModelVolumeType::PRECISE_SEAM_CENTER, true)) == mm(20, 10));
+    // Without apex the crossing makes the type act: the middle of a crossing, not the tip.
+    const std::optional<Point> plain = strong(add(ModelVolumeType::PRECISE_SEAM_CENTER, false));
+    REQUIRE(plain.has_value());
+    CHECK(*plain != mm(20, 10));
+    // A weak one types the tip alone.
+    const ModelVolume *green_apex = add(ModelVolumeType::PRECISE_SEAM_ENFORCED, true);
+    Polygon            perimeter  = notched();
+    const auto segments = PreciseSeam::collect_weak_modifier_segments({green_apex}, perimeter, PreciseSeam::PreparedPerimeter(perimeter),
+                                                                      fixture.layer, fixture.cache, nullptr, &effective);
+    REQUIRE(segments.size() == 1);
+    CHECK(segments.front().left_point == mm(20, 10));
+    CHECK(segments.front().right_point == mm(20, 10));
+}
+
 TEST_CASE("A strong magnet places the seam where it does not cross the perimeter, and acts by its type where it does", "[PreciseSeam][Magnet]")
 {
     SeamFixture                     fixture;
