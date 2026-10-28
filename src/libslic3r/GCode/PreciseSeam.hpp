@@ -140,34 +140,6 @@ struct SegmentExtraction {
 SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                              ModelVolumeType mode, const ExtractionContext &context = {});
 
-// The point of a perimeter that a magnet modifier acts on.
-struct MagnetPoint {
-    Point             point;
-    PerimeterPosition position; // On the unchanged perimeter.
-};
-
-// Point of a prepared, unchanged perimeter nearest to the boundaries of the modifier's regions, or nullopt
-// when there are none or all are farther than `limit` (scaled units, compared with the snapping tolerance).
-// Equally near points go to the one nearest the centroid of its modifier loop, then of the perimeter,
-// then to the rear and left one. With `apex`, the point then moves to the vertex of a corner that the modifier
-// stands in, when there is one within reach.
-std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
-                                             std::optional<double> limit, bool apex = false);
-
-// The point of a magnet with apex whose only crossing is shorter than its length, a touch: the point the type
-// takes on that crossing (its start for Left, its end for Right, its middle for Center and the weak types),
-// then the tip of the corner the modifier stands in as find_magnet_point() looks for it.
-std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
-                                            const PerimeterSegment &touch, ModelVolumeType type, std::optional<double> limit,
-                                            bool apex);
-
-// magnet apex across crossings: where every region of the modifier that crosses the perimeter does so two or
-// more times, the tip of the corner between the middles of its crossings, on the shortest part of the
-// perimeter that holds them all; the tip nearest the centroid of its region wins. nullopt where the type acts:
-// fewer than two crossings, a region crossed once, a discarded fragment, or no vertex deeper than the ends.
-std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
-                                              const SegmentExtraction &extracted);
-
 // Result of weak modifier segment processing
 struct WeakModifierSegment {
     SeamPlacerImpl::EnforcedBlockedSeamPoint type;  // Enforced/Blocked/Neutral
@@ -181,21 +153,6 @@ struct WeakModifierSegment {
     const ModelVolume *modifier = nullptr; // Source modifier, for the warnings.
 };
 
-// One Precise Seam modifier as it acts on one print object, set by its layer rules
-// (PreciseSeamRulesApply.hpp).
-struct EffectiveModifier {
-    ModelVolumeType   type;   // Rule label, or the type in the object list.
-    std::vector<bool> layers; // Active object layers by index without raft; empty means every layer.
-    bool                  magnet = false; // magnet: a perimeter it does not cross gets its nearest point.
-    std::optional<double> magnet_limit;   // Scaled units; none with magnet means any distance.
-    bool                  magnet_apex = false; // magnet apex: from the nearest point to the vertex of the corner.
-    double                magnet_apex_length = 0.; // Scaled: with apex, one crossing shorter than this is a touch.
-
-    bool active_on(size_t layer_id) const { return layers.empty() || (layer_id < layers.size() && layers[layer_id]); }
-};
-// Modifiers missing here act with their own type on every layer.
-using EffectiveModifiers = std::unordered_map<const ModelVolume*, EffectiveModifier>;
-
 // Collects the object's Precise Seam volumes: strong ones in priority order, weak ones in application
 // order. Call once per object in SeamPlacer::init() before gathering candidates.
 void init_precise_seam_data(
@@ -205,30 +162,24 @@ void init_precise_seam_data(
     const ModelObject* model_object);
 
 // Inserts the seam point of the first strong modifier with a usable segment on this perimeter and returns
-// it, or nullopt. `prepared` must describe `polygon` before any change. Only objects with layer rules
-// pass `effective`; without it every modifier acts with its own type on every layer. A `quiet` call is a
-// probe of the relay pre-pass: it logs nothing and takes no `warnings`.
+// it, or nullopt. `prepared` must describe `polygon` before any change.
 std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
     Polygon &polygon,
     const PreparedPerimeter &prepared,
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
-    PreciseSeamWarnings* warnings = nullptr,
-    const EffectiveModifiers *effective = nullptr,
-    bool quiet = false);
+    PreciseSeamWarnings* warnings = nullptr);
 
 // Collects weak zones, inserts their boundaries into `polygon` and subdivides enforced edges. Pass
-// modifiers lowest priority first; `prepared` must describe the unchanged `polygon`. `effective` as for
-// insert_strong_seam_point().
+// modifiers lowest priority first; `prepared` must describe the unchanged `polygon`.
 std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const std::vector<const ModelVolume*> &weak_volumes,
     Polygon &polygon,
     const PreparedPerimeter &prepared,
     const Layer *layer,
     const ModifierRegionsCache &slices_cache,
-    PreciseSeamWarnings* warnings = nullptr,
-    const EffectiveModifiers *effective = nullptr);
+    PreciseSeamWarnings* warnings = nullptr);
 
 // Retypes the candidates inside each zone in the given order (pass zones lowest priority first);
 // sets some_point_enforced when an Enforced zone applies. When the whole perimeter ends up Blocked and

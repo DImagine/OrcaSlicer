@@ -701,14 +701,20 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     // Share validation, bounds and clipping line across all modifiers while the polygon is unchanged.
     // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
     const PreciseSeam::PreparedPerimeter prepared(polygon);
-    // Only an object with layer rules passes their effective types and layers.
-    const PreciseSeam::EffectiveModifiers *effective =
-        global_model_info.precise_seam_effective ? &*global_model_info.precise_seam_effective : nullptr;
-    seam_point = PreciseSeam::insert_strong_seam_point(
-        strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings, effective);
-    if (!seam_point.has_value())
-      weak_segments = PreciseSeam::collect_weak_modifier_segments(
-          weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings, effective);
+    // An object with layer rules takes the drivers for rules; any other keeps the Precise Seam drivers.
+    if (const auto &effective = global_model_info.precise_seam_effective) {
+      seam_point = PreciseSeam::insert_strong_seam_point_by_rules(
+          strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings, *effective);
+      if (!seam_point.has_value())
+        weak_segments = PreciseSeam::collect_weak_modifier_segments_by_rules(
+            weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings, *effective);
+    } else {
+      seam_point = PreciseSeam::insert_strong_seam_point(
+          strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
+      if (!seam_point.has_value())
+        weak_segments = PreciseSeam::collect_weak_modifier_segments(
+            weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
+    }
   }
 
   // Store the inserted point position for marking as central_enforcer later.

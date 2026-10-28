@@ -2718,8 +2718,8 @@ TEST_CASE("A magnet with apex takes a single crossing shorter than its length fo
         rule.magnet_apex_length = scale_(length);
         effective.emplace(volume, rule);
         Polygon perimeter = notched();
-        return PreciseSeam::insert_strong_seam_point({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
-                                                     fixture.cache, nullptr, &effective);
+        return PreciseSeam::insert_strong_seam_point_by_rules({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
+                                                     fixture.cache, nullptr, effective);
     };
     // Longer than 0.4 mm: the type acts, in the middle of the crossing.
     const std::optional<Point> typed = seam(0.4);
@@ -2746,8 +2746,8 @@ TEST_CASE("A magnet with apex that touches a corner over its tip takes the tip, 
         rule.magnet_apex_length = scale_(1.);
         effective.emplace(volume, rule);
         Polygon perimeter = rectangle(0, 0, 20, 20);
-        return PreciseSeam::insert_strong_seam_point({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
-                                                     fixture.cache, nullptr, &effective);
+        return PreciseSeam::insert_strong_seam_point_by_rules({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
+                                                     fixture.cache, nullptr, effective);
     };
     // Center takes the middle of the touch, the corner; the ends of the crossing lie nearest to the circle.
     CHECK(seam(ModelVolumeType::PRECISE_SEAM_CENTER) == mm(20, 20));
@@ -2774,8 +2774,8 @@ TEST_CASE("Strong and weak magnets with apex act on the tip between two crossing
     };
     const auto strong = [&](const ModelVolume *volume) {
         Polygon perimeter = notched();
-        return PreciseSeam::insert_strong_seam_point({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
-                                                     fixture.cache, nullptr, &effective);
+        return PreciseSeam::insert_strong_seam_point_by_rules({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
+                                                     fixture.cache, nullptr, effective);
     };
     CHECK(strong(add(ModelVolumeType::PRECISE_SEAM_CENTER, true)) == mm(20, 10));
     // Without apex the crossing makes the type act: the middle of a crossing, not the tip.
@@ -2785,8 +2785,8 @@ TEST_CASE("Strong and weak magnets with apex act on the tip between two crossing
     // A weak one types the tip alone.
     const ModelVolume *green_apex = add(ModelVolumeType::PRECISE_SEAM_ENFORCED, true);
     Polygon            perimeter  = notched();
-    const auto segments = PreciseSeam::collect_weak_modifier_segments({green_apex}, perimeter, PreciseSeam::PreparedPerimeter(perimeter),
-                                                                      fixture.layer, fixture.cache, nullptr, &effective);
+    const auto segments = PreciseSeam::collect_weak_modifier_segments_by_rules({green_apex}, perimeter, PreciseSeam::PreparedPerimeter(perimeter),
+                                                                      fixture.layer, fixture.cache, nullptr, effective);
     REQUIRE(segments.size() == 1);
     CHECK(segments.front().left_point == mm(20, 10));
     CHECK(segments.front().right_point == mm(20, 10));
@@ -2805,8 +2805,8 @@ TEST_CASE("A strong magnet places the seam where it does not cross the perimeter
     };
     const auto seam = [&](const std::vector<const ModelVolume*> &volumes) {
         Polygon perimeter = rectangle(0, 0, 20, 20);
-        return PreciseSeam::insert_strong_seam_point(volumes, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
-                                                     fixture.cache, &warnings, &effective);
+        return PreciseSeam::insert_strong_seam_point_by_rules(volumes, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
+                                                     fixture.cache, &warnings, effective);
     };
     // Left is the start of the crossing on the counterclockwise front face, and means nothing to a magnet.
     CHECK(seam({add(ModelVolumeType::PRECISE_SEAM_LEFT, rectangle(8, -5, 12, -3))}) == mm(10, 0));
@@ -2844,8 +2844,8 @@ TEST_CASE("A weak magnet types its point only", "[PreciseSeam][Magnet]")
     const ModelVolume              *volume = fixture.add(type, {slice});
     effective.emplace(volume, magnet_rule(type));
     Polygon    perimeter = rectangle(0, 0, 20, 20);
-    const auto segments  = PreciseSeam::collect_weak_modifier_segments({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter),
-                                                                       fixture.layer, fixture.cache, nullptr, &effective);
+    const auto segments  = PreciseSeam::collect_weak_modifier_segments_by_rules({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter),
+                                                                       fixture.layer, fixture.cache, nullptr, effective);
     REQUIRE(segments.size() == 1);
     CHECK_FALSE(segments.front().whole_perimeter);
     const auto types = weak_candidate_types(perimeter, segments, [painted = painted](const Point &) { return painted; });

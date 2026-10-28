@@ -339,9 +339,14 @@ print and is tested on its own.
   take the branch so that they are reported. Without rules there is no early
   plan or numbering, no parsing or evaluation and no rule messages, and
   `init_precise_seam_data()` collects the volumes as it does for Precise Seam
-  alone. What remains on that path is the check itself, empty containers, and
-  in the strong and weak loops an optional `EffectiveModifiers` whose lookup is
-  skipped when it is null. The layer numbering is an adapter of the export
+  alone. What remains on that path is the check itself and empty containers:
+  an object with rules takes its own drivers, `insert_strong_seam_point_by_rules()`
+  and `collect_weak_modifier_segments_by_rules()` with the magnet
+  (`PreciseSeamRulesGeometry.cpp`), chosen by the object's rule context and not
+  by whether a point was found, so that `off`, `blank` or an excluded layer
+  never hand a perimeter back to the original drivers; any other object keeps
+  the drivers of `PreciseSeam.cpp` unchanged. They share only the insertion,
+  refinement and weak-zone preparation of `PreciseSeam.cpp`. The layer numbering is an adapter of the export
   plan and stays next to it in `GCode.cpp`; when printing by layer it keeps
   rows only for the objects with rules, while every event of the plate still
   takes a number. The price is a

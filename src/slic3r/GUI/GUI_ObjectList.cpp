@@ -76,7 +76,6 @@
 #include <wx/chartype.h>
 #include <wx/dataobj.h>
 #include <wx/dnd.h>
-#include <wx/textdlg.h>
 #include <wx/busycursor.h>
 #include <wx/msgdlg.h>
 #include <wx/accel.h>
