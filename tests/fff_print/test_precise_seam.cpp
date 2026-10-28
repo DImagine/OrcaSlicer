@@ -2740,15 +2740,26 @@ TEST_CASE("A magnet with apex that touches a corner over its tip takes the tip, 
         round.points.push_back(mm(21.3 + 2 * std::cos(PI / 4 + 2 * PI * i / 64), 21.3 + 2 * std::sin(PI / 4 + 2 * PI * i / 64)));
     SeamFixture                     fixture;
     PreciseSeam::EffectiveModifiers effective;
-    const ModelVolume              *volume = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {round});
-    PreciseSeam::EffectiveModifier  rule   = magnet_rule(ModelVolumeType::PRECISE_SEAM_CENTER);
-    rule.magnet_apex        = true;
-    rule.magnet_apex_length = scale_(1.);
-    effective.emplace(volume, rule);
-    Polygon perimeter = rectangle(0, 0, 20, 20);
-    // The touch is the middle of the crossing, the corner; the ends of the crossing lie nearest to the circle.
-    CHECK(PreciseSeam::insert_strong_seam_point({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
-                                                fixture.cache, nullptr, &effective) == mm(20, 20));
+    const auto seam = [&](ModelVolumeType type) {
+        const ModelVolume             *volume = fixture.add(type, {round});
+        PreciseSeam::EffectiveModifier rule   = magnet_rule(type);
+        rule.magnet_apex        = true;
+        rule.magnet_apex_length = scale_(1.);
+        effective.emplace(volume, rule);
+        Polygon perimeter = rectangle(0, 0, 20, 20);
+        return PreciseSeam::insert_strong_seam_point({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
+                                                     fixture.cache, nullptr, &effective);
+    };
+    // Center takes the middle of the touch, the corner; the ends of the crossing lie nearest to the circle.
+    CHECK(seam(ModelVolumeType::PRECISE_SEAM_CENTER) == mm(20, 20));
+    // Left and Right take its start on the right face and its end on the top face, as their types do; the
+    // corner inside the modifier lies nearer to its centroid, so apex keeps them.
+    const std::optional<Point> left  = seam(ModelVolumeType::PRECISE_SEAM_LEFT);
+    const std::optional<Point> right = seam(ModelVolumeType::PRECISE_SEAM_RIGHT);
+    REQUIRE(left.has_value());
+    REQUIRE(right.has_value());
+    CHECK((unscaled(*left) - Vec2d(20, 19.78)).norm() < 0.02);
+    CHECK((unscaled(*right) - Vec2d(19.78, 20)).norm() < 0.02);
 }
 
 TEST_CASE("Strong and weak magnets with apex act on the tip between two crossings", "[PreciseSeam][Magnet]")

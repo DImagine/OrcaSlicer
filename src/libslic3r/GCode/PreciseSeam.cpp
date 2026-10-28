@@ -688,7 +688,8 @@ static std::optional<MagnetPoint> find_apex_point(const Polygon &perimeter, cons
 }
 
 std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
-                                            const PerimeterSegment &touch, std::optional<double> limit, bool apex)
+                                            const PerimeterSegment &touch, ModelVolumeType type, std::optional<double> limit,
+                                            bool apex)
 {
     if (!prepared.valid)
         return std::nullopt;
@@ -696,20 +697,28 @@ std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, c
     const Lines      lines     = to_lines(perimeter);
     const ArcLengths arcs(lines);
     const double     tolerance = double(TOLERANCE_LINEAR);
-    // The modifier touches the perimeter in the middle of the crossing; a segment runs forward from begin to end.
+    // The point the type takes on the crossing: its start for Left, its end for Right, its middle otherwise.
+    // A segment runs forward from begin to end.
     const double begin  = arcs.along(touch.begin);
     double       middle = begin + arcs.forward(begin, arcs.along(touch.end)) / 2.;
     if (middle >= arcs.total())
         middle -= arcs.total();
-    PerimeterPosition position = arcs.position(middle);
+    const Point       middle_point(arcs.point(lines, middle));
+    PerimeterPosition position = type == ModelVolumeType::PRECISE_SEAM_LEFT  ? touch.begin :
+                                 type == ModelVolumeType::PRECISE_SEAM_RIGHT ? touch.end :
+                                                                               arcs.position(middle);
     if (position.parameter == 1.)
         position = {(position.edge_index + 1) % perimeter.size(), 0.};
-    const MagnetPoint found{Point(arcs.point(lines, middle)), position};
+    const Point seam = type == ModelVolumeType::PRECISE_SEAM_LEFT  ? touch.polyline.points.front() :
+                       type == ModelVolumeType::PRECISE_SEAM_RIGHT ? touch.polyline.points.back() :
+                                                                     middle_point;
+    const MagnetPoint found{seam, position};
     if (!apex)
         return found;
-    // apex looks from the centroid of the region that holds the touch.
-    const auto region = std::find_if(modifier.begin(), modifier.end(), [&found](const ModifierRegion &r) {
-        return r.bounds.contains(found.point) && r.polygon.contains(found.point);
+    // apex looks from the centroid of the region that holds the touch, found by its middle: its ends lie on the
+    // region's boundary.
+    const auto region = std::find_if(modifier.begin(), modifier.end(), [&middle_point](const ModifierRegion &r) {
+        return r.bounds.contains(middle_point) && r.polygon.contains(middle_point);
     });
     if (region == modifier.end() || region->polygon.contour.area() == 0.)
         return found;
@@ -1156,13 +1165,15 @@ static bool magnet_acts(const SegmentExtraction &extracted, const EffectiveModif
             extracted.segments.size() == 1 && extracted.segments.front().polyline.length() < magnet.magnet_apex_length);
 }
 
-// The point of a magnet where it acts: the nearest point, or the middle of the touch of a magnet with apex.
+// The point of a magnet where it acts: the nearest point, or for the touch of a magnet with apex the point its
+// type takes on the touch.
 static std::optional<MagnetPoint> acting_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &regions,
-                                                      const SegmentExtraction &extracted, const EffectiveModifier &magnet)
+                                                      const SegmentExtraction &extracted, const EffectiveModifier &magnet,
+                                                      ModelVolumeType type)
 {
     if (magnet_acts(extracted))
         return find_magnet_point(prepared, regions, magnet.magnet_limit, magnet.magnet_apex);
-    return find_touch_point(prepared, regions, extracted.segments.front(), magnet.magnet_limit, magnet.magnet_apex);
+    return find_touch_point(prepared, regions, extracted.segments.front(), type, magnet.magnet_limit, magnet.magnet_apex);
 }
 
 // Records one extraction for the warnings: the type of a modifier with a discarded fragment, the
@@ -1214,7 +1225,7 @@ std::optional<Point> insert_strong_seam_point(
             prepared, it->second[layer_id], type, {layer, modifier, warnings, quiet});
         // A magnet that does not cross the perimeter puts the seam at the nearest point, whatever the type.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet_acts(extracted, *magnet)) {
-            const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet);
+            const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet, type);
             record_extraction(warnings, modifier, type, extracted, point.has_value());
             if (!point)
                 continue;
@@ -1474,7 +1485,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         const auto type = convert_weak_modifier_type(volume_type);
         // A magnet that does not cross the perimeter types its nearest point only: a zone of one point.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier_volume); magnet != nullptr && magnet_acts(extracted, *magnet)) {
-            const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet);
+            const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet, volume_type);
             record_extraction(warnings, modifier_volume, volume_type, extracted, point.has_value());
             if (point)
                 result.push_back({type, point->point, point->position, point->point, point->position, false, modifier_volume});
