@@ -2419,6 +2419,28 @@ TEST_CASE("A weak relay group stands at its most senior member, and each member 
         CHECK(init.row(X).empty());
         CHECK_FALSE(init.relay.has_value()); // The schedule of weak groups needs no pre-pass.
     }
+    SECTION("A heavier priority moves the anchor further: pr10 before pr1")
+    {
+        const ModelVolume *X = add_modifier(fixture, green, "pr1");
+        const ModelVolume *A = add_modifier(fixture, green, "relay");
+        const ModelVolume *B = add_modifier(fixture, green, "relay,pr10");
+        const WeakInit init(fixture, 4);
+        // Priority order B, X, A becomes the block {A, B} and X; weak ones apply in reverse.
+        CHECK(init.weak == Volumes{X, B, A});
+        CHECK(init.row(A) == "1010");
+        CHECK(init.row(B) == "0101");
+    }
+    SECTION("pr-neg puts its member after the volumes without priority; its group stands at another member")
+    {
+        const ModelVolume *Y = add_modifier(fixture, green, "relay,pr-neg1");
+        const ModelVolume *W = add_modifier(fixture, ModelVolumeType::PRECISE_SEAM_BLOCKED, "");
+        const ModelVolume *Z = add_modifier(fixture, green, "relay");
+        const WeakInit init(fixture, 4);
+        // Priority order W, Z, Y: the block {Y, Z} stands at Z, after W; the queue keeps the object list order.
+        CHECK(init.weak == Volumes{Z, Y, W});
+        CHECK(init.row(Y) == "1010");
+        CHECK(init.row(Z) == "0101");
+    }
     SECTION("An anchor without layers keeps the place of the group")
     {
         add_modifier(fixture, green, "relay,pr1,500"); // 500 selects no layer of four.

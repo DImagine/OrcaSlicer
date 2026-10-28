@@ -108,7 +108,7 @@ print and is tested on its own.
   between adding and subtracting the following sets, and may prefix one set
   (`excl129-312`). `model` and `bed` switch the origin of the following sets
   in the same way (see Origin below). Labels `center`, `left`, `right`, `green`, `red`,
-  `gray`/`grey` set the type; `prN` and `pr-N` set the priority; `off`
+  `gray`/`grey` set the type; `prN` and `pr-negN` set the priority; `off`
   disables the modifier; `blank` takes it out of seam placement the same way,
   whatever else its rules say, for a volume that only holds rules (commands
   added later act from it, unlike from `off`); and `nowarn` silences the warnings about differences
@@ -184,8 +184,11 @@ print and is tested on its own.
   identity, heights only where the model bottom is 0: a raft, other objects and
   supports with their own heights give the map gaps.
 - **Effective order.** Volumes are grouped by their effective type. Within a
-  group the order is `pr1, pr2, ...`, then the volumes without priority in
-  object order, then `pr-1, pr-2, ...`; ties keep the object order. The strong
+  group a priority is a weight, the higher first: `pr10` before `pr1.5` before
+  `pr1`; a volume without priority weighs 0, as `pr0`, and `pr-negN` weighs
+  -N. N is a decimal with up to six places, kept exactly in millionths. Ties
+  keep the object order. `pr-N` is invalid: a minus right after `pr` is too
+  easy to miss for a sign. The strong
   group still precedes the weak one, so a priority acts only within its group.
   The object list and the stored order are never changed.
 - **Application.** `prepare_rule_context()` resolves the rules of each object

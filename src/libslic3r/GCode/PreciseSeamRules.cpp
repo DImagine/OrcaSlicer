@@ -143,9 +143,10 @@ public:
             return std::nullopt;
         return uint32_t(value);
     }
-    // A height in mm, "uint [. uint]", as nanometres. More than six decimals or a value above the limit is
-    // out of range, which is remembered; long input saturates before that check.
-    std::optional<int64_t> nanometres()
+    // A decimal "uint [. uint]" in millionths: nanometres for a length in mm, millionths for a priority weight.
+    // More than six decimals or a value above the limit is out of range, which is remembered; long input
+    // saturates before that check.
+    std::optional<int64_t> millionths()
     {
         const std::optional<int64_t> whole = uint();
         if (!whole)
@@ -163,8 +164,10 @@ public:
             for (; digits < 6; ++digits)
                 fraction *= 10;
         }
-        const int64_t value = *whole * nanometres_per_mm + fraction;
-        if (value > rule_number_limit * nanometres_per_mm)
+        // Six decimals: a millionth of a mm is a nanometre.
+        static_assert(nanometres_per_mm == 1000000);
+        const int64_t value = *whole * 1000000 + fraction;
+        if (value > rule_number_limit * 1000000)
             m_out_of_range = true;
         return value;
     }
@@ -188,7 +191,7 @@ std::optional<RuleLayerSet> parse_height_formula(Cursor &c, int sign, std::optio
     int64_t       b = 0;
     const bool    plus = c.eat('+');
     if (plus || c.eat('-')) {
-        const std::optional<int64_t> value = c.nanometres();
+        const std::optional<int64_t> value = c.millionths();
         if (!value)
             return std::nullopt;
         b = plus ? *value : -*value;
@@ -225,7 +228,7 @@ std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
             sign = -1;
         // A broken number is no omitted coefficient: "z1.x" is not "zx".
         std::optional<int64_t> first;
-        if (c.digit() && !(first = c.nanometres()))
+        if (c.digit() && !(first = c.millionths()))
             return std::nullopt;
         if (!inside && c.eat('x'))
             return parse_height_formula(c, sign, first);
@@ -235,12 +238,12 @@ std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
         RuleLayerSet set{Kind::Height, *first, *first, 0};
         set.inside = inside;
         if (c.eat('-')) {
-            const std::optional<int64_t> last = c.nanometres();
+            const std::optional<int64_t> last = c.millionths();
             if (!last || *last < set.first)
                 return std::nullopt;
             set.last = *last;
             if (!inside && c.eat("step")) {
-                const std::optional<int64_t> step = c.nanometres();
+                const std::optional<int64_t> step = c.millionths();
                 if (!step || *step < 1)
                     return std::nullopt;
                 set.step = *step;
@@ -414,20 +417,21 @@ struct TypeWord {
     }
 };
 
-// priority = "pr" ["-"] uint, uint >= 1.
+// priority = "pr" ["-neg"] decimal: a weight in millionths, the higher first; pr-negN weighs -N, and pr0, pr-neg0
+// and no priority weigh the same. pr-N is no priority: a minus that only follows pr is easy to miss.
 struct PriorityWord {
     struct Payload {
-        int priority = 0;
+        int64_t priority = 0;
     };
     static ParseStatus parse(Cursor &c, Payload &out)
     {
         if (!c.eat("pr"))
             return ParseStatus::NotMine;
-        const bool                   negative = c.eat('-');
-        const std::optional<int64_t> value    = c.uint();
-        if (!value || *value < 1)
+        const bool                   negative = c.eat("-neg");
+        const std::optional<int64_t> value    = c.millionths();
+        if (!value)
             return ParseStatus::Invalid;
-        out.priority = int(negative ? -*value : *value);
+        out.priority = negative ? -*value : *value;
         return ParseStatus::Ok;
     }
     static void commit(const Payload &in, LayerRules &rules, SourceState &, const ElementRef &element)
@@ -533,12 +537,12 @@ struct MagnetWord {
             return ParseStatus::NotMine;
         out.apex = c.eat("apex");
         if (!out.apex && !c.done()) {
-            if (!(out.limit = c.nanometres()))
+            if (!(out.limit = c.millionths()))
                 return ParseStatus::Invalid;
             out.apex = c.eat("apex");
         }
         if (out.apex && !c.done()) {
-            const std::optional<int64_t> length = c.nanometres();
+            const std::optional<int64_t> length = c.millionths();
             if (!length)
                 return ParseStatus::Invalid;
             out.apex_length = *length;
@@ -822,13 +826,8 @@ EffectiveOrder effective_order(const std::vector<RuledModifier> &modifiers)
         if (type != modifier.actual)
             (modifier.rules->nowarn ? order.suppressed : order.type_changed).push_back(i);
     }
-    // pr1, pr2, ... first, then volumes without priority, then pr-1, pr-2, ...
-    const auto rank = [&modifiers](size_t i) -> std::pair<int, int> {
-        const std::optional<int> &priority = modifiers[i].rules->priority;
-        if (!priority)
-            return {1, 0};
-        return *priority > 0 ? std::pair{0, *priority} : std::pair{2, -*priority};
-    };
+    // The higher weight first; a volume without priority weighs 0, as pr0.
+    const auto weight = [&modifiers](size_t i) { return modifiers[i].rules->priority.value_or(0); };
     std::vector<bool> reordered(modifiers.size(), false);
     for (std::vector<size_t> *group : {&order.strong, &order.weak}) {
         // Without priorities the tree order stands and nothing is reordered.
@@ -836,7 +835,7 @@ EffectiveOrder effective_order(const std::vector<RuledModifier> &modifiers)
             continue;
         // The group is collected in input order, so a stable sort breaks ties by the input index.
         const std::vector<size_t> tree = *group;
-        std::stable_sort(group->begin(), group->end(), [&rank](size_t a, size_t b) { return rank(a) < rank(b); });
+        std::stable_sort(group->begin(), group->end(), [&weight](size_t a, size_t b) { return weight(a) > weight(b); });
         // A pair whose order differs from the tree reports its members that carry a priority.
         std::vector<size_t> position(modifiers.size());
         for (size_t p = 0; p < group->size(); ++p)

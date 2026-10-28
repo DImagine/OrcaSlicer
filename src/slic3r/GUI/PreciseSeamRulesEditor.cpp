@@ -47,7 +47,7 @@ wxString precise_seam_rules_help()
               "model, bed: the layers and heights after it count from the model, above a raft, or from the bed (default)\n"
               "mode: incl (default), excl\n"
               "type: center, left, right, green, red, gray\n"
-              "priority: pr1 (highest), pr-1 (lowest); off; nowarn\n"
+              "priority: a weight, the higher acts first: pr10 before pr1.5 before pr1; none is pr0; pr-neg1 is below it; off; nowarn\n"
               "blank: the modifier places no seam and only holds its rules\n"
               "relay, relay1: modifiers of one group act in turn, layer by layer: all center, left, right, or all green, red, gray\n"
               "relay-random, relay-random1: the same, but each layer goes to a random member, not the previous one when another can; "
