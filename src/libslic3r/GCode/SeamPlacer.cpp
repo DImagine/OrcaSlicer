@@ -373,10 +373,8 @@ struct GlobalModelInfo {
 
   // Slice each modifier once; both consumers share structured regions and source provenance.
   PreciseSeam::ModifierRegionsCache precise_seam_slices;
-  // Effective type and active layers of the modifiers above, only for an object that uses layer rules.
-  std::optional<PreciseSeam::EffectiveModifiers> precise_seam_effective;
-  // Relay groups of that object and their holders, only when some group has two members or more.
-  std::optional<PreciseSeam::RelayOrder> precise_seam_relay;
+  // Layer rules of the modifiers above, only for an object that uses them.
+  std::optional<PreciseSeam::RuleContext> precise_seam_rules;
 
   bool is_enforced(const Vec3f &position, float radius) const {
     if (enforcers.empty()) {
@@ -703,12 +701,12 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
     const PreciseSeam::PreparedPerimeter prepared(polygon);
     // An object with layer rules takes the drivers for rules; any other keeps the Precise Seam drivers.
-    if (const auto &effective = global_model_info.precise_seam_effective) {
+    if (const auto &rules = global_model_info.precise_seam_rules) {
       seam_point = PreciseSeam::insert_strong_seam_point_by_rules(
-          strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings, *effective);
+          strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings, rules->effective);
       if (!seam_point.has_value())
         weak_segments = PreciseSeam::collect_weak_modifier_segments_by_rules(
-            weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings, *effective);
+            weak_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings, rules->effective);
     } else {
       seam_point = PreciseSeam::insert_strong_seam_point(
           strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
@@ -1659,10 +1657,10 @@ void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerI
   tbb::parallel_for(tbb::blocked_range<size_t>(0, po->layers().size()),
                     [po, &global_model_info, &seam_data, warnings]
                     (tbb::blocked_range<size_t> r) {
-                      // Strong order of one layer with relay groups, reused for the layers of this range.
-                      const PreciseSeam::RelayOrder *relay =
-                          global_model_info.precise_seam_relay ? &*global_model_info.precise_seam_relay : nullptr;
-                      std::vector<const ModelVolume*> layer_strong_volumes;
+                      // Layer rules of the object, if it uses them; the buffer holds the strong order of one layer with relay
+                      // groups, reused for the layers of this range.
+                      const auto &rules = global_model_info.precise_seam_rules;
+                      std::vector<const ModelVolume*> relay_buffer;
                       for (size_t layer_idx = r.begin(); layer_idx < r.end(); ++layer_idx) {
                         PrintObjectSeamData::LayerSeams &layer_seams = seam_data.layers[layer_idx];
                         const Layer *layer = po->get_layer(layer_idx);
@@ -1673,13 +1671,12 @@ void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerI
                         const bool has_precise_seam_modifiers = !global_model_info.precise_seam_strong_volumes.empty() ||
                                                                !global_model_info.precise_seam_weak_volumes.empty();
                         Polygons polygons = extract_perimeter_polygons(layer, regions, boundary_types, has_precise_seam_modifiers);
-                        if (relay)
-                          PreciseSeam::relay_strong_volumes(*relay, *global_model_info.precise_seam_effective, layer_idx,
-                                                            relay->entries.size(), layer_strong_volumes);
+                        const std::vector<const ModelVolume*> *layer_strong_volumes = rules ?
+                          &rules->strong_on(layer_idx, global_model_info.precise_seam_strong_volumes, relay_buffer) : nullptr;
                         for (size_t poly_index = 0; poly_index < polygons.size(); ++poly_index) {
                           process_perimeter_polygon(polygons[poly_index], unscaled_z,
                                                     regions[poly_index], global_model_info, layer_seams,
-                                                    warnings, boundary_types[poly_index], relay ? &layer_strong_volumes : nullptr);
+                                                    warnings, boundary_types[poly_index], layer_strong_volumes);
                         }
                         auto functor = SeamCandidateCoordinateFunctor { layer_seams.points };
                         seam_data.layers[layer_idx].points_tree =
@@ -2157,34 +2154,17 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
     {
       GlobalModelInfo global_model_info { };
       gather_enforcers_blockers(global_model_info, po);
-      if (PreciseSeam::uses_precise_seam_rules(*po->model_object())) {
+      if (PreciseSeam::uses_precise_seam_rules(*po->model_object()))
           // Layer rules: their own branch, see PreciseSeamRulesApply.hpp.
-          PreciseSeam::LayerNumbering own_layers;
-          const PreciseSeam::LayerNumbering *object_numbering = &own_layers;
-          if (numbering != nullptr) {
-              // The export numbers every object that uses rules. Asserted, not checked at run time: an
-              // invariant that cannot fail in the export is documented, not handled.
-              const auto it = numbering->find(po);
-              assert(it != numbering->end());
-              if (it != numbering->end())
-                  object_numbering = &it->second;
-          } else {
-              // Called without the export plan (tests): the object numbers its own layers from 1.
-              own_layers.count = po->layers().size();
-              for (size_t i = 0; i < own_layers.count; ++i)
-                  own_layers.object_layers.push_back(i + 1);
-          }
-          PreciseSeam::init_precise_seam_data_by_rules(
+          global_model_info.precise_seam_rules = PreciseSeam::prepare_rule_context(
               global_model_info.precise_seam_strong_volumes,
               global_model_info.precise_seam_weak_volumes,
               m_seam_per_object[po].has_precise_seam_strong_volumes,
               *po->model_object(),
-              *object_numbering,
+              PreciseSeam::object_numbering(*po, numbering),
               po->layers(),
-              global_model_info.precise_seam_effective.emplace(),
-              global_model_info.precise_seam_relay,
               rule_diagnostics);
-      } else
+      else
           PreciseSeam::init_precise_seam_data(
               global_model_info.precise_seam_strong_volumes,
               global_model_info.precise_seam_weak_volumes,
@@ -2203,9 +2183,8 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       for (const ModelVolume* vol : global_model_info.precise_seam_weak_volumes)
           precise_seam_warnings.modifier_usage.try_emplace(vol);
       // Relay: who holds the turn of each group on each layer, from the same perimeters as the main pass.
-      if (global_model_info.precise_seam_relay)
-          PreciseSeam::schedule_relay(*global_model_info.precise_seam_relay, *po, *global_model_info.precise_seam_effective,
-              global_model_info.precise_seam_slices,
+      if (global_model_info.precise_seam_rules)
+          PreciseSeam::schedule_relay(*global_model_info.precise_seam_rules, *po, global_model_info.precise_seam_slices,
               [](const Layer &layer) {
                   std::vector<const LayerRegion*> regions;
                   // Boundary types only mark the perimeter after the seam point is chosen; the probe needs none.

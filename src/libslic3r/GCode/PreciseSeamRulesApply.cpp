@@ -11,6 +11,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <boost/format.hpp>
@@ -37,22 +38,232 @@ bool uses_precise_seam_rules(const ModelObject &object)
     });
 }
 
-void init_precise_seam_data_by_rules(
-    std::vector<const ModelVolume*> &strong_volumes_out,
-    std::vector<const ModelVolume*> &weak_volumes_out,
-    bool &has_strong_out,
-    const ModelObject &model_object,
-    const LayerNumbering &numbering,
-    const ConstLayerPtrsAdaptor &model_layers,
-    EffectiveModifiers &effective_out,
-    std::optional<RelayOrder> &relay_out,
-    std::vector<ModifierDiagnostic> &diagnostics_out)
+const std::vector<const ModelVolume*> &RuleContext::strong_on(size_t layer, const std::vector<const ModelVolume*> &strong,
+                                                              std::vector<const ModelVolume*> &buffer) const
+{
+    if (!relay)
+        return strong;
+    relay_strong_volumes(*relay, effective, layer, relay->entries.size(), buffer);
+    return buffer;
+}
+
+LayerNumbering object_numbering(const PrintObject &object, const std::unordered_map<const PrintObject*, LayerNumbering> *plan)
+{
+    if (plan != nullptr) {
+        // The export numbers every object that uses rules. Asserted, not checked at run time: an invariant that
+        // cannot fail in the export is documented, not handled.
+        const auto it = plan->find(&object);
+        assert(it != plan->end());
+        if (it != plan->end())
+            return it->second;
+    }
+    // Without the export plan (tests) the object numbers its own layers from 1.
+    LayerNumbering own;
+    own.count = object.layers().size();
+    for (size_t i = 0; i < own.count; ++i)
+        own.object_layers.push_back(i + 1);
+    return own;
+}
+
+namespace {
+
+// Relay groups of an object by label, in volume order and without off or blank volumes. A group is all strong or
+// all weak; a mixed one acts without relay, and its members keep their other rules.
+struct RelayGroups {
+    std::vector<std::optional<size_t>> group_of; // Per volume.
+    std::vector<bool>                  mixed;    // Per volume: its label names a mixed group.
+    std::vector<uint64_t>              seeds;    // Per group; relay-random: from every member, before layers drop any.
+};
+
+RelayGroups find_relay_groups(const std::vector<LayerRules> &rules, const std::vector<RuledModifier> &ruled)
+{
+    RelayGroups groups{std::vector<std::optional<size_t>>(rules.size()), std::vector<bool>(rules.size(), false), {}};
+    std::map<RelayLabel, std::vector<size_t>> labelled;
+    for (size_t i = 0; i < rules.size(); ++i)
+        if (!rules[i].inert() && rules[i].relay)
+            labelled[*rules[i].relay].push_back(i);
+    for (const auto &[label, members] : labelled) {
+        const auto strong = [&ruled](size_t i) { return is_precise_seam_strong(ruled[i].effective_type()); };
+        const bool same   = std::all_of(members.begin(), members.end(), strong) || std::none_of(members.begin(), members.end(), strong);
+        for (size_t i : members)
+            if (same)
+                groups.group_of[i] = groups.seeds.size();
+            else
+                groups.mixed[i] = true;
+        if (!same)
+            continue;
+        std::vector<std::optional<uint32_t>> seeds;
+        for (size_t i : members)
+            seeds.push_back(rules[i].relay_seed);
+        groups.seeds.push_back(label.random ? relay_random_group_seed(label.number, seeds) : 0);
+    }
+    return groups;
+}
+
+// Height bands of the numbered model layers, matched by the original layer index (numbered_layers() drops that
+// index); built only when some volume selects by height.
+std::vector<LayerBand> height_bands(const std::vector<LayerRules> &rules, const LayerNumbering &numbering,
+                                    const ConstLayerPtrsAdaptor &model_layers)
+{
+    std::vector<LayerBand> bands;
+    const bool uses_heights = std::any_of(rules.begin(), rules.end(), [](const LayerRules &r) {
+        return std::any_of(r.operations.begin(), r.operations.end(),
+                           [](const RuleLayerOperation &op) { return op.set.kind == RuleLayerSet::Kind::Height; });
+    });
+    if (!uses_heights)
+        return bands;
+    // Both come from the same print object, so they always have one entry per layer.
+    assert(numbering.object_layers.size() == model_layers.size());
+    for (size_t layer = 0; layer < numbering.object_layers.size(); ++layer)
+        if (numbering.object_layers[layer] != 0)
+            bands.push_back({numbering.object_layers[layer], model_layers[layer]->bottom_z(), model_layers[layer]->print_z});
+    return bands;
+}
+
+// The numbered layers of an object and their heights, as select_layers() takes them.
+struct NumberedLayers {
+    const LayerNumbering  &numbering;
+    std::vector<size_t>    numbered;
+    std::vector<LayerBand> bands;
+    double                 model_bottom; // Bottom of the first model layer, above the raft and its gap.
+};
+
+// Object layers of one volume: an empty row means every layer; nullopt leaves the volume out: switched off or
+// blank, or its rules exclude every layer of this object. Diagnostics of the selection go to `diagnostics`.
+std::optional<std::vector<bool>> volume_layers(const LayerRules &rules, const NumberedLayers &layers, std::vector<RuleDiagnostic> &diagnostics)
+{
+    if (rules.inert())
+        return std::nullopt;
+    if (!rules.restricts_layers())
+        return std::vector<bool>();
+    const LayerNumbering &numbering = layers.numbering;
+    LayerSelection selection = select_layers(rules, numbering.count, layers.numbered, layers.bands, numbering.object_layers, layers.model_bottom);
+    diagnostics.insert(diagnostics.end(), std::make_move_iterator(selection.diagnostics.begin()), std::make_move_iterator(selection.diagnostics.end()));
+    std::vector<bool> row(numbering.object_layers.size(), false);
+    bool              any = false;
+    for (size_t layer = 0; layer < row.size(); ++layer) {
+        row[layer] = selection.contains(numbering.object_layers[layer]);
+        any        = any || row[layer];
+    }
+    if (!any)
+        return std::nullopt;
+    return row;
+}
+
+bool in_list(const std::vector<size_t> &list, size_t i) { return std::find(list.begin(), list.end(), i) != list.end(); }
+
+// Diagnostics `own` of volume `i` in source order (the name as a whole, its blocks, then the field) and element
+// order; parsing and empty-set diagnostics of one element keep their order. Differences from the object list
+// concern the volume as a whole and follow them.
+void report_volume(const ModelObject &object, size_t i, const ModelVolume *volume, const LayerRules &rules, std::vector<RuleDiagnostic> own,
+                   const EffectiveOrder &order, bool mixed, std::vector<ModifierDiagnostic> &out)
+{
+    const auto source_rank = [](const RuleDiagnostic &d) {
+        return std::pair<size_t, size_t>(d.source.field ? std::numeric_limits<size_t>::max() : d.source.name_block, d.element);
+    };
+    std::stable_sort(own.begin(), own.end(),
+                     [&source_rank](const RuleDiagnostic &a, const RuleDiagnostic &b) { return source_rank(a) < source_rank(b); });
+    if (in_list(order.type_changed, i))
+        own.push_back({RuleDiagnosticCode::TypeDiffersFromTree, {}, 0, {}});
+    if (in_list(order.reordered, i))
+        own.push_back({RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}});
+    if (mixed)
+        own.push_back({RuleDiagnosticCode::RelayGroupMixed, {}, 0, relay_label_text(*rules.relay)});
+    for (RuleDiagnostic &diagnostic : own)
+        out.push_back({volume, std::move(diagnostic)});
+    if (rules.name_overridden)
+        BOOST_LOG_TRIVIAL(info) << "[PreciseSeamRules] override: object_id=" << object.id().id << " volume_id=" << volume->id().id
+                                << " the rules field replaces the name rules";
+    // nowarn hides the differences from the user, not from the log.
+    if (in_list(order.suppressed, i))
+        // IDs only: names may hold line breaks, and rule_warnings() names them escaped.
+        BOOST_LOG_TRIVIAL(info) << "[PreciseSeamRules] nowarn: object_id=" << object.id().id << " volume_id=" << volume->id().id
+                                << " type or order differs from the object list";
+}
+
+// The effective modifier of a volume that takes part, on `layers`.
+EffectiveModifier effective_modifier(const RuledModifier &ruled, const LayerRules &rules, std::vector<bool> layers)
+{
+    EffectiveModifier modifier{ruled.effective_type(), std::move(layers)};
+    if (rules.magnet) {
+        modifier.magnet             = true;
+        modifier.magnet_apex        = rules.magnet->apex;
+        modifier.magnet_apex_length = scale_(double(rules.magnet->apex_length) / nanometres_per_mm);
+        // Kept in scaled units as a double: a limit below one unit must not round to a touch or to none.
+        if (rules.magnet->limit)
+            modifier.magnet_limit = scale_(double(*rules.magnet->limit) / nanometres_per_mm);
+    }
+    return modifier;
+}
+
+// An effective order as places: a volume on its own, or the block of its group. A group stands at the place of its
+// most senior member, even one whose rules exclude every layer. A block keeps the members that take part, in the
+// object list order, which is the queue order.
+struct Blocks {
+    struct Place {
+        size_t                volume;
+        std::optional<size_t> block;
+    };
+    std::vector<std::optional<size_t>> block_of; // Per group.
+    std::vector<std::vector<size_t>>   members;  // Per block.
+
+    std::vector<Place> place(const std::vector<size_t> &list, const RelayGroups &groups, const std::vector<std::optional<std::vector<bool>>> &layers)
+    {
+        std::vector<Place> places;
+        for (size_t i : list)
+            if (!groups.group_of[i]) {
+                if (layers[i])
+                    places.push_back({i, std::nullopt});
+            } else {
+                std::optional<size_t> &block = block_of[*groups.group_of[i]];
+                if (!block) {
+                    block = members.size();
+                    members.emplace_back();
+                    places.push_back({i, block});
+                }
+                if (layers[i])
+                    members[*block].push_back(i);
+            }
+        for (const Place &place : places)
+            if (place.block)
+                std::sort(members[*place.block].begin(), members[*place.block].end());
+        return places;
+    }
+};
+
+// Layers held by each member of a weak group, in full rows, as an empty one means every layer. Weak members take
+// the turn without a pre-pass: a layer goes to its holder among the members whose rules keep it, whatever the
+// zones meet. Rows without one stay, as relay-random hashes the real index.
+std::vector<std::vector<bool>> weak_relay_layers(const std::vector<size_t> &members, const std::vector<std::optional<std::vector<bool>>> &layers,
+                                                 size_t layer_count, const RelayLabel &label, uint64_t seed)
+{
+    std::vector<std::vector<uint8_t>> active(layer_count, std::vector<uint8_t>(members.size()));
+    for (size_t layer = 0; layer < active.size(); ++layer)
+        for (size_t m = 0; m < members.size(); ++m)
+            active[layer][m] = layers[members[m]]->empty() || (*layers[members[m]])[layer];
+    const std::vector<size_t> holders = label.random ? relay_random_holders(active, members.size(), seed) :
+                                                       relay_holders(active, members.size());
+    std::vector<std::vector<bool>> rows(members.size(), std::vector<bool>(holders.size()));
+    for (size_t layer = 0; layer < holders.size(); ++layer)
+        if (holders[layer] != RelayOrder::no_holder)
+            rows[holders[layer]][layer] = true;
+    return rows;
+}
+
+} // namespace
+
+RuleContext prepare_rule_context(std::vector<const ModelVolume*> &strong_volumes_out,
+                                 std::vector<const ModelVolume*> &weak_volumes_out,
+                                 bool &has_strong_out,
+                                 const ModelObject &model_object,
+                                 const LayerNumbering &numbering,
+                                 const ConstLayerPtrsAdaptor &model_layers,
+                                 std::vector<ModifierDiagnostic> &diagnostics_out)
 {
     strong_volumes_out.clear();
     weak_volumes_out.clear();
-    effective_out.clear();
-    relay_out.reset();
     has_strong_out = false;
+    RuleContext context;
 
     // Rules are parsed once per volume, before the parallel layer processing.
     std::vector<const ModelVolume*> volumes;
@@ -63,197 +274,72 @@ void init_precise_seam_data_by_rules(
             rules.push_back(parse_layer_rules(volume->name, volume->precise_seam_rules));
         }
     if (volumes.empty())
-        return;
+        return context;
     std::vector<RuledModifier> ruled;
     for (size_t i = 0; i < volumes.size(); ++i)
         ruled.push_back({volumes[i]->type(), &rules[i]});
-    const EffectiveOrder order = effective_order(ruled);
+    const EffectiveOrder order  = effective_order(ruled);
+    const RelayGroups    groups = find_relay_groups(rules, ruled);
 
-    // Relay groups by label, in volume order and without off or blank volumes. A group is all strong or all weak; a
-    // mixed one acts without relay, and its members keep their other rules.
-    std::map<RelayLabel, std::vector<size_t>> labelled;
-    for (size_t i = 0; i < volumes.size(); ++i)
-        if (!rules[i].inert() && rules[i].relay)
-            labelled[*rules[i].relay].push_back(i);
-    std::vector<std::optional<size_t>> group_of(volumes.size());
-    std::vector<bool>                  mixed(volumes.size(), false);
-    std::vector<uint64_t>              group_seeds; // relay-random: from every member, before layers drop any.
-    size_t                             group_count = 0;
-    for (const auto &[label, members] : labelled) {
-        const auto strong = [&ruled](size_t i) { return is_precise_seam_strong(ruled[i].effective_type()); };
-        const bool same   = std::all_of(members.begin(), members.end(), strong) || std::none_of(members.begin(), members.end(), strong);
-        for (size_t i : members)
-            if (same)
-                group_of[i] = group_count;
-            else
-                mixed[i] = true;
-        if (!same)
-            continue;
-        std::vector<std::optional<uint32_t>> seeds;
-        for (size_t i : members)
-            seeds.push_back(rules[i].relay_seed);
-        group_seeds.push_back(label.random ? relay_random_group_seed(label.number, seeds) : 0);
-        ++group_count;
-    }
-
-    // Diagnostics of one volume in source order (the name as a whole, its blocks, then the field) and
-    // element order; parsing and empty-set diagnostics of one element keep their order.
-    const auto source_rank = [](const RuleDiagnostic &d) {
-        return std::pair<size_t, size_t>(d.source.field ? std::numeric_limits<size_t>::max() : d.source.name_block, d.element);
-    };
-    const auto contains = [](const std::vector<size_t> &list, size_t i) { return std::find(list.begin(), list.end(), i) != list.end(); };
-
-    // Layers of each volume, with its diagnostics in volume order. An empty row means every layer;
-    // nullopt leaves the volume out: switched off or blank, or its rules exclude every layer of this object.
-    const std::vector<size_t> numbered = numbering.numbered_layers();
-    // Height bands of the numbered model layers, matched by the original layer index (numbered_layers()
-    // drops that index); built only when some volume selects by height.
-    std::vector<LayerBand> bands;
-    const bool uses_heights = std::any_of(rules.begin(), rules.end(), [](const LayerRules &r) {
-        return std::any_of(r.operations.begin(), r.operations.end(),
-                           [](const RuleLayerOperation &op) { return op.set.kind == RuleLayerSet::Kind::Height; });
-    });
-    if (uses_heights) {
-        // Both come from the same print object, so they always have one entry per layer.
-        assert(numbering.object_layers.size() == model_layers.size());
-        for (size_t layer = 0; layer < numbering.object_layers.size(); ++layer)
-            if (numbering.object_layers[layer] != 0)
-                bands.push_back({numbering.object_layers[layer], model_layers[layer]->bottom_z(), model_layers[layer]->print_z});
-    }
-    // Model heights start at the bottom of the first model layer, above the raft and its gap, numbered or not.
-    const double model_bottom = model_layers.empty() ? 0. : model_layers.front()->bottom_z();
+    // Layers of each volume, with its diagnostics in volume order. Nothing reads the diagnostics of the rules after.
+    const NumberedLayers numbered{numbering, numbering.numbered_layers(), height_bands(rules, numbering, model_layers),
+                                  model_layers.empty() ? 0. : model_layers.front()->bottom_z()};
     std::vector<std::optional<std::vector<bool>>> layers(volumes.size());
     for (size_t i = 0; i < volumes.size(); ++i) {
-        // Nothing reads the diagnostics of the rules after this point.
         std::vector<RuleDiagnostic> own = std::move(rules[i].diagnostics);
-        if (!rules[i].inert() && !rules[i].restricts_layers())
-            layers[i].emplace();
-        else if (!rules[i].inert()) {
-            LayerSelection selection = select_layers(rules[i], numbering.count, numbered, bands, numbering.object_layers, model_bottom);
-            own.insert(own.end(), std::make_move_iterator(selection.diagnostics.begin()), std::make_move_iterator(selection.diagnostics.end()));
-            std::vector<bool> row(numbering.object_layers.size(), false);
-            bool              any = false;
-            for (size_t layer = 0; layer < row.size(); ++layer) {
-                row[layer] = selection.contains(numbering.object_layers[layer]);
-                any        = any || row[layer];
-            }
-            if (any)
-                layers[i] = std::move(row);
-        }
-        std::stable_sort(own.begin(), own.end(),
-                         [&source_rank](const RuleDiagnostic &a, const RuleDiagnostic &b) { return source_rank(a) < source_rank(b); });
-        // Differences from the object list concern the volume as a whole and follow its own diagnostics.
-        if (contains(order.type_changed, i))
-            own.push_back({RuleDiagnosticCode::TypeDiffersFromTree, {}, 0, {}});
-        if (contains(order.reordered, i))
-            own.push_back({RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}});
-        if (mixed[i])
-            own.push_back({RuleDiagnosticCode::RelayGroupMixed, {}, 0, relay_label_text(*rules[i].relay)});
-        for (RuleDiagnostic &diagnostic : own)
-            diagnostics_out.push_back({volumes[i], std::move(diagnostic)});
-        if (rules[i].name_overridden)
-            BOOST_LOG_TRIVIAL(info) << "[PreciseSeamRules] override: object_id=" << model_object.id().id
-                                    << " volume_id=" << volumes[i]->id().id << " the rules field replaces the name rules";
-        // nowarn hides the differences from the user, not from the log.
-        if (contains(order.suppressed, i))
-            // IDs only: names may hold line breaks, and rule_warnings() names them escaped.
-            BOOST_LOG_TRIVIAL(info) << "[PreciseSeamRules] nowarn: object_id=" << model_object.id().id
-                                    << " volume_id=" << volumes[i]->id().id << " type or order differs from the object list";
+        layers[i]                       = volume_layers(rules[i], numbered, own);
+        report_volume(model_object, i, volumes[i], rules[i], std::move(own), order, groups.mixed[i], diagnostics_out);
     }
 
     const auto take_part = [&](size_t i, std::vector<const ModelVolume*> &out) {
-        EffectiveModifier modifier{ruled[i].effective_type(), std::move(*layers[i])};
-        if (rules[i].magnet) {
-            modifier.magnet = true;
-            modifier.magnet_apex        = rules[i].magnet->apex;
-            modifier.magnet_apex_length = scale_(double(rules[i].magnet->apex_length) / nanometres_per_mm);
-            // Kept in scaled units as a double: a limit below one unit must not round to a touch or to none.
-            if (rules[i].magnet->limit)
-                modifier.magnet_limit = scale_(double(*rules[i].magnet->limit) / nanometres_per_mm);
-        }
-        effective_out.emplace(volumes[i], std::move(modifier));
+        context.effective.emplace(volumes[i], effective_modifier(ruled[i], rules[i], std::move(*layers[i])));
         out.push_back(volumes[i]);
     };
-    // A group stands at the place of its most senior member, even one whose rules exclude every layer.
-    // A block keeps the members that take part, in the object list order, which is the queue order.
-    std::vector<std::optional<size_t>> block_of(group_count);
-    std::vector<std::vector<size_t>>   blocks;
-    // An effective order as places: a volume, or the block placed there.
-    const auto place = [&](const std::vector<size_t> &list) {
-        std::vector<std::pair<size_t, std::optional<size_t>>> places;
-        for (size_t i : list)
-            if (!group_of[i]) {
-                if (layers[i])
-                    places.emplace_back(i, std::nullopt);
-            } else {
-                std::optional<size_t> &block = block_of[*group_of[i]];
-                if (!block) {
-                    block = blocks.size();
-                    blocks.emplace_back();
-                    places.emplace_back(i, block);
-                }
-                if (layers[i])
-                    blocks[*block].push_back(i);
-            }
-        for (const auto &[i, block] : places)
-            if (block)
-                std::sort(blocks[*block].begin(), blocks[*block].end());
-        return places;
-    };
+    Blocks     blocks{std::vector<std::optional<size_t>>(groups.seeds.size()), {}};
     RelayOrder relay;
-    for (const auto &[i, block] : place(order.strong)) {
+    for (const auto &[i, block] : blocks.place(order.strong, groups, layers)) {
         // A single member acts on its own at the place of the group.
-        if (!block || blocks[*block].size() == 1) {
-            const size_t volume = block ? blocks[*block].front() : i;
+        if (!block || blocks.members[*block].size() == 1) {
+            const size_t volume = block ? blocks.members[*block].front() : i;
             relay.entries.push_back({volumes[volume]});
             take_part(volume, strong_volumes_out);
-        } else if (!blocks[*block].empty()) {
+        } else if (!blocks.members[*block].empty()) {
             relay.entries.push_back({nullptr, relay.groups.size()});
             RelayOrder::Group &group = relay.groups.emplace_back();
             group.label              = *rules[i].relay; // The anchor is a member, even without layers.
-            group.seed               = group_seeds[*group_of[i]];
-            for (size_t member : blocks[*block]) {
+            group.seed               = groups.seeds[*groups.group_of[i]];
+            for (size_t member : blocks.members[*block]) {
                 group.members.push_back(volumes[member]);
                 take_part(member, strong_volumes_out);
             }
         }
     }
     if (!relay.groups.empty())
-        relay_out = std::move(relay);
-    for (const auto &[i, block] : place(order.weak)) {
+        context.relay = std::move(relay);
+    for (const auto &[i, block] : blocks.place(order.weak, groups, layers)) {
         // A single member acts on its own at the place of the group.
-        if (!block || blocks[*block].size() == 1) {
-            take_part(block ? blocks[*block].front() : i, weak_volumes_out);
+        if (!block || blocks.members[*block].size() == 1) {
+            take_part(block ? blocks.members[*block].front() : i, weak_volumes_out);
             continue;
         }
-        const std::vector<size_t> &members = blocks[*block];
+        const std::vector<size_t> &members = blocks.members[*block];
         if (members.empty())
             continue;
-        // Weak members take the turn without a pre-pass: a layer goes to its holder among the members whose
-        // rules keep it, whatever the zones meet. Rows without one stay, as relay-random hashes the real index.
-        std::vector<std::vector<uint8_t>> active(numbering.object_layers.size(), std::vector<uint8_t>(members.size()));
-        for (size_t layer = 0; layer < active.size(); ++layer)
-            for (size_t m = 0; m < members.size(); ++m)
-                active[layer][m] = layers[members[m]]->empty() || (*layers[members[m]])[layer];
-        const RelayLabel         &label   = *rules[i].relay; // The anchor is a member, even without layers.
-        const std::vector<size_t> holders = label.random ? relay_random_holders(active, members.size(), group_seeds[*group_of[i]]) :
-                                                           relay_holders(active, members.size());
-        // Each member keeps only the layers it holds, in a full row, as an empty one means every layer. A member
-        // that holds none is left out, like one whose rules exclude every layer.
-        for (size_t m = 0; m < members.size(); ++m) {
-            std::vector<bool> row(holders.size());
-            for (size_t layer = 0; layer < row.size(); ++layer)
-                row[layer] = holders[layer] == m;
-            if (std::find(row.begin(), row.end(), true) != row.end()) {
-                *layers[members[m]] = std::move(row);
+        // The anchor is a member, even without layers.
+        std::vector<std::vector<bool>> held = weak_relay_layers(members, layers, numbering.object_layers.size(), *rules[i].relay,
+                                                                groups.seeds[*groups.group_of[i]]);
+        // A member that holds no layer is left out, like one whose rules exclude every layer.
+        for (size_t m = 0; m < members.size(); ++m)
+            if (std::find(held[m].begin(), held[m].end(), true) != held[m].end()) {
+                *layers[members[m]] = std::move(held[m]);
                 take_part(members[m], weak_volumes_out);
             }
-        }
     }
     has_strong_out = !strong_volumes_out.empty();
 
     // Weak modifiers use last-write-wins, so apply the higher-priority ones last.
     std::reverse(weak_volumes_out.begin(), weak_volumes_out.end());
+    return context;
 }
 
 std::vector<size_t> relay_holders(const std::vector<std::vector<uint8_t>> &wins, size_t member_count)
@@ -352,11 +438,14 @@ void relay_strong_volumes(const RelayOrder &order, const EffectiveModifiers &eff
     }
 }
 
-void schedule_relay(RelayOrder &order, const PrintObject &object, const EffectiveModifiers &effective,
-                    const ModifierRegionsCache &slices, const LayerPerimeters &perimeters,
-                    const std::function<void()> &throw_if_canceled)
+void schedule_relay(RuleContext &context, const PrintObject &object, const ModifierRegionsCache &slices,
+                    const LayerPerimeters &perimeters, const std::function<void()> &throw_if_canceled)
 {
-    const size_t layer_count = object.layers().size();
+    if (!context.relay)
+        return;
+    RelayOrder               &order       = *context.relay;
+    const EffectiveModifiers &effective   = context.effective;
+    const size_t              layer_count = object.layers().size();
     // Groups one after another: the seniors of a group include the blocks of the groups before it.
     for (size_t end = 0; end < order.entries.size(); ++end) {
         if (order.entries[end].volume != nullptr)

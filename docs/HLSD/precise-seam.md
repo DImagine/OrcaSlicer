@@ -188,9 +188,13 @@ print and is tested on its own.
   object order, then `pr-1, pr-2, ...`; ties keep the object order. The strong
   group still precedes the weak one, so a priority acts only within its group.
   The object list and the stored order are never changed.
-- **Application.** `init_precise_seam_data_by_rules()` resolves the rules of
-  each object once, before the parallel phase, into the effective type and one
-  active flag per object layer for each volume. Extraction skips a modifier on
+- **Application.** `prepare_rule_context()` resolves the rules of each object
+  once, before the parallel phase, into its `RuleContext`: the effective type
+  and one active flag per object layer for each volume, and the relay groups.
+  `schedule_relay()` completes it once the modifiers are sliced; the main pass
+  only reads it. The preparation is a short coordinator over one function per
+  step: relay groups, layers and diagnostics of each volume, the strong order
+  with its blocks, the holders of weak groups. Extraction skips a modifier on
   an inactive layer before recording any usage, so a layer excluded by rules is
   never reported as "no effect". A volume that is off or active on no layer is
   left out entirely.
@@ -217,7 +221,7 @@ print and is tested on its own.
   the layers where some member's rules keep the layer, whatever its zone meets,
   with the holder chosen as above from these members (`relay-random` too).
   The holders depend on the layer sets only, so
-  `init_precise_seam_data_by_rules()` sets them at once: the block stands at
+  `prepare_rule_context()` sets them at once: the block stands at
   the place of its most senior member in the effective weak order, and every
   member keeps just the layers it holds. Only the holder's zone acts, there is
   no stand-in, and a turn is spent also where the zone misses the perimeters

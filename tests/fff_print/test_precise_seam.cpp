@@ -2367,8 +2367,11 @@ struct WeakInit {
             numbering.object_layers.push_back(i);
         std::vector<const ModelVolume*> strong;
         bool                            has_strong = false;
-        PreciseSeam::init_precise_seam_data_by_rules(strong, weak, has_strong, *fixture.model.objects.front(), numbering,
-                                                     fixture.print.objects().front()->layers(), effective, relay, diagnostics);
+        PreciseSeam::RuleContext context = PreciseSeam::prepare_rule_context(strong, weak, has_strong, *fixture.model.objects.front(),
+                                                                             numbering, fixture.print.objects().front()->layers(),
+                                                                             diagnostics);
+        effective = std::move(context.effective);
+        relay     = std::move(context.relay);
     }
 
     // Layers of the volume as '1' where it acts; empty when it acts on every layer.
@@ -2516,7 +2519,7 @@ Polygon rotated(Polygon polygon, size_t shift)
 // An L of 20 x 20 mm whose mass lies on the right: its centroid is at (11.67, 8.33).
 Polygon right_heavy_l() { return Polygon(Points{mm(0, 0), mm(20, 0), mm(20, 20), mm(10, 20), mm(10, 10), mm(0, 10)}); }
 
-// The effective rules of a magnet modifier, as init_precise_seam_data_by_rules() sets them.
+// The effective rules of a magnet modifier, as prepare_rule_context() sets them.
 PreciseSeam::EffectiveModifier magnet_rule(ModelVolumeType type, std::optional<double> limit = std::nullopt)
 {
     PreciseSeam::EffectiveModifier rule{type, {}};

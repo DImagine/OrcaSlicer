@@ -6,6 +6,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -54,25 +55,38 @@ struct RelayOrder {
     std::vector<Group> groups;  // In the order of their blocks.
 };
 
+// Layer rules of one print object that uses them: prepared before the seam pass in two stages,
+// prepare_rule_context() and schedule_relay(), then only read by the pass, in parallel over the layers.
+struct RuleContext {
+    // Every Precise Seam volume that takes part, also those without rules of their own.
+    EffectiveModifiers effective;
+    // Set, with holders after schedule_relay(), only when some strong group has two members or more.
+    std::optional<RelayOrder> relay;
+
+    // Strong volumes to try on object layer `layer`: `strong`, the list prepare_rule_context() gave, or with
+    // relay groups the order of this layer, built in `buffer`.
+    const std::vector<const ModelVolume*> &strong_on(size_t layer, const std::vector<const ModelVolume*> &strong,
+                                                     std::vector<const ModelVolume*> &buffer) const;
+};
+
+// Rule numbers of `object`: its entry in `plan`, the numbering of the export (SeamPlacer::PreciseSeamNumbering),
+// which has one for every object that uses rules; without a plan (direct calls, tests) its own layers from 1.
+LayerNumbering object_numbering(const PrintObject &object, const std::unordered_map<const PrintObject*, LayerNumbering> *plan);
+
 // init_precise_seam_data() for an object that uses layer rules: strong volumes in priority order, weak ones
-// in application order, with their effective type and layers in `effective_out` (every Precise Seam volume
-// that takes part, also those without rules of their own). Volumes switched off or excluded from every
-// layer are left out. Diagnostics are appended to `diagnostics_out` in volume, source and element order.
-// `model_layers` are the layers of the print object that `numbering` numbers, in the same order.
+// in application order, with their effective type and layers in the context. Volumes switched off or excluded
+// from every layer are left out. Diagnostics are appended to `diagnostics_out` in volume, source and element
+// order. `model_layers` are the layers of the print object that `numbering` numbers, in the same order.
 // A relay group stands in `strong_volumes_out` at the place of its most senior member, its members in queue
-// order. `relay_out` is set, without holders, only when some strong group has two members or more. A weak
-// group stands likewise in `weak_volumes_out`, and its holders are set here: each member keeps the layers
-// it holds.
-void init_precise_seam_data_by_rules(
-    std::vector<const ModelVolume*> &strong_volumes_out,
-    std::vector<const ModelVolume*> &weak_volumes_out,
-    bool &has_strong_out,
-    const ModelObject &model_object,
-    const LayerNumbering &numbering,
-    const ConstLayerPtrsAdaptor &model_layers,
-    EffectiveModifiers &effective_out,
-    std::optional<RelayOrder> &relay_out,
-    std::vector<ModifierDiagnostic> &diagnostics_out);
+// order; the context gets it without holders. A weak group stands likewise in `weak_volumes_out`, and its
+// holders are set here: each member keeps the layers it holds.
+RuleContext prepare_rule_context(std::vector<const ModelVolume*> &strong_volumes_out,
+                                 std::vector<const ModelVolume*> &weak_volumes_out,
+                                 bool &has_strong_out,
+                                 const ModelObject &model_object,
+                                 const LayerNumbering &numbering,
+                                 const ConstLayerPtrsAdaptor &model_layers,
+                                 std::vector<ModifierDiagnostic> &diagnostics_out);
 
 // Holders of one group on consecutive object layers from `wins[layer][member]`: non-zero where the member
 // places a seam on a perimeter the senior modifiers leave free; an empty row has no winner. The turn starts
@@ -99,12 +113,12 @@ void relay_strong_volumes(const RelayOrder &order, const EffectiveModifiers &eff
 // Outer perimeters of one object layer, as the seam placer gives them to Precise Seam.
 using LayerPerimeters = std::function<Polygons(const Layer &layer)>;
 
-// Fills the holders of every group, in block order: a pre-pass, parallel over the layers, finds the members
-// that win on each layer against the senior modifiers and the blocks of the senior groups; then the queue
-// runs from the bottom layer up. Probes run the strong driver quietly on fresh copies of the perimeters.
-void schedule_relay(RelayOrder &order, const PrintObject &object, const EffectiveModifiers &effective,
-                    const ModifierRegionsCache &slices, const LayerPerimeters &perimeters,
-                    const std::function<void()> &throw_if_canceled);
+// Second stage of the context, once its modifiers are sliced; nothing to do without relay. Fills the holders of
+// every group, in block order: a pre-pass, parallel over the layers, finds the members that win on each layer
+// against the senior modifiers and the blocks of the senior groups; then the queue runs from the bottom layer
+// up. Probes run the strong driver quietly on fresh copies of the perimeters.
+void schedule_relay(RuleContext &context, const PrintObject &object, const ModifierRegionsCache &slices,
+                    const LayerPerimeters &perimeters, const std::function<void()> &throw_if_canceled);
 
 // Single-line export warnings for the diagnostics of all print objects, in their order. A diagnostic that
 // print objects of one model object repeat is reported once; equal texts of different volumes are merged
