@@ -108,6 +108,8 @@ public:
         m_pos += word.size();
         return true;
     }
+    // Takes the rest of the element as read.
+    void skip_rest() { m_pos = m_text.size(); }
     bool eat(char c)
     {
         if (done() || m_text[m_pos] != c)
@@ -298,120 +300,300 @@ std::optional<RuleLayerSet> parse_layer_set(Cursor &c)
     return set;
 }
 
-struct ParsedElement {
-    enum class Kind { Mode, Set, Type, Priority, Off, Blank, Nowarn, Override, Relay, Magnet, Origin };
-    Kind                        kind;
-    bool                        exclude = false; // Mode only.
-    bool                        model   = false; // Origin only.
-    std::optional<RuleLayerSet> set;             // Mode with a prefixed set, or Set.
-    ModelVolumeType             type     = ModelVolumeType::INVALID;
-    int                         priority = 0;
-    RelayLabel                  relay;
-    std::optional<uint32_t>     relay_seed;
-    MagnetRule                  magnet;
+// --- Word families -------------------------------------------------------------------------------------------
+// Each family of words reads its own payload from the start of a normalized element and commits it to the rules.
+// parse() returns NotMine when the element does not start with one of its keywords, and then reads nothing
+// else; once its keyword matched, the element is the family's, valid or not. commit() runs only after the whole
+// element was read without error, so a broken element changes nothing.
+
+enum class ParseStatus { NotMine, Ok, Invalid };
+
+// The state of one source while it is read: the mode and origin of the sets that follow. Each source starts
+// in the include mode and counts from the bed.
+struct SourceState {
+    bool exclude = false;
+    bool model   = false;
 };
 
-const std::pair<std::string_view, ModelVolumeType> type_labels[] = {
-    {"center", ModelVolumeType::PRECISE_SEAM_CENTER},  {"left", ModelVolumeType::PRECISE_SEAM_LEFT},
-    {"right", ModelVolumeType::PRECISE_SEAM_RIGHT},    {"green", ModelVolumeType::PRECISE_SEAM_ENFORCED},
-    {"red", ModelVolumeType::PRECISE_SEAM_BLOCKED},    {"gray", ModelVolumeType::PRECISE_SEAM_NEUTRAL},
-    {"grey", ModelVolumeType::PRECISE_SEAM_NEUTRAL},
+// One element as the families see it.
+struct ElementRef {
+    RuleSource       source;
+    size_t           index = 0;     // Number in the source, from 1, empty elements counted.
+    bool             first = false; // The first non-empty element of the source.
+    std::string_view raw;           // Trimmed original text.
+    std::string_view normalized;
 };
 
-// No keyword of the language is a prefix of another but z of zin and relay of relay-random, which are tried
-// longest first; a digit must follow zin, and a digit, a sign or x must follow z. So the first matching keyword
-// decides the rule.
-std::optional<ParsedElement> parse_element(Cursor &c)
+void add_diagnostic(LayerRules &rules, RuleDiagnosticCode code, const ElementRef &element)
 {
-    using Kind = ParsedElement::Kind;
-    const bool incl = c.eat("incl");
-    if (incl || c.eat("excl")) {
-        ParsedElement element{Kind::Mode, !incl};
-        if (!c.done() && !(element.set = parse_layer_set(c)))
-            return std::nullopt;
-        return element;
+    rules.diagnostics.push_back({code, element.source, element.index, std::string(element.raw)});
+}
+
+void add_operation(LayerRules &rules, const SourceState &state, const RuleLayerSet &set, const ElementRef &element)
+{
+    rules.operations.push_back({state.exclude, state.model, set, element.source, element.index, std::string(element.raw)});
+}
+
+// The first value of a singleton word stays in effect; repeating an equal one is no conflict.
+template<typename T>
+void commit_first(std::optional<T> &slot, const T &value, RuleDiagnosticCode conflict, LayerRules &rules, const ElementRef &element)
+{
+    if (!slot)
+        slot = value;
+    else if (*slot != value)
+        add_diagnostic(rules, conflict, element);
+}
+
+// id: a name for external scripts. Any text may follow, so it takes the element as a whole; no other keyword
+// starts with "id". Repeats compare normalized, the trimmed original is kept.
+struct IdWord {
+    struct Payload {};
+    static ParseStatus parse(Cursor &c, Payload &)
+    {
+        if (!c.eat("id"))
+            return ParseStatus::NotMine;
+        c.skip_rest();
+        return ParseStatus::Ok;
     }
-    for (const auto &[label, type] : type_labels)
-        if (c.eat(label)) {
-            ParsedElement element{Kind::Type};
-            element.type = type;
-            return element;
-        }
-    if (c.eat("pr")) {
+    static void commit(const Payload &, LayerRules &rules, SourceState &, const ElementRef &element)
+    {
+        if (!rules.id)
+            rules.id = std::string(element.raw);
+        else if (normalize(*rules.id) != element.normalized)
+            add_diagnostic(rules, RuleDiagnosticCode::IdConflict, element);
+    }
+};
+
+// mode = ("incl" | "excl") [layer_set]: switches the mode of the source, and may add a set in it.
+struct ModeWord {
+    struct Payload {
+        bool                        exclude = false;
+        std::optional<RuleLayerSet> set;
+    };
+    static ParseStatus parse(Cursor &c, Payload &out)
+    {
+        const bool incl = c.eat("incl");
+        if (!incl && !c.eat("excl"))
+            return ParseStatus::NotMine;
+        out.exclude = !incl;
+        if (!c.done() && !(out.set = parse_layer_set(c)))
+            return ParseStatus::Invalid;
+        return ParseStatus::Ok;
+    }
+    static void commit(const Payload &in, LayerRules &rules, SourceState &state, const ElementRef &element)
+    {
+        state.exclude = in.exclude;
+        if (in.set)
+            add_operation(rules, state, *in.set, element);
+    }
+};
+
+// type: the first label stays in effect; gray and grey are one type.
+struct TypeWord {
+    struct Payload {
+        ModelVolumeType type = ModelVolumeType::INVALID;
+    };
+    static constexpr std::pair<std::string_view, ModelVolumeType> labels[] = {
+        {"center", ModelVolumeType::PRECISE_SEAM_CENTER},  {"left", ModelVolumeType::PRECISE_SEAM_LEFT},
+        {"right", ModelVolumeType::PRECISE_SEAM_RIGHT},    {"green", ModelVolumeType::PRECISE_SEAM_ENFORCED},
+        {"red", ModelVolumeType::PRECISE_SEAM_BLOCKED},    {"gray", ModelVolumeType::PRECISE_SEAM_NEUTRAL},
+        {"grey", ModelVolumeType::PRECISE_SEAM_NEUTRAL},
+    };
+    static ParseStatus parse(Cursor &c, Payload &out)
+    {
+        for (const auto &[label, type] : labels)
+            if (c.eat(label)) {
+                out.type = type;
+                return ParseStatus::Ok;
+            }
+        return ParseStatus::NotMine;
+    }
+    static void commit(const Payload &in, LayerRules &rules, SourceState &, const ElementRef &element)
+    {
+        commit_first(rules.type, in.type, RuleDiagnosticCode::TypeConflict, rules, element);
+    }
+};
+
+// priority = "pr" ["-"] uint, uint >= 1.
+struct PriorityWord {
+    struct Payload {
+        int priority = 0;
+    };
+    static ParseStatus parse(Cursor &c, Payload &out)
+    {
+        if (!c.eat("pr"))
+            return ParseStatus::NotMine;
         const bool                   negative = c.eat('-');
         const std::optional<int64_t> value    = c.uint();
         if (!value || *value < 1)
-            return std::nullopt;
-        ParsedElement element{Kind::Priority};
-        element.priority = int(negative ? -*value : *value);
-        return element;
+            return ParseStatus::Invalid;
+        out.priority = int(negative ? -*value : *value);
+        return ParseStatus::Ok;
     }
-    if (c.eat("off"))
-        return ParsedElement{Kind::Off};
-    if (c.eat("blank"))
-        return ParsedElement{Kind::Blank};
-    if (c.eat("nowarn"))
-        return ParsedElement{Kind::Nowarn};
-    if (c.eat("override"))
-        return ParsedElement{Kind::Override};
-    // relay = "relay" [uint] | "relay-random" [uint] ["seed" seed]; without a number it is a group of its own,
-    // apart from relay1, ...
-    const bool random = c.eat("relay-random");
-    if (random || c.eat("relay")) {
-        ParsedElement element{Kind::Relay};
-        element.relay.random = random;
-        bool seed = random && c.eat("seed");
+    static void commit(const Payload &in, LayerRules &rules, SourceState &, const ElementRef &element)
+    {
+        commit_first(rules.priority, in.priority, RuleDiagnosticCode::PriorityConflict, rules, element);
+    }
+};
+
+// Flags of the volume, which may repeat: off, blank, nowarn.
+struct FlagWord {
+    struct Payload {
+        bool LayerRules::*flag = nullptr;
+    };
+    static constexpr std::pair<std::string_view, bool LayerRules::*> flags[] = {
+        {"off", &LayerRules::off}, {"blank", &LayerRules::blank}, {"nowarn", &LayerRules::nowarn}};
+    static ParseStatus parse(Cursor &c, Payload &out)
+    {
+        for (const auto &[word, flag] : flags)
+            if (c.eat(word)) {
+                out.flag = flag;
+                return ParseStatus::Ok;
+            }
+        return ParseStatus::NotMine;
+    }
+    static void commit(const Payload &in, LayerRules &rules, SourceState &, const ElementRef &) { rules.*in.flag = true; }
+};
+
+// override: only as the first element of the field, where parse_layer_rules() already skipped the name.
+struct OverrideWord {
+    struct Payload {};
+    static ParseStatus parse(Cursor &c, Payload &) { return c.eat("override") ? ParseStatus::Ok : ParseStatus::NotMine; }
+    static void commit(const Payload &, LayerRules &rules, SourceState &, const ElementRef &element)
+    {
+        if (element.source.field && element.first)
+            rules.name_overridden = true;
+        else
+            add_diagnostic(rules, RuleDiagnosticCode::InvalidElement, element);
+    }
+};
+
+// relay = "relay" [uint] | "relay-random" [uint] ["seed" seed]; without a number it is a group of its own,
+// apart from relay1, ... relay-random is tried first, as relay begins it.
+struct RelayWord {
+    struct Payload {
+        RelayLabel              label;
+        std::optional<uint32_t> seed;
+    };
+    static ParseStatus parse(Cursor &c, Payload &out)
+    {
+        const bool random = c.eat("relay-random");
+        if (!random && !c.eat("relay"))
+            return ParseStatus::NotMine;
+        out.label.random = random;
+        bool seed        = random && c.eat("seed");
         if (!seed && !c.done()) {
             const std::optional<int64_t> group = c.uint();
             if (!group || *group < 1)
-                return std::nullopt;
-            element.relay.number = *group;
-            seed                 = random && c.eat("seed");
+                return ParseStatus::Invalid;
+            out.label.number = *group;
+            seed             = random && c.eat("seed");
         }
-        if (seed && !(element.relay_seed = c.seed()))
-            return std::nullopt;
-        return element;
+        if (seed && !(out.seed = c.seed()))
+            return ParseStatus::Invalid;
+        return ParseStatus::Ok;
     }
-    // origin = "model" | "bed": the sets after it count model layers and heights, or those of the bed.
-    const bool model = c.eat("model");
-    if (model || c.eat("bed")) {
-        ParsedElement element{Kind::Origin};
-        element.model = model;
-        return element;
+    static void commit(const Payload &in, LayerRules &rules, SourceState &, const ElementRef &element)
+    {
+        // The seed is a part of the element: a later relay with another seed, or without one, conflicts.
+        if (!rules.relay) {
+            rules.relay      = in.label;
+            rules.relay_seed = in.seed;
+        } else if (*rules.relay != in.label || rules.relay_seed != in.seed)
+            add_diagnostic(rules, RuleDiagnosticCode::RelayConflict, element);
     }
-    // magnet = "magnet" [decimal] ["apex" [decimal]]; distances in mm are kept in nanometres, 0 means a touch.
-    if (c.eat("magnet")) {
-        ParsedElement element{Kind::Magnet};
-        element.magnet.apex = c.eat("apex");
-        if (!element.magnet.apex && !c.done()) {
-            if (!(element.magnet.limit = c.nanometres()))
-                return std::nullopt;
-            element.magnet.apex = c.eat("apex");
+};
+
+// origin = "model" | "bed": the sets after it in the source count model layers and heights, or those of the bed.
+struct OriginWord {
+    struct Payload {
+        bool model = false;
+    };
+    static ParseStatus parse(Cursor &c, Payload &out)
+    {
+        out.model = c.eat("model");
+        return out.model || c.eat("bed") ? ParseStatus::Ok : ParseStatus::NotMine;
+    }
+    static void commit(const Payload &in, LayerRules &, SourceState &state, const ElementRef &) { state.model = in.model; }
+};
+
+// magnet = "magnet" [decimal] ["apex" [decimal]]; distances in mm are kept in nanometres, 0 means a touch.
+struct MagnetWord {
+    using Payload = MagnetRule;
+    static ParseStatus parse(Cursor &c, Payload &out)
+    {
+        if (!c.eat("magnet"))
+            return ParseStatus::NotMine;
+        out.apex = c.eat("apex");
+        if (!out.apex && !c.done()) {
+            if (!(out.limit = c.nanometres()))
+                return ParseStatus::Invalid;
+            out.apex = c.eat("apex");
         }
-        if (element.magnet.apex && !c.done()) {
+        if (out.apex && !c.done()) {
             const std::optional<int64_t> length = c.nanometres();
             if (!length)
-                return std::nullopt;
-            element.magnet.apex_length = *length;
+                return ParseStatus::Invalid;
+            out.apex_length = *length;
         }
-        return element;
+        return ParseStatus::Ok;
     }
-    if (std::optional<RuleLayerSet> set = parse_layer_set(c)) {
-        ParsedElement element{Kind::Set};
-        element.set = std::move(set);
-        return element;
+    static void commit(const Payload &in, LayerRules &rules, SourceState &, const ElementRef &element)
+    {
+        // Distances compare as numbers: magnet2.5 repeats magnet02.500000; magnet2apex differs from magnet2.
+        commit_first(rules.magnet, in, RuleDiagnosticCode::MagnetConflict, rules, element);
     }
-    return std::nullopt;
+};
+
+// A layer set on its own, added in the current mode. Last: whatever no keyword claimed is read as a set.
+struct SetWord {
+    using Payload = RuleLayerSet;
+    static ParseStatus parse(Cursor &c, Payload &out)
+    {
+        std::optional<RuleLayerSet> set = parse_layer_set(c);
+        if (!set)
+            return ParseStatus::Invalid;
+        out = std::move(*set);
+        return ParseStatus::Ok;
+    }
+    static void commit(const Payload &in, LayerRules &rules, SourceState &state, const ElementRef &element)
+    {
+        add_operation(rules, state, in, element);
+    }
+};
+
+// Reads the element with one family on a fresh cursor and commits it when it is the family's and valid.
+template<typename Word>
+ParseStatus read_word(LayerRules &rules, SourceState &state, const ElementRef &element)
+{
+    Cursor                 c(element.normalized);
+    typename Word::Payload payload{};
+    const ParseStatus      status = Word::parse(c, payload);
+    if (status == ParseStatus::NotMine)
+        return status;
+    // A malformed element changes nothing, not even the mode.
+    if (status == ParseStatus::Invalid || !c.done() || c.out_of_range()) {
+        add_diagnostic(rules, c.out_of_range() ? RuleDiagnosticCode::NumberOutOfRange : RuleDiagnosticCode::InvalidElement, element);
+        return ParseStatus::Invalid;
+    }
+    Word::commit(payload, rules, state, element);
+    return ParseStatus::Ok;
 }
 
-// Each source starts in the include mode and counts from the bed; sets, type and priority carry over between
-// sources.
+// The families in the order they are tried. No keyword of the language is a prefix of another but those noted
+// at their families; id comes first, as any text may follow it, and a bare layer set last.
+using WordReader = ParseStatus (*)(LayerRules &, SourceState &, const ElementRef &);
+constexpr WordReader words[] = {read_word<IdWord>,       read_word<ModeWord>,  read_word<TypeWord>,
+                                read_word<PriorityWord>, read_word<FlagWord>,  read_word<OverrideWord>,
+                                read_word<RelayWord>,    read_word<OriginWord>, read_word<MagnetWord>,
+                                read_word<SetWord>};
+
+// Reads one source: sets, type and priority carry over between sources, the mode and origin do not.
 void parse_source(LayerRules &rules, std::string_view source_text, const RuleSource &source)
 {
-    bool   exclude = false;
-    bool   model   = false;
-    bool   first   = true; // No non-empty element seen yet.
-    size_t index   = 0;
+    SourceState state;
+    bool        first = true; // No non-empty element seen yet.
+    size_t      index = 0;
     for (size_t begin = 0; begin <= source_text.size(); ++index) {
         const size_t           comma = std::min(source_text.find(',', begin), source_text.size());
         const std::string_view raw   = trim(source_text.substr(begin, comma - begin));
@@ -420,76 +602,11 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
         const std::string normalized = normalize(raw);
         if (normalized.empty())
             continue;
-        const size_t element_index = index + 1;
-        const bool   first_element = std::exchange(first, false);
-        // id: a name for external scripts. Any text may follow, so it is taken as a whole before the grammar;
-        // no other keyword starts with "id". Repeats compare normalized, the trimmed original is kept.
-        if (normalized.compare(0, 2, "id") == 0) {
-            if (!rules.id)
-                rules.id = std::string(raw);
-            else if (normalize(*rules.id) != normalized)
-                rules.diagnostics.push_back({RuleDiagnosticCode::IdConflict, source, element_index, std::string(raw)});
-            continue;
-        }
-        Cursor       cursor(normalized);
-        std::optional<ParsedElement> element = parse_element(cursor);
-        // A malformed element changes nothing, not even the mode.
-        if (!element || !cursor.done() || cursor.out_of_range()) {
-            rules.diagnostics.push_back({cursor.out_of_range() ? RuleDiagnosticCode::NumberOutOfRange :
-                                                                 RuleDiagnosticCode::InvalidElement,
-                                         source, element_index, std::string(raw)});
-            continue;
-        }
-        const auto add_set = [&](const RuleLayerSet &set) {
-            rules.operations.push_back({exclude, model, set, source, element_index, std::string(raw)});
-        };
-        switch (element->kind) {
-        case ParsedElement::Kind::Mode:
-            exclude = element->exclude;
-            if (element->set)
-                add_set(*element->set);
-            break;
-        case ParsedElement::Kind::Set: add_set(*element->set); break;
-        case ParsedElement::Kind::Type:
-            // The first label stays in effect; repeating the same type is not a conflict.
-            if (!rules.type)
-                rules.type = element->type;
-            else if (*rules.type != element->type)
-                rules.diagnostics.push_back({RuleDiagnosticCode::TypeConflict, source, element_index, std::string(raw)});
-            break;
-        case ParsedElement::Kind::Priority:
-            if (!rules.priority)
-                rules.priority = element->priority;
-            else if (*rules.priority != element->priority)
-                rules.diagnostics.push_back({RuleDiagnosticCode::PriorityConflict, source, element_index, std::string(raw)});
-            break;
-        case ParsedElement::Kind::Off: rules.off = true; break;
-        case ParsedElement::Kind::Blank: rules.blank = true; break;
-        case ParsedElement::Kind::Nowarn: rules.nowarn = true; break;
-        case ParsedElement::Kind::Override:
-            // Only the first element of the field replaces the name, which parse_layer_rules() then skipped.
-            if (source.field && first_element)
-                rules.name_overridden = true;
-            else
-                rules.diagnostics.push_back({RuleDiagnosticCode::InvalidElement, source, element_index, std::string(raw)});
-            break;
-        case ParsedElement::Kind::Relay:
-            // The seed is a part of the element: a later relay with another seed, or without one, conflicts.
-            if (!rules.relay) {
-                rules.relay      = element->relay;
-                rules.relay_seed = element->relay_seed;
-            } else if (*rules.relay != element->relay || rules.relay_seed != element->relay_seed)
-                rules.diagnostics.push_back({RuleDiagnosticCode::RelayConflict, source, element_index, std::string(raw)});
-            break;
-        case ParsedElement::Kind::Origin: model = element->model; break;
-        case ParsedElement::Kind::Magnet:
-            // Distances compare as numbers: magnet2.5 repeats magnet02.500000; magnet2apex differs from magnet2.
-            if (!rules.magnet)
-                rules.magnet = element->magnet;
-            else if (*rules.magnet != element->magnet)
-                rules.diagnostics.push_back({RuleDiagnosticCode::MagnetConflict, source, element_index, std::string(raw)});
-            break;
-        }
+        const ElementRef element{source, index + 1, std::exchange(first, false), raw, normalized};
+        // The set family comes last and claims every element, so one family always decides.
+        for (const WordReader read : words)
+            if (read(rules, state, element) != ParseStatus::NotMine)
+                break;
     }
 }
 
