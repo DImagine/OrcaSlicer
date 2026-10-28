@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 #include "libslic3r/GCode.hpp"
+#include "PreciseSeamRules.hpp"
+#include "SeamPlacer.hpp"
 
 // Precise Seam layer rules in the G-code export: the layer plan collected early, once, and the rule numbers of
 // the layers taken from it. Only GCode.cpp includes this header, so that the rules headers that SeamPlacer.hpp
