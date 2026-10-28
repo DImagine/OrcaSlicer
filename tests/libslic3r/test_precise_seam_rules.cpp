@@ -200,7 +200,8 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
                                       "relay-rand", "relay-random0", "relay-random-1", "relay-random.1", "relay-randomjunk",
                                       "relay-random1-5", "inclrelay-random", "relay-random1red", "inclida", "exclidx",
                                       "magnet.5", "magnet2.", "magnet-2", "magnet2-3", "magnetx", "inclmagnet", "exclmagnet2",
-                                      "magnet2red", "magnetz2", "magnet1.2.3", "seed7", "relayseed7", "relay1seed7",
+                                      "magnet2red", "magnetz2", "magnet1.2.3", "magnetap", "magnet2ap", "magnetapexx", "magnetapex2", "magnet2.apex",
+                                      "inclblank", "blank1", "blankx", "seed7", "relayseed7", "relay1seed7",
                                       "relay-randomseed", "relay-random1seed", "relay-random1seed4294967296",
                                       "relay-random1seed99999999999999999999", "relay-random1seed7x", "relay-random1seed-1",
                                       "relay-random1seed1.5", "relay-randomseed7seed8", "relay-random1seed7red", "modelx",
@@ -219,6 +220,7 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
     CHECK_FALSE(rules.id.has_value());
     CHECK_FALSE(rules.magnet.has_value());
     CHECK_FALSE(rules.off);
+    CHECK_FALSE(rules.blank);
     CHECK_FALSE(rules.nowarn);
 }
 
@@ -364,6 +366,24 @@ TEST_CASE("Off volumes take no part and nowarn silences tree mismatches", "[Prec
     CHECK(order.reordered.empty());
     // The silenced volume is still known, for the log.
     CHECK(order.suppressed == Layers{2});
+}
+
+TEST_CASE("A blank volume places no seam, whatever else its rules say", "[PreciseSeam][Rules]")
+{
+    const LayerRules blank = field("Blank,red,pr1,5-10,magnet"), none = field({});
+    CHECK(blank.blank);
+    CHECK_FALSE(blank.off);
+    CHECK(blank.inert());
+    CHECK(blank.diagnostics.empty());
+    // No place in the order and no layers, as off; its type label is not reported as a difference.
+    const EffectiveOrder order = effective_order({{ModelVolumeType::PRECISE_SEAM_NEUTRAL, &blank},
+                                                  {ModelVolumeType::PRECISE_SEAM_NEUTRAL, &none}});
+    CHECK(order.weak == Layers{1});
+    CHECK(order.strong.empty());
+    CHECK(order.type_changed.empty());
+    CHECK(select({}, "blank,5-10") == Layers{});
+    // The name may hold it too.
+    CHECK(parse_layer_rules("-^ps=blank=ps^-", {}).blank);
 }
 
 TEST_CASE("Unit conversion keeps the rules field of every volume", "[PreciseSeam][Rules]")
@@ -854,6 +874,23 @@ TEST_CASE("magnet takes an optional distance in mm, and the first one stays in e
     CHECK(overridden.diagnostics.empty());
 }
 
+TEST_CASE("magnet takes an optional apex after its distance", "[PreciseSeam][Rules][Magnet]")
+{
+    CHECK(field("magnetapex").magnet == MagnetRule{std::nullopt, true});
+    CHECK(field("magnet2.5apex").magnet == MagnetRule{2500000, true});
+    CHECK(field("Magnet 2.5 Apex").magnet == MagnetRule{2500000, true});
+    CHECK(field("magnet0apex").magnet == MagnetRule{0, true});
+    CHECK(field("magnet2").magnet == MagnetRule{2000000, false});
+    // apex is a part of the magnet: the same distance without it, or with it, conflicts.
+    for (const std::string text : {"magnet2,magnet2apex", "magnet2apex,magnet2", "magnetapex,magnet"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(rules.magnet == field(text.substr(0, text.find(','))).magnet);
+        CHECK(count_code(rules.diagnostics, Code::MagnetConflict) == 1);
+    }
+    CHECK(field("magnet2apex,magnet02.0apex").diagnostics.empty());
+}
+
 TEST_CASE("id names a volume for scripts and changes nothing else", "[PreciseSeam][Rules]")
 {
     // Any text may follow id, non-ASCII too, and keeps its case.
@@ -1056,6 +1093,12 @@ TEST_CASE("The plate takes the first seamdump of a volume that is not off", "[Pr
     CHECK(choice.first == 2);
     CHECK(choice.conflicts == std::vector<size_t>{4, 5});
     CHECK_FALSE(choose_seamdump({&none, &off}).request.has_value());
+    // A blank volume places no seam but keeps its seamdump.
+    const LayerRules blank = field("blank,seamdump t0.4");
+    const SeamdumpChoice held = choose_seamdump({&off, &blank});
+    REQUIRE(held.request.has_value());
+    CHECK(held.request->tolerance == 400000);
+    CHECK(held.first == 1);
     CHECK(choose_seamdump({}).conflicts.empty());
 }
 

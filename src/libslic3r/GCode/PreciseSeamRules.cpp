@@ -431,7 +431,7 @@ std::optional<SeamdumpRequest> parse_seamdump(std::string_view raw, bool unclose
 }
 
 struct ParsedElement {
-    enum class Kind { Mode, Set, Type, Priority, Off, Nowarn, Override, Relay, Magnet, Origin };
+    enum class Kind { Mode, Set, Type, Priority, Off, Blank, Nowarn, Override, Relay, Magnet, Origin };
     Kind                        kind;
     bool                        exclude = false; // Mode only.
     bool                        model   = false; // Origin only.
@@ -480,6 +480,8 @@ std::optional<ParsedElement> parse_element(Cursor &c)
     }
     if (c.eat("off"))
         return ParsedElement{Kind::Off};
+    if (c.eat("blank"))
+        return ParsedElement{Kind::Blank};
     if (c.eat("nowarn"))
         return ParsedElement{Kind::Nowarn};
     if (c.eat("override"))
@@ -509,11 +511,15 @@ std::optional<ParsedElement> parse_element(Cursor &c)
         element.model = model;
         return element;
     }
-    // magnet = "magnet" [decimal]; the distance in mm is kept in nanometres, 0 means a touch.
+    // magnet = "magnet" [decimal] ["apex"]; the distance in mm is kept in nanometres, 0 means a touch.
     if (c.eat("magnet")) {
         ParsedElement element{Kind::Magnet};
-        if (!c.done() && !(element.magnet.limit = c.nanometres()))
-            return std::nullopt;
+        element.magnet.apex = c.eat("apex");
+        if (!element.magnet.apex && !c.done()) {
+            if (!(element.magnet.limit = c.nanometres()))
+                return std::nullopt;
+            element.magnet.apex = c.eat("apex");
+        }
         return element;
     }
     if (std::optional<RuleLayerSet> set = parse_layer_set(c)) {
@@ -596,6 +602,7 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
                 rules.diagnostics.push_back({RuleDiagnosticCode::PriorityConflict, source, element_index, std::string(raw)});
             break;
         case ParsedElement::Kind::Off: rules.off = true; break;
+        case ParsedElement::Kind::Blank: rules.blank = true; break;
         case ParsedElement::Kind::Nowarn: rules.nowarn = true; break;
         case ParsedElement::Kind::Override:
             // Only the first element of the field replaces the name, which parse_layer_rules() then skipped.
@@ -614,7 +621,7 @@ void parse_source(LayerRules &rules, std::string_view source_text, const RuleSou
             break;
         case ParsedElement::Kind::Origin: model = element->model; break;
         case ParsedElement::Kind::Magnet:
-            // Distances compare as numbers: magnet2.5 repeats magnet02.500000.
+            // Distances compare as numbers: magnet2.5 repeats magnet02.500000; magnet2apex differs from magnet2.
             if (!rules.magnet)
                 rules.magnet = element->magnet;
             else if (*rules.magnet != element->magnet)
@@ -752,7 +759,7 @@ SeamdumpChoice choose_seamdump(const std::vector<const LayerRules*> &rules)
 {
     SeamdumpChoice choice;
     for (size_t i = 0; i < rules.size(); ++i) {
-        // An off volume takes no part, its seamdump neither.
+        // An off volume takes no part, its seamdump neither; a blank one keeps its seamdump.
         if (rules[i]->off || !rules[i]->seamdump)
             continue;
         if (!choice.request) {
@@ -791,7 +798,7 @@ LayerSelection select_layers(const LayerRules &rules, size_t layer_count, const 
 {
     LayerSelection selection;
     selection.layers.assign(layer_count + 1, false);
-    if (rules.off)
+    if (rules.inert())
         return selection;
     // No run-time overflow check, by design: a check is kept only for a case that can happen. layer_count is
     // the size of the vector just allocated, so the arithmetic of for_each_layer() stays far inside int64_t;
@@ -855,7 +862,7 @@ EffectiveOrder effective_order(const std::vector<RuledModifier> &modifiers)
     EffectiveOrder order;
     for (size_t i = 0; i < modifiers.size(); ++i) {
         const RuledModifier &modifier = modifiers[i];
-        if (modifier.rules->off)
+        if (modifier.rules->inert())
             continue;
         const ModelVolumeType type = modifier.effective_type();
         (is_precise_seam_strong(type) ? order.strong : order.weak).push_back(i);

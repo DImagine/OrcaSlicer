@@ -554,8 +554,105 @@ static std::pair<Vec2d, double> project_on_segment(const Vec2d &point, const Vec
     return {a + t * ab, t};
 }
 
+// magnet apex: the vertex of the corner the modifier stands in, from its loop centroid `centre` and the
+// nearest point `nearest`, or nullopt to keep that point. Q is the first crossing of a ray from the centre
+// square to the line to P, within the limit as P is; the ray halfway between them picks which part of the
+// loop from P to Q holds the corner; its vertex farthest from the centre wins when it lies deeper than P and Q.
+// `modifier_distance` gives the distance of a point to the modifier's boundaries.
+template<typename Distance>
+static std::optional<MagnetPoint> find_apex_point(const Polygon &perimeter, const Lines &perimeter_lines, const Vec2d &centre,
+                                                  const MagnetPoint &nearest, const Distance &modifier_distance,
+                                                  std::optional<double> limit, double tolerance)
+{
+    const size_t count = perimeter.size();
+    const Vec2d  to_p  = nearest.point.cast<double>() - centre;
+    if (to_p.norm() <= tolerance)
+        return std::nullopt;
+    // The first crossing of a ray from the centre with the perimeter, beyond the tolerance.
+    struct Hit {
+        double            distance;
+        Vec2d             point;
+        PerimeterPosition position;
+    };
+    const auto cast = [&](const Vec2d &direction) {
+        const Vec2d        u = direction.normalized();
+        std::optional<Hit> best;
+        for (size_t edge = 0; edge < count; ++edge) {
+            const Vec2d  a     = perimeter_lines[edge].a.cast<double>();
+            const Vec2d  ab    = perimeter_lines[edge].b.cast<double>() - a;
+            const double denom = cross2(u, ab);
+            if (denom == 0.) // Parallel to the ray.
+                continue;
+            const Vec2d  ao = a - centre;
+            const double t  = cross2(ao, ab) / denom; // Along the ray.
+            const double s  = cross2(ao, u) / denom;  // Along the edge.
+            if (t <= tolerance || s < 0. || s > 1. || (best && t >= best->distance))
+                continue;
+            best = Hit{t, centre + t * u, s == 1. ? PerimeterPosition{(edge + 1) % count, 0.} : PerimeterPosition{edge, s}};
+        }
+        return best;
+    };
+    const Vec2d        side(-to_p.y(), to_p.x());
+    std::optional<Hit> q = cast(side);
+    if (const std::optional<Hit> other = cast(-side); other && (!q || other->distance < q->distance))
+        q = other;
+    if (!q || (limit && modifier_distance(q->point) > *limit + tolerance))
+        return std::nullopt;
+    const std::optional<Hit> r = cast(to_p.normalized() + (q->point - centre).normalized());
+    if (!r)
+        return std::nullopt;
+
+    // Positions as arc lengths from vertex 0; the part from P to Q that holds R, forward or backward.
+    std::vector<double> start(count + 1, 0.);
+    for (size_t edge = 0; edge < count; ++edge)
+        start[edge + 1] = start[edge] + perimeter_lines[edge].length();
+    const double total   = start[count];
+    const auto   along   = [&start](const PerimeterPosition &p) {
+        return start[p.edge_index] + p.parameter * (start[p.edge_index + 1] - start[p.edge_index]);
+    };
+    const auto   forward = [total](double from, double to) { return to >= from ? to - from : to - from + total; };
+    const double sp      = along(nearest.position);
+    const double sq      = along(q->position);
+    const bool   ahead   = forward(sp, along(r->position)) <= forward(sp, sq);
+    const double span    = ahead ? forward(sp, sq) : forward(sq, sp);
+
+    // The distance along a segment is convex, so the farthest point is a vertex strictly inside the part.
+    std::vector<std::pair<size_t, double>> inside;
+    double                                 deepest = 0.;
+    for (size_t k = 0; k < count; ++k) {
+        const double offset = ahead ? forward(sp, start[k]) : forward(start[k], sp);
+        if (offset <= 0. || offset >= span)
+            continue;
+        const double distance = (perimeter[k].cast<double>() - centre).norm();
+        inside.emplace_back(k, distance);
+        deepest = std::max(deepest, distance);
+    }
+    // No corner deeper than both ends: the nearest point stays.
+    if (inside.empty() || deepest <= std::max(to_p.norm(), q->distance) + tolerance)
+        return std::nullopt;
+    // Equally deep vertices go to the one nearest the perimeter centroid, then to the rear and left one.
+    std::vector<size_t> candidates;
+    for (const auto &[k, distance] : inside)
+        if (distance >= deepest - tolerance)
+            candidates.push_back(k);
+    if (perimeter.area() != 0.) {
+        const Vec2d  centroid = perimeter.centroid().cast<double>();
+        const auto   to_centroid = [&](size_t k) { return (perimeter[k].cast<double>() - centroid).norm(); };
+        double       best        = std::numeric_limits<double>::infinity();
+        for (size_t k : candidates)
+            best = std::min(best, to_centroid(k));
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](size_t k) { return to_centroid(k) > best + tolerance; }),
+                         candidates.end());
+    }
+    size_t best = candidates.front();
+    for (size_t k : candidates)
+        if (rear_then_left(perimeter[k], perimeter[best]))
+            best = k;
+    return MagnetPoint{perimeter[best], PerimeterPosition{best, 0.}};
+}
+
 std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
-                                             std::optional<double> limit)
+                                             std::optional<double> limit, bool apex)
 {
     if (!prepared.valid)
         return std::nullopt;
@@ -731,7 +828,16 @@ std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, 
     }
     const PerimeterPosition position = best->parameter == 1. ? PerimeterPosition{(best->edge + 1) % count, 0.} :
                                                                PerimeterPosition{best->edge, best->parameter};
-    return MagnetPoint{best_point, position};
+    const MagnetPoint found{best_point, position};
+    if (!apex)
+        return found;
+    // apex looks from the centroid of the modifier loop that the nearest point is nearest to.
+    for (size_t loop : best->loops)
+        if (centroids[loop]) {
+            const auto to_modifier = [&](const Vec2d &point) { return distance_to(modifier_lines, modifier_tree, point); };
+            return find_apex_point(perimeter, perimeter_lines, *centroids[loop], found, to_modifier, limit, tolerance).value_or(found);
+        }
+    return found;
 }
 
 void init_precise_seam_data(
@@ -950,7 +1056,7 @@ std::optional<Point> insert_strong_seam_point(
             prepared, it->second[layer_id], type, {layer, modifier, warnings, quiet});
         // A magnet that does not cross the perimeter puts the seam at the nearest point, whatever the type.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet_acts(extracted)) {
-            const std::optional<MagnetPoint> point = find_magnet_point(prepared, it->second[layer_id], magnet->magnet_limit);
+            const std::optional<MagnetPoint> point = find_magnet_point(prepared, it->second[layer_id], magnet->magnet_limit, magnet->magnet_apex);
             record_extraction(warnings, modifier, type, extracted, point.has_value());
             if (!point)
                 continue;
@@ -1202,7 +1308,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         const auto type = convert_weak_modifier_type(volume_type);
         // A magnet that does not cross the perimeter types its nearest point only: a zone of one point.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier_volume); magnet != nullptr && magnet_acts(extracted)) {
-            const std::optional<MagnetPoint> point = find_magnet_point(prepared, it->second[layer_id], magnet->magnet_limit);
+            const std::optional<MagnetPoint> point = find_magnet_point(prepared, it->second[layer_id], magnet->magnet_limit, magnet->magnet_apex);
             record_extraction(warnings, modifier_volume, volume_type, extracted, point.has_value());
             if (point)
                 result.push_back({type, point->point, point->position, point->point, point->position, false, modifier_volume});

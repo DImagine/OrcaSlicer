@@ -53,8 +53,9 @@ std::string relay_label_text(const RelayLabel &label);
 // magnet: the modifier acts on the point of a perimeter nearest to it where it does not cross the perimeter.
 struct MagnetRule {
     std::optional<int64_t> limit; // Largest distance in nanometres; none acts at any distance, 0 on a touch only.
+    bool                   apex = false; // From the nearest point, the vertex of a corner the modifier stands in.
 
-    bool operator==(const MagnetRule &rhs) const { return limit == rhs.limit; }
+    bool operator==(const MagnetRule &rhs) const { return limit == rhs.limit && apex == rhs.apex; }
     bool operator!=(const MagnetRule &rhs) const { return !(*this == rhs); }
 };
 
@@ -130,12 +131,15 @@ struct LayerRules {
     std::optional<SeamdumpRequest>  seamdump;   // First seamdump of the field.
     size_t                          seamdump_element = 0; // Its element number in the field.
     bool                            off             = false;
+    bool                            blank           = false; // Acts on no seam, but its commands, e.g. seamdump, stay.
     bool                            nowarn          = false;
     bool                            name_overridden = false; // override first in the field: the name took no part.
     std::vector<RuleDiagnostic>     diagnostics; // Parse and conflict diagnostics in source/element order.
 
     // Rules without any valid layer set act on every layer (compatibility with volumes without rules).
     bool restricts_layers() const { return !operations.empty(); }
+    // The volume takes no part in placing seams: off, or blank.
+    bool inert() const { return off || blank; }
 };
 
 // Whether the name holds a block marker in either direction, in any letter case, whole block or not.

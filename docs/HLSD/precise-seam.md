@@ -109,7 +109,9 @@ print and is tested on its own.
   (`excl129-312`). `model` and `bed` switch the origin of the following sets
   in the same way (see Origin below). Labels `center`, `left`, `right`, `green`, `red`,
   `gray`/`grey` set the type; `prN` and `pr-N` set the priority; `off`
-  disables the modifier and `nowarn` silences the warnings about differences
+  disables the modifier; `blank` takes it out of seam placement the same way,
+  whatever else its rules say, but keeps its commands, such as `seamdump`, so the
+  volume can serve only to hold them; and `nowarn` silences the warnings about differences
   from the object list. A keyword is followed directly by its number or set:
   `pr.1` is not an element. `override` as the first element of the field
   replaces the name, so that the behaviour can change without renaming the
@@ -118,7 +120,8 @@ print and is tested on its own.
   group, `relay-randomN` and `relay-random` into a random one (see Relay
   below); `seedS` after the latter, as in `relay-random1seed7`, gives a seed. `magnet` and `magnetN` (N in mm, a decimal as for heights) draw the
   modifier to the nearest point of a perimeter it does not cross (see Magnet
-  below). An element that starts with `id` names the volume for external
+  below); `apex` after them, as in `magnet2apex`, moves that point to the tip of
+  a corner the modifier stands in. An element that starts with `id` names the volume for external
   scripts: it is taken as a whole, with any text after `id`, before the
   grammar, and changes nothing. The first id keeps its trimmed original text
   with its case; a later id that differs after normalization is a warning.
@@ -273,6 +276,24 @@ print and is tested on its own.
   for nearly equidistant shapes and for many short or repeated boundaries. A
   magnet reaches a perimeter where it finds a point or, on a crossing, acts by
   its type; full containment gives it no warning. Relay groups take magnets as they are: a found point is a win.
+- **Magnet apex.** Inside an angle the nearest point lies on a side, never at
+  the tip: from a centre at distance d from the tip, on the bisector of an angle
+  2α, a side is d·sin α away and the tip d. `apex` therefore starts from the
+  nearest point P and looks from the centroid C of the modifier loop P is
+  nearest to (no centroid: P stays). Two rays from C square to CP give Q, the
+  nearer first crossing with the same perimeter; Q must be within N of the
+  modifier's boundaries, as P is, which keeps P outside a corner, at a wall and
+  against a far crossing of a complex perimeter. The ray halfway between CP and
+  CQ crosses the perimeter at R, which picks the part of the loop from P to Q
+  that holds the corner. The farthest point from C on a polyline is a vertex,
+  so the vertices strictly inside that part are compared; when the deepest is
+  not deeper than both ends by more than the tolerance there is no corner, and
+  P stays. Equally deep vertices go to the one nearest the perimeter centroid,
+  then rear and left. A rounded corner works the same way, its deepest vertex
+  winning; a modifier at the very centre of a rounding or of a round hole gets
+  a point decided by the polygon, which the help covers by asking for a
+  modifier wider than the rounding. The cost is a pass over the edges per ray
+  and one over the vertices, after the magnet's own search.
 - **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
   `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, and runs

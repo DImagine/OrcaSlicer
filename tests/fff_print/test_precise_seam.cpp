@@ -1610,6 +1610,12 @@ TEST_CASE("Changing only the rules updates the exported seam", "[PreciseSeam][Ru
     CHECK(std::none_of(switched_off.begin(), switched_off.end(), seam_on_front_helper));
     // A volume switched off by its rules is not reported as having no effect.
     CHECK(fixture.warning().empty());
+    // A blank one acts on no seam either, whatever its type, and is not reported.
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "blank,center";
+    const auto blank = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(blank.size() == 10);
+    CHECK(std::none_of(blank.begin(), blank.end(), seam_on_front_helper));
+    CHECK(fixture.warning().empty());
 
     // A rule problem is reported; removing the last rules returns the object to the path without rules,
     // and the old rule warning goes with them.
@@ -2483,19 +2489,21 @@ TEST_CASE("A weak relay-random group hashes the real layer index and keeps the o
 
 namespace {
 // Magnet point of the perimeter to the given modifier regions; the limit is in mm.
-std::optional<Point> magnet_point(const Polygon &perimeter, ExPolygons regions, std::optional<double> limit = std::nullopt)
+std::optional<Point> magnet_point(const Polygon &perimeter, ExPolygons regions, std::optional<double> limit = std::nullopt,
+                                  bool apex = false)
 {
     const std::optional<PreciseSeam::MagnetPoint> found = PreciseSeam::find_magnet_point(
         PreciseSeam::PreparedPerimeter(perimeter), PreciseSeam::prepare_modifier_regions(std::move(regions)),
-        limit ? std::optional<double>(scale_(*limit)) : std::nullopt);
+        limit ? std::optional<double>(scale_(*limit)) : std::nullopt, apex);
     return found ? std::optional<Point>(found->point) : std::nullopt;
 }
-std::optional<Point> magnet_point(const Polygon &perimeter, const Polygons &loops, std::optional<double> limit = std::nullopt)
+std::optional<Point> magnet_point(const Polygon &perimeter, const Polygons &loops, std::optional<double> limit = std::nullopt,
+                                  bool apex = false)
 {
     ExPolygons regions;
     for (const Polygon &loop : loops)
         regions.emplace_back(loop);
-    return magnet_point(perimeter, std::move(regions), limit);
+    return magnet_point(perimeter, std::move(regions), limit, apex);
 }
 
 // The same contour starting at another vertex.
@@ -2619,6 +2627,43 @@ TEST_CASE("A centroid projection within the limit is found although the tree tru
     CHECK(found->point == Point(881, 801));
 }
 
+TEST_CASE("A magnet with apex moves from the nearest point to the tip of the corner the modifier stands in", "[PreciseSeam][Magnet]")
+{
+    // 40 x 20 mm with a V notch from the top, its tip at (20, 10). The 1 mm square stands in the notch, near
+    // its right side: the nearest point lies on that side, and the tip is 6.2 mm from the square's centre.
+    const Polygon notched(Points{mm(0, 0), mm(40, 0), mm(40, 20), mm(25, 20), mm(20, 10), mm(15, 20), mm(0, 20)});
+    const Polygon square = rectangle(21, 15.5, 22, 16.5);
+    const size_t  shift  = GENERATE(0, 3, 5);
+    CAPTURE(shift);
+    const Polygon perimeter = rotated(notched, shift);
+    const std::optional<Point> plain = magnet_point(perimeter, Polygons{square});
+    REQUIRE(plain.has_value());
+    CHECK(*plain != mm(20, 10));
+    CHECK(magnet_point(perimeter, Polygons{square}, std::nullopt, true) == mm(20, 10));
+    // The ray to the far side meets it 3.8 mm from the square: a limit of 5 mm reaches it, 2 mm does not and
+    // keeps the nearest point.
+    CHECK(magnet_point(perimeter, Polygons{square}, 5., true) == mm(20, 10));
+    CHECK(magnet_point(perimeter, Polygons{square}, 2., true) == plain);
+    // Inside the body, near the tip of a sharp triangle, the tip wins the same way.
+    const Polygon triangle(Points{mm(0, 0), mm(40, 0), mm(20, 40)});
+    CHECK(magnet_point(triangle, Polygons{rectangle(20.5, 32.5, 21.5, 33.5)}, std::nullopt, true) == mm(20, 40));
+}
+
+TEST_CASE("A magnet with apex keeps the nearest point where no corner holds the modifier", "[PreciseSeam][Magnet]")
+{
+    const Polygon perimeter = rectangle(0, 0, 20, 20);
+    // In front of a face the rays run along it and meet nothing.
+    CHECK(magnet_point(perimeter, Polygons{rectangle(8, -5, 12, -3)}, std::nullopt, true) == mm(10, 0));
+    // Outside a corner the nearest point is the corner itself.
+    CHECK(magnet_point(perimeter, Polygons{rectangle(21, 21, 22, 22)}, std::nullopt, true) == mm(20, 20));
+    // Off the centre of a round hole the farthest point of the part is its end, not a vertex inside it.
+    Polygon hole;
+    for (int i = 0; i < 64; ++i)
+        hole.points.push_back(mm(10 + 5 * std::cos(2 * PI * i / 64), 10 + 5 * std::sin(2 * PI * i / 64)));
+    const Polygon dot = rectangle(11.4, 9.9, 11.6, 10.1);
+    CHECK(magnet_point(hole, Polygons{dot}, std::nullopt, true) == magnet_point(hole, Polygons{dot}));
+}
+
 TEST_CASE("A strong magnet places the seam where it does not cross the perimeter, and acts by its type where it does", "[PreciseSeam][Magnet]")
 {
     SeamFixture                     fixture;
@@ -2690,9 +2735,13 @@ TEST_CASE("The rules give a magnet its limit in scaled units, a touch and no lim
     const ModelVolume *touch = add_modifier(fixture, green, "magnet0");
     const ModelVolume *tiny  = add_modifier(fixture, green, "magnet0.000001");
     const ModelVolume *plain = add_modifier(fixture, green, "");
+    const ModelVolume *apex  = add_modifier(fixture, green, "magnet2apex");
     const WeakInit     init(fixture, 10);
     CHECK(init.effective.at(any).magnet);
     CHECK_FALSE(init.effective.at(any).magnet_limit.has_value());
+    CHECK_FALSE(init.effective.at(any).magnet_apex);
+    CHECK(init.effective.at(apex).magnet_apex);
+    CHECK(init.effective.at(apex).magnet_limit == scale_(2.));
     CHECK(init.effective.at(touch).magnet_limit == 0.);
     // One nanometre stays a positive limit, not a touch and not unlimited: one coordinate unit at the default
     // scale, a tenth of one on large beds, where a whole-unit limit would round it to zero.

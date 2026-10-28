@@ -68,11 +68,11 @@ void init_precise_seam_data_by_rules(
         ruled.push_back({volumes[i]->type(), &rules[i]});
     const EffectiveOrder order = effective_order(ruled);
 
-    // Relay groups by label, in volume order and without off volumes. A group is all strong or all weak; a
+    // Relay groups by label, in volume order and without off or blank volumes. A group is all strong or all weak; a
     // mixed one acts without relay, and its members keep their other rules.
     std::map<RelayLabel, std::vector<size_t>> labelled;
     for (size_t i = 0; i < volumes.size(); ++i)
-        if (!rules[i].off && rules[i].relay)
+        if (!rules[i].inert() && rules[i].relay)
             labelled[*rules[i].relay].push_back(i);
     std::vector<std::optional<size_t>> group_of(volumes.size());
     std::vector<bool>                  mixed(volumes.size(), false);
@@ -103,7 +103,7 @@ void init_precise_seam_data_by_rules(
     const auto contains = [](const std::vector<size_t> &list, size_t i) { return std::find(list.begin(), list.end(), i) != list.end(); };
 
     // Layers of each volume, with its diagnostics in volume order. An empty row means every layer;
-    // nullopt leaves the volume out: switched off, or its rules exclude every layer of this object.
+    // nullopt leaves the volume out: switched off or blank, or its rules exclude every layer of this object.
     const std::vector<size_t> numbered = numbering.numbered_layers();
     // Height bands of the numbered model layers, matched by the original layer index (numbered_layers()
     // drops that index); built only when some volume selects by height.
@@ -125,9 +125,9 @@ void init_precise_seam_data_by_rules(
     for (size_t i = 0; i < volumes.size(); ++i) {
         // Nothing reads the diagnostics of the rules after this point.
         std::vector<RuleDiagnostic> own = std::move(rules[i].diagnostics);
-        if (!rules[i].off && !rules[i].restricts_layers())
+        if (!rules[i].inert() && !rules[i].restricts_layers())
             layers[i].emplace();
-        else if (!rules[i].off) {
+        else if (!rules[i].inert()) {
             LayerSelection selection = select_layers(rules[i], numbering.count, numbered, bands, numbering.object_layers, model_bottom);
             own.insert(own.end(), std::make_move_iterator(selection.diagnostics.begin()), std::make_move_iterator(selection.diagnostics.end()));
             std::vector<bool> row(numbering.object_layers.size(), false);
@@ -164,6 +164,7 @@ void init_precise_seam_data_by_rules(
         EffectiveModifier modifier{ruled[i].effective_type(), std::move(*layers[i])};
         if (rules[i].magnet) {
             modifier.magnet = true;
+            modifier.magnet_apex = rules[i].magnet->apex;
             // Kept in scaled units as a double: a limit below one unit must not round to a touch or to none.
             if (rules[i].magnet->limit)
                 modifier.magnet_limit = scale_(double(*rules[i].magnet->limit) / nanometres_per_mm);

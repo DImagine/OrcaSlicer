@@ -149,9 +149,10 @@ struct MagnetPoint {
 // Point of a prepared, unchanged perimeter nearest to the boundaries of the modifier's regions, or nullopt
 // when there are none or all are farther than `limit` (scaled units, compared with the snapping tolerance).
 // Equally near points go to the one nearest the centroid of its modifier loop, then of the perimeter,
-// then to the rear and left one.
+// then to the rear and left one. With `apex`, the point then moves to the vertex of a corner that the modifier
+// stands in, when there is one within reach.
 std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
-                                             std::optional<double> limit);
+                                             std::optional<double> limit, bool apex = false);
 
 // Result of weak modifier segment processing
 struct WeakModifierSegment {
@@ -173,6 +174,7 @@ struct EffectiveModifier {
     std::vector<bool> layers; // Active object layers by index without raft; empty means every layer.
     bool                  magnet = false; // magnet: a perimeter it does not cross gets its nearest point.
     std::optional<double> magnet_limit;   // Scaled units; none with magnet means any distance.
+    bool                  magnet_apex = false; // magnet apex: from the nearest point to the vertex of the corner.
 
     bool active_on(size_t layer_id) const { return layers.empty() || (layer_id < layers.size() && layers[layer_id]); }
 };
