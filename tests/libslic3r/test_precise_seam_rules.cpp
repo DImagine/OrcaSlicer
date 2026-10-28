@@ -947,6 +947,20 @@ TEST_CASE("id names a volume for scripts and changes nothing else", "[PreciseSea
     CHECK(apply_rules(late) == Layers{5});
 }
 
+TEST_CASE("id takes a quote as any character, and a comma still ends it", "[PreciseSeam][Rules]")
+{
+    const LayerRules id = field("id\"tag,5");
+    CHECK(id.id == "id\"tag");
+    CHECK(id.diagnostics.empty());
+    CHECK(apply_rules(id) == Layers{5});
+    // The quote opens no string: b" is an element of its own, invalid, and 5 follows it.
+    const LayerRules id_pair = field("id\"a,b\",5");
+    CHECK(id_pair.id == "id\"a");
+    REQUIRE(id_pair.diagnostics.size() == 1);
+    CHECK(id_pair.diagnostics.front().element == 2);
+    CHECK(apply_rules(id_pair) == Layers{5});
+}
+
 TEST_CASE("Name markers and commas bound an id", "[PreciseSeam][Rules]")
 {
     // The name block ends at the first closing marker: off falls outside, and the second closing is stray.

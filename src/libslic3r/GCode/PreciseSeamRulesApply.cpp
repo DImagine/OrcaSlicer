@@ -24,6 +24,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/libslic3r.h"
 #include "PreciseSeam.hpp"
+#include "PreciseSeamRulesGeometry.hpp"
 #include "PreciseSeamRules.hpp"
 
 namespace Slic3r {
@@ -384,7 +385,7 @@ void schedule_relay(RelayOrder &order, const PrintObject &object, const Effectiv
                         Polygon polygon = perimeter;
                         polygon.make_counter_clockwise();
                         const PreparedPerimeter prepared(polygon);
-                        return insert_strong_seam_point(volumes, polygon, prepared, &model_layer, slices, nullptr, &effective, true)
+                        return insert_strong_seam_point_by_rules(volumes, polygon, prepared, &model_layer, slices, nullptr, effective, true)
                             .has_value();
                     };
                     // A perimeter that the seniors take is no win for any member.

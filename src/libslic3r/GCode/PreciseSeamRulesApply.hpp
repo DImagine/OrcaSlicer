@@ -10,6 +10,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "PreciseSeam.hpp"
+#include "PreciseSeamRulesGeometry.hpp"
 #include "PreciseSeamRules.hpp"
 
 // Precise Seam layer rules applied to a print: the branch that SeamPlacer and the G-code export take only
