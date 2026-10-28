@@ -1,9 +1,11 @@
 #pragma once
 
 #include "PreciseSeam.hpp"
+#include "SeamPlacer.hpp"
 #include "libslic3r/AABBTreeLines.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Line.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
