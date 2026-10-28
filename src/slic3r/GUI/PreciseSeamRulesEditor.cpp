@@ -9,6 +9,7 @@
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "I18N.hpp"
+#include "OptionsGroup.hpp"
 #include "Plater.hpp"
 #include "Tab.hpp"
 
@@ -76,17 +77,33 @@ bool apply_precise_seam_rules(ObjectID volume_id, const std::string &rules)
     return true;
 }
 
-void PreciseSeamRulesEditor::set_volume(const ModelVolume *volume)
+void PreciseSeamRulesEditor::add_group(Page &page)
 {
-    const ObjectID id = volume ? volume->id() : ObjectID();
+    auto optgroup = page.new_optgroup(L("Precise Seam Rules (experimental)"), L"param_seam");
+    optgroup->visibility_condition = [this] { return shown(); };
+    Line line{"", ""};
+    line.full_width = 1;
+    line.widget     = [this, group = optgroup.get()](wxWindow *parent) {
+        // The group title, built just before the field, shows the whole help of the rules.
+        if (group->stb != nullptr)
+            group->stb->SetToolTip(precise_seam_rules_help());
+        return create(parent);
+    };
+    optgroup->append_line(line);
+}
+
+bool PreciseSeamRulesEditor::select(const ObjectBase *single)
+{
+    const auto    *volume    = dynamic_cast<const ModelVolume *>(single);
+    const ObjectID id        = volume != nullptr && volume->is_precise_seam() ? volume->id() : ObjectID();
+    const bool     was_shown = shown();
     // The same volume may hold other rules now, after undo or redo; refresh() keeps a pending edit.
-    if (id == m_volume) {
-        refresh();
-        return;
+    if (id != m_volume) {
+        commit_pending();
+        m_volume = id;
     }
-    commit_pending();
-    m_volume = id;
     refresh();
+    return shown() != was_shown;
 }
 
 wxSizer *PreciseSeamRulesEditor::create(wxWindow *parent)
