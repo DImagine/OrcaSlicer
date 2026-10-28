@@ -351,7 +351,10 @@ print and is tested on its own.
   never hand a perimeter back to the original drivers; any other object keeps
   the drivers of `PreciseSeam.cpp` unchanged. They share only the insertion,
   refinement and weak-zone preparation of `PreciseSeam.cpp`. The layer numbering is an adapter of the export
-  plan and stays next to it in `GCode.cpp`; when printing by layer it keeps
+  plan, `ExportPlan` in `PreciseSeamRulesExport.cpp`: `_do_export()` lends it
+  the plan collectors for one call, so `GCode` exposes nothing new, and takes
+  the collected plans back; only `GCode.cpp` includes its header, so the rules
+  headers never include `GCode.hpp`. When printing by layer it keeps
   rows only for the objects with rules, while every event of the plate still
   takes a number. The price is a
   second collection of the volumes in the branch; a test checks that rules
