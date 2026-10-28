@@ -47,22 +47,15 @@ const std::vector<const ModelVolume*> &RuleContext::strong_on(size_t layer, cons
     return buffer;
 }
 
-LayerNumbering object_numbering(const PrintObject &object, const std::unordered_map<const PrintObject*, LayerNumbering> *plan)
+const LayerNumbering *object_numbering(const PrintObject &object, const std::unordered_map<const PrintObject*, LayerNumbering> *plan)
 {
-    if (plan != nullptr) {
-        // The export numbers every object that uses rules. Asserted, not checked at run time: an invariant that
-        // cannot fail in the export is documented, not handled.
-        const auto it = plan->find(&object);
-        assert(it != plan->end());
-        if (it != plan->end())
-            return it->second;
-    }
-    // Without the export plan (tests) the object numbers its own layers from 1.
-    LayerNumbering own;
-    own.count = object.layers().size();
-    for (size_t i = 0; i < own.count; ++i)
-        own.object_layers.push_back(i + 1);
-    return own;
+    if (plan == nullptr)
+        return nullptr;
+    // The export numbers every object that uses rules. Asserted, not checked at run time: an invariant that
+    // cannot fail in the export is documented, not handled.
+    const auto it = plan->find(&object);
+    assert(it != plan->end());
+    return it != plan->end() ? &it->second : nullptr;
 }
 
 namespace {
@@ -256,7 +249,7 @@ RuleContext prepare_rule_context(std::vector<const ModelVolume*> &strong_volumes
                                  std::vector<const ModelVolume*> &weak_volumes_out,
                                  bool &has_strong_out,
                                  const ModelObject &model_object,
-                                 const LayerNumbering &numbering,
+                                 const LayerNumbering *plan_numbering,
                                  const ConstLayerPtrsAdaptor &model_layers,
                                  std::vector<ModifierDiagnostic> &diagnostics_out)
 {
@@ -280,6 +273,15 @@ RuleContext prepare_rule_context(std::vector<const ModelVolume*> &strong_volumes
         ruled.push_back({volumes[i]->type(), &rules[i]});
     const EffectiveOrder order  = effective_order(ruled);
     const RelayGroups    groups = find_relay_groups(rules, ruled);
+
+    // Without the export plan the object numbers its own layers from 1.
+    LayerNumbering own;
+    if (plan_numbering == nullptr) {
+        own.count = model_layers.size();
+        for (size_t i = 0; i < own.count; ++i)
+            own.object_layers.push_back(i + 1);
+    }
+    const LayerNumbering &numbering = plan_numbering != nullptr ? *plan_numbering : own;
 
     // Layers of each volume, with its diagnostics in volume order. Nothing reads the diagnostics of the rules after.
     const NumberedLayers numbered{numbering, numbering.numbered_layers(), height_bands(rules, numbering, model_layers),
