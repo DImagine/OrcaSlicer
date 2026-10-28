@@ -4294,19 +4294,8 @@ void TabPrintPart::build()
     // The Precise Seam rules are a field of the volume, not an option: they join after the option filter
     // above, which drops every line without options.
     for (const char *name : {"Frequent", "Others"}) {
-        const auto it   = std::find_if(m_pages.begin(), m_pages.end(), [name](const PageShp &page) { return page->title() == name; });
-        PageShp    page = it != m_pages.end() ? *it : add_options_page(L("Others"), "custom-gcode_other");
-        auto optgroup   = page->new_optgroup(L("Precise Seam Rules (experimental)"), L"param_seam");
-        optgroup->visibility_condition = [this] { return m_precise_seam_rules->shown(); };
-        Line line{"", ""};
-        line.full_width = 1;
-        line.widget     = [this, group = optgroup.get()](wxWindow *parent) {
-            // The group title, built just before the field, shows the whole help of the rules.
-            if (group->stb != nullptr)
-                group->stb->SetToolTip(precise_seam_rules_help());
-            return m_precise_seam_rules->create(parent);
-        };
-        optgroup->append_line(line);
+        const auto it = std::find_if(m_pages.begin(), m_pages.end(), [name](const PageShp &page) { return page->title() == name; });
+        m_precise_seam_rules->add_group(it != m_pages.end() ? **it : *add_options_page(L("Others"), "custom-gcode_other"));
     }
 }
 
@@ -4333,10 +4322,7 @@ void TabPrintPart::sys_color_changed()
 void TabPrintPart::on_model_config_set()
 {
     // The rules field shows for a single Precise Seam volume only.
-    const auto *volume = m_object_configs.size() == 1 ? dynamic_cast<const ModelVolume *>(m_object_configs.begin()->first) : nullptr;
-    const bool  shown  = m_precise_seam_rules->shown();
-    m_precise_seam_rules->set_volume(volume != nullptr && volume->is_precise_seam() ? volume : nullptr);
-    if (shown != m_precise_seam_rules->shown())
+    if (m_precise_seam_rules->select(m_object_configs.size() == 1 ? m_object_configs.begin()->first : nullptr))
         update_visibility();
 }
 

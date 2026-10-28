@@ -21,6 +21,7 @@ class wxWindow;
 namespace Slic3r {
 class ModelVolume;
 namespace GUI {
+class Page;
 
 // Help of the rules language, shown on the title of the settings group.
 wxString precise_seam_rules_help();
@@ -32,8 +33,12 @@ bool apply_precise_seam_rules(ObjectID volume_id, const std::string &rules);
 class PreciseSeamRulesEditor
 {
 public:
-    // The volume whose rules the fields show; nullptr hides them. A pending edit goes to its own volume first.
-    void set_volume(const ModelVolume *volume);
+    // Adds a settings group with one copy of the field to `page`; the group shows while a volume is shown.
+    void add_group(Page &page);
+    // Shows the rules of the selected part when it is a single Precise Seam volume, otherwise hides them;
+    // `single` is null for any other selection. A pending edit goes to its own volume first. True when the
+    // fields appear or disappear, so the page must update its visibility.
+    bool select(const ObjectBase *single);
     bool shown() const { return m_volume.valid(); }
     // Typed text not applied yet; saving and closing must see it as a change.
     bool pending() const { return m_edited.valid(); }
