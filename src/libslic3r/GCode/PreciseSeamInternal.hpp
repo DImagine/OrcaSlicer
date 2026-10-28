@@ -1,7 +1,10 @@
 #pragma once
 
 #include "PreciseSeam.hpp"
+#include "SeamPlacer.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/libslic3r.h"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
 #include <cstddef>

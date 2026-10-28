@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include "libslic3r/GCode.hpp"
+#include "libslic3r/libslic3r.h"
 #include "PreciseSeamRules.hpp"
 #include "SeamPlacer.hpp"
 

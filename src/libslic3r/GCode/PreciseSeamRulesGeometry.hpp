@@ -14,6 +14,8 @@
 // Objects without rules keep the drivers of PreciseSeam.hpp. Design: docs/HLSD/precise-seam.md
 
 namespace Slic3r {
+class Layer;
+
 namespace PreciseSeam {
 
 // The point of a perimeter that a magnet modifier acts on.
