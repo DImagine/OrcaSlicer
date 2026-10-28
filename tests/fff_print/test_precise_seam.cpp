@@ -2700,6 +2700,37 @@ TEST_CASE("A magnet with apex that crosses both sides of a corner takes its tip"
     CHECK(crossing_apex(perimeter, {across, rectangle(5, 2, 7, 4)}) == mm(20, 10));
 }
 
+TEST_CASE("A magnet with apex takes a single crossing shorter than its length for a touch", "[PreciseSeam][Magnet]")
+{
+    // A round modifier of radius 1 mm reaches 0.03 mm into the right side of the notch, square to it at
+    // (22.75, 15.5): one crossing about 0.48 mm long. A vertex of the circle points straight at the side.
+    const Vec2d normal(-2. / std::sqrt(5.), 1. / std::sqrt(5.)); // From the side into the notch.
+    const Vec2d centre = Vec2d(22.75, 15.5) + 0.97 * normal;
+    const double first = std::atan2(-normal.y(), -normal.x());
+    Polygon      round;
+    for (int i = 0; i < 64; ++i)
+        round.points.push_back(mm(centre.x() + std::cos(first + 2 * PI * i / 64), centre.y() + std::sin(first + 2 * PI * i / 64)));
+    SeamFixture                     fixture;
+    PreciseSeam::EffectiveModifiers effective;
+    const auto seam = [&](double length) {
+        const ModelVolume *volume = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {round});
+        PreciseSeam::EffectiveModifier rule = magnet_rule(ModelVolumeType::PRECISE_SEAM_CENTER);
+        rule.magnet_apex        = true;
+        rule.magnet_apex_length = scale_(length);
+        effective.emplace(volume, rule);
+        Polygon perimeter = notched();
+        return PreciseSeam::insert_strong_seam_point({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
+                                                     fixture.cache, nullptr, &effective);
+    };
+    // Longer than 0.4 mm: the type acts, in the middle of the crossing.
+    const std::optional<Point> typed = seam(0.4);
+    REQUIRE(typed.has_value());
+    CHECK((unscaled(*typed) - Vec2d(22.75, 15.5)).norm() < 0.01);
+    // Shorter than 1 mm, or than 0.6: a touch, and the magnet finds the tip from it.
+    CHECK(seam(1.) == mm(20, 10));
+    CHECK(seam(0.6) == mm(20, 10));
+}
+
 TEST_CASE("Strong and weak magnets with apex act on the tip between two crossings", "[PreciseSeam][Magnet]")
 {
     SeamFixture                     fixture;
@@ -2802,13 +2833,15 @@ TEST_CASE("The rules give a magnet its limit in scaled units, a touch and no lim
     const ModelVolume *touch = add_modifier(fixture, green, "magnet0");
     const ModelVolume *tiny  = add_modifier(fixture, green, "magnet0.000001");
     const ModelVolume *plain = add_modifier(fixture, green, "");
-    const ModelVolume *apex  = add_modifier(fixture, green, "magnet2apex");
+    const ModelVolume *apex  = add_modifier(fixture, green, "magnet2apex0.5");
     const WeakInit     init(fixture, 10);
     CHECK(init.effective.at(any).magnet);
     CHECK_FALSE(init.effective.at(any).magnet_limit.has_value());
     CHECK_FALSE(init.effective.at(any).magnet_apex);
     CHECK(init.effective.at(apex).magnet_apex);
     CHECK(init.effective.at(apex).magnet_limit == scale_(2.));
+    CHECK(init.effective.at(apex).magnet_apex_length == scale_(0.5));
+    CHECK(init.effective.at(any).magnet_apex_length == 0.);
     CHECK(init.effective.at(touch).magnet_limit == 0.);
     // One nanometre stays a positive limit, not a touch and not unlimited: one coordinate unit at the default
     // scale, a tenth of one on large beds, where a whole-unit limit would round it to zero.

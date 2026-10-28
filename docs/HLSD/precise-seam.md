@@ -306,6 +306,11 @@ print and is tested on its own.
   its ends being the outer middles. Of the tips of several regions the one
   nearest its own centroid wins, then rear and left; with no tip deeper than
   its ends the type acts. Regions that do not cross take no part then.
+  A length after `apex`, as in `magnet2apex0.5`, takes a single crossing
+  shorter than it for a touch, so the magnet acts: nearing a corner, the
+  modifier touches one side before the other, and the type would move the
+  seam for that moment. The default 0 checks no length, as a good default
+  depends on the modifier's size.
 - **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
   `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, and runs

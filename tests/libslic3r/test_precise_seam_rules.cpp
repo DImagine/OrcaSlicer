@@ -200,7 +200,7 @@ TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][
                                       "relay-rand", "relay-random0", "relay-random-1", "relay-random.1", "relay-randomjunk",
                                       "relay-random1-5", "inclrelay-random", "relay-random1red", "inclida", "exclidx",
                                       "magnet.5", "magnet2.", "magnet-2", "magnet2-3", "magnetx", "inclmagnet", "exclmagnet2",
-                                      "magnet2red", "magnetz2", "magnet1.2.3", "magnetap", "magnet2ap", "magnetapexx", "magnetapex2", "magnet2.apex",
+                                      "magnet2red", "magnetz2", "magnet1.2.3", "magnetap", "magnet2ap", "magnetapexx", "magnetapex2.", "magnetapex-1", "magnet2.apex",
                                       "inclblank", "blank1", "blankx", "seed7", "relayseed7", "relay1seed7",
                                       "relay-randomseed", "relay-random1seed", "relay-random1seed4294967296",
                                       "relay-random1seed99999999999999999999", "relay-random1seed7x", "relay-random1seed-1",
@@ -889,6 +889,12 @@ TEST_CASE("magnet takes an optional apex after its distance", "[PreciseSeam][Rul
         CHECK(count_code(rules.diagnostics, Code::MagnetConflict) == 1);
     }
     CHECK(field("magnet2apex,magnet02.0apex").diagnostics.empty());
+    // A length after apex: one crossing shorter than it is a touch; none or 0 checks no length.
+    CHECK(field("magnet 2 apex 0.5").magnet == MagnetRule{2000000, true, 500000});
+    CHECK(field("magnetapex1").magnet == MagnetRule{std::nullopt, true, 1000000});
+    CHECK(field("magnetapex0").magnet == field("magnetapex").magnet);
+    CHECK(count_code(field("magnet2apex,magnet2apex0.5").diagnostics, Code::MagnetConflict) == 1);
+    CHECK(count_code(field("magnetapex1000001").diagnostics, Code::NumberOutOfRange) == 1);
 }
 
 TEST_CASE("id names a volume for scripts and changes nothing else", "[PreciseSeam][Rules]")

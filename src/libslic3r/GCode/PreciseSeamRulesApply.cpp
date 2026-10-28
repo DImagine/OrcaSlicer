@@ -164,7 +164,8 @@ void init_precise_seam_data_by_rules(
         EffectiveModifier modifier{ruled[i].effective_type(), std::move(*layers[i])};
         if (rules[i].magnet) {
             modifier.magnet = true;
-            modifier.magnet_apex = rules[i].magnet->apex;
+            modifier.magnet_apex        = rules[i].magnet->apex;
+            modifier.magnet_apex_length = scale_(double(rules[i].magnet->apex_length) / nanometres_per_mm);
             // Kept in scaled units as a double: a limit below one unit must not round to a touch or to none.
             if (rules[i].magnet->limit)
                 modifier.magnet_limit = scale_(double(*rules[i].magnet->limit) / nanometres_per_mm);

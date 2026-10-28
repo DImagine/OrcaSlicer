@@ -182,6 +182,7 @@ struct EffectiveModifier {
     bool                  magnet = false; // magnet: a perimeter it does not cross gets its nearest point.
     std::optional<double> magnet_limit;   // Scaled units; none with magnet means any distance.
     bool                  magnet_apex = false; // magnet apex: from the nearest point to the vertex of the corner.
+    double                magnet_apex_length = 0.; // Scaled: with apex, one crossing shorter than this is a touch.
 
     bool active_on(size_t layer_id) const { return layers.empty() || (layer_id < layers.size() && layers[layer_id]); }
 };

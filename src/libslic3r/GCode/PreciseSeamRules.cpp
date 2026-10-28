@@ -511,7 +511,7 @@ std::optional<ParsedElement> parse_element(Cursor &c)
         element.model = model;
         return element;
     }
-    // magnet = "magnet" [decimal] ["apex"]; the distance in mm is kept in nanometres, 0 means a touch.
+    // magnet = "magnet" [decimal] ["apex" [decimal]]; distances in mm are kept in nanometres, 0 means a touch.
     if (c.eat("magnet")) {
         ParsedElement element{Kind::Magnet};
         element.magnet.apex = c.eat("apex");
@@ -519,6 +519,12 @@ std::optional<ParsedElement> parse_element(Cursor &c)
             if (!(element.magnet.limit = c.nanometres()))
                 return std::nullopt;
             element.magnet.apex = c.eat("apex");
+        }
+        if (element.magnet.apex && !c.done()) {
+            const std::optional<int64_t> length = c.nanometres();
+            if (!length)
+                return std::nullopt;
+            element.magnet.apex_length = *length;
         }
         return element;
     }

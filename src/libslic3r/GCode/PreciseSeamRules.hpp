@@ -54,8 +54,9 @@ std::string relay_label_text(const RelayLabel &label);
 struct MagnetRule {
     std::optional<int64_t> limit; // Largest distance in nanometres; none acts at any distance, 0 on a touch only.
     bool                   apex = false; // From the nearest point, the vertex of a corner the modifier stands in.
+    int64_t                apex_length = 0; // Nanometres: with apex, one crossing shorter than this is a touch.
 
-    bool operator==(const MagnetRule &rhs) const { return limit == rhs.limit && apex == rhs.apex; }
+    bool operator==(const MagnetRule &rhs) const { return limit == rhs.limit && apex == rhs.apex && apex_length == rhs.apex_length; }
     bool operator!=(const MagnetRule &rhs) const { return !(*this == rhs); }
 };
 

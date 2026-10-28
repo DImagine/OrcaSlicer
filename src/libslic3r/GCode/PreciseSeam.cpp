@@ -1095,6 +1095,15 @@ static bool magnet_acts(const SegmentExtraction &extracted)
     return extracted.valid && (extracted.full_containment || (extracted.segments.empty() && extracted.discarded_fragments == 0));
 }
 
+// The same for a magnet with apex, for which one crossing shorter than its length is only a touch: as the
+// modifier nears a corner, one side is touched before the other, and the type must not take that moment.
+static bool magnet_acts(const SegmentExtraction &extracted, const EffectiveModifier &magnet)
+{
+    return magnet_acts(extracted) ||
+           (magnet.magnet_apex && extracted.valid && !extracted.full_containment && extracted.discarded_fragments == 0 &&
+            extracted.segments.size() == 1 && extracted.segments.front().polyline.length() < magnet.magnet_apex_length);
+}
+
 // Records one extraction for the warnings: the type of a modifier with a discarded fragment, the
 // evaluated/reached flags for "had no effect" (a discarded fragment counts as reached, a contact not).
 // `magnet` is set where a magnet acts instead of the type: then only a found point counts as reached.
@@ -1143,7 +1152,7 @@ std::optional<Point> insert_strong_seam_point(
         const SegmentExtraction extracted = extract_perimeter_segments(
             prepared, it->second[layer_id], type, {layer, modifier, warnings, quiet});
         // A magnet that does not cross the perimeter puts the seam at the nearest point, whatever the type.
-        if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet_acts(extracted)) {
+        if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet_acts(extracted, *magnet)) {
             const std::optional<MagnetPoint> point = find_magnet_point(prepared, it->second[layer_id], magnet->magnet_limit, magnet->magnet_apex);
             record_extraction(warnings, modifier, type, extracted, point.has_value());
             if (!point)
@@ -1403,7 +1412,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         const SegmentExtraction extracted = extract_perimeter_segments(prepared, it->second[layer_id], volume_type, context);
         const auto type = convert_weak_modifier_type(volume_type);
         // A magnet that does not cross the perimeter types its nearest point only: a zone of one point.
-        if (const EffectiveModifier *magnet = magnet_of(effective, modifier_volume); magnet != nullptr && magnet_acts(extracted)) {
+        if (const EffectiveModifier *magnet = magnet_of(effective, modifier_volume); magnet != nullptr && magnet_acts(extracted, *magnet)) {
             const std::optional<MagnetPoint> point = find_magnet_point(prepared, it->second[layer_id], magnet->magnet_limit, magnet->magnet_apex);
             record_extraction(warnings, modifier_volume, volume_type, extracted, point.has_value());
             if (point)
