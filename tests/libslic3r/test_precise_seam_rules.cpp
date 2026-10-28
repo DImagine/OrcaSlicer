@@ -60,6 +60,9 @@ Layers join(Layers a, const Layers &b)
 // Rules given only in the field, as one source.
 LayerRules field(const std::string &text) { return parse_layer_rules({}, text); }
 
+// A priority weight as the rules keep it, in millionths.
+constexpr int64_t weight(int64_t units, int64_t millionths = 0) { return units * 1000000 + millionths; }
+
 size_t count_code(const std::vector<RuleDiagnostic> &diagnostics, Code code)
 {
     size_t n = 0;
@@ -126,7 +129,7 @@ TEST_CASE("The first type and priority stay in effect over all sources", "[Preci
 {
     const LayerRules blocked = field("red,pr2,1-50");
     CHECK(blocked.type == ModelVolumeType::PRECISE_SEAM_BLOCKED);
-    CHECK(blocked.priority == 2);
+    CHECK(blocked.priority == weight(2));
     CHECK(apply_rules(blocked) == range(1, 50));
 
     const LayerRules conflict = field("left,right,10");
@@ -140,12 +143,12 @@ TEST_CASE("The first type and priority stay in effect over all sources", "[Preci
     CHECK(name_first.diagnostics.back().source.field);
 
     // Repeating the same type or priority value is not a conflict.
-    const LayerRules repeated = field("gray,grey,pr1,pr01,pr-3");
+    const LayerRules repeated = field("gray,grey,pr1,pr01,pr-neg3");
     CHECK(repeated.type == ModelVolumeType::PRECISE_SEAM_NEUTRAL);
-    CHECK(repeated.priority == 1);
+    CHECK(repeated.priority == weight(1));
     CHECK(count_code(repeated.diagnostics, Code::TypeConflict) == 0);
     CHECK(count_code(repeated.diagnostics, Code::PriorityConflict) == 1);
-    CHECK(field("pr-7").priority == -7);
+    CHECK(field("pr-neg7").priority == weight(-7));
 }
 
 TEST_CASE("Every source starts in the include mode while the set carries over", "[PreciseSeam][Rules]")
@@ -189,7 +192,9 @@ TEST_CASE("Whitespace is removed and letters are lowered before parsing", "[Prec
 
 TEST_CASE("Elements outside the grammar are invalid as a whole", "[PreciseSeam][Rules]")
 {
-    const std::string text = GENERATE(as<std::string>{}, "0", "0x+5", "3x+-1", "1+2x", "+5", "-5", "pr0", "pr-0", "pr1.", "pr.1",
+    const std::string text = GENERATE(as<std::string>{}, "0", "0x+5", "3x+-1", "1+2x", "+5", "-5", "pr", "prx", "pr-0", "pr1.", "pr.1",
+                                      "pr-1", "pr-neg", "prneg1", "pr+1", "pr--1", "pr-neg-1", "pr-negx", "pr-ne1", "pr1.5x",
+                                      "pr1-2", "inclpr-neg1", "pr-neg1red",
                                       "inclred", "inclpr1", "exclexcl1", "red1-5", "excl.", "incl.odd", "red.", "1.5", "z",
                                       "100step3", "100-200step0", "100-200step.3", "top0", "top-5", "top.5", "incloff",
                                       "offjunk", "exclnowarn", "nowarn.", "odd.", "1-", "-1-5", "1-5step", "\xD0\xB0",
@@ -230,8 +235,8 @@ TEST_CASE("Numbers accept leading zeros up to the limit", "[PreciseSeam][Rules]"
     CHECK(select({}, "excl") == range(1, 400)); // A mode alone is not a set: all layers remain.
     CHECK(select({}, "excl,excl5") == join(range(1, 4), range(6, 400)));
     CHECK(field("red").type == ModelVolumeType::PRECISE_SEAM_BLOCKED);
-    CHECK(field("pr1").priority == 1);
-    CHECK(field("pr-2").priority == -2);
+    CHECK(field("pr1").priority == weight(1));
+    CHECK(field("pr-neg2").priority == weight(-2));
     CHECK(select({}, "1-1000000") == range(1, 400));
     CHECK(count_code(field("1000001").diagnostics, Code::NumberOutOfRange) == 1);
 }
@@ -324,7 +329,7 @@ TEST_CASE("Only the prioritised members of reordered pairs are reported", "[Prec
                                                   {ModelVolumeType::PRECISE_SEAM_ENFORCED, &pr2},
                                                   {ModelVolumeType::PRECISE_SEAM_ENFORCED, &pr1}};
     const EffectiveOrder order = effective_order(modifiers);
-    CHECK(order.weak == Layers{2, 1, 0});
+    CHECK(order.weak == Layers{1, 2, 0});
     CHECK(order.reordered == Layers{1, 2});
 
     // A priority that keeps the tree order changes no pair and is not reported.
@@ -337,7 +342,7 @@ TEST_CASE("Only the prioritised members of reordered pairs are reported", "[Prec
 
 TEST_CASE("Negative priorities follow the volumes without priority", "[PreciseSeam][Rules]")
 {
-    const LayerRules low = field("pr-1"), lower = field("pr-5"), none = field({}), high = field("pr3");
+    const LayerRules low = field("pr-neg1"), lower = field("pr-neg5"), none = field({}), high = field("pr3");
     const EffectiveOrder order = effective_order({{ModelVolumeType::PRECISE_SEAM_CENTER, &lower},
                                                   {ModelVolumeType::PRECISE_SEAM_CENTER, &low},
                                                   {ModelVolumeType::PRECISE_SEAM_CENTER, &none},
@@ -345,9 +350,69 @@ TEST_CASE("Negative priorities follow the volumes without priority", "[PreciseSe
     CHECK(order.strong == Layers{3, 2, 1, 0});
 }
 
+TEST_CASE("A priority is a weight: the higher first, and none weighs as pr0", "[PreciseSeam][Rules]")
+{
+    // pr10 > pr1.5 > pr1 > (pr0, none, pr-neg0) > pr-neg0.25 > pr-neg1 > pr-neg10, listed in another order.
+    const std::vector<std::string> texts = {"pr-neg1", "pr0", "pr1", "pr-neg10", "", "pr10", "pr-neg0.25", "pr1.5", "pr-neg0"};
+    std::vector<LayerRules> rules;
+    for (const std::string &text : texts)
+        rules.push_back(field(text));
+    std::vector<RuledModifier> strong, weak;
+    for (const LayerRules &r : rules) {
+        strong.push_back({ModelVolumeType::PRECISE_SEAM_CENTER, &r});
+        weak.push_back({ModelVolumeType::PRECISE_SEAM_ENFORCED, &r});
+    }
+    // Equal weights keep the object order: pr0 (1), none (4), pr-neg0 (8).
+    const Layers expected = {5, 7, 2, 1, 4, 8, 6, 0, 3};
+    CHECK(effective_order(strong).strong == expected);
+    CHECK(effective_order(weak).weak == expected);
+
+    // Zero weights alone change no pair, so nothing is reported.
+    const LayerRules zero = field("pr0"), negative_zero = field("pr-neg0"), none = field({});
+    const EffectiveOrder zeros = effective_order({{ModelVolumeType::PRECISE_SEAM_LEFT, &none},
+                                                  {ModelVolumeType::PRECISE_SEAM_LEFT, &zero},
+                                                  {ModelVolumeType::PRECISE_SEAM_LEFT, &negative_zero}});
+    CHECK(zeros.strong == Layers{0, 1, 2});
+    CHECK(zeros.reordered.empty());
+}
+
+TEST_CASE("Priority weights are exact decimals compared as numbers", "[PreciseSeam][Rules]")
+{
+    CHECK(field("pr1.5").priority == weight(1, 500000));
+    CHECK(field("pr01.500000,pr1.5").diagnostics.empty());
+    CHECK(field("pr0.000001").priority == weight(0, 1));
+    CHECK(field("pr-neg0.000001").priority == weight(0, -1));
+    CHECK(field("pr1000000").priority == weight(1000000));
+    CHECK(field("pr-neg1000000").priority == weight(-1000000));
+    // pr0 is a first priority as well: a later non-zero one conflicts, pr-neg0 does not.
+    const LayerRules zero = field("pr0,pr5");
+    CHECK(zero.priority == weight(0));
+    CHECK(count_code(zero.diagnostics, Code::PriorityConflict) == 1);
+    CHECK(count_code(field("pr0,pr-neg0").diagnostics, Code::PriorityConflict) == 0);
+    CHECK(count_code(field("pr1,pr-neg1").diagnostics, Code::PriorityConflict) == 1);
+    // Above the limit or past six decimals the element is out of range and changes nothing.
+    for (const char *text : {"pr1000000.000001", "pr1000001", "pr0.0000001", "pr-neg1000001", "pr99999999999999999999"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(count_code(rules.diagnostics, Code::NumberOutOfRange) == 1);
+        CHECK_FALSE(rules.priority.has_value());
+    }
+    // A comma separates elements, also after pr: priority 1 and layer 5.
+    const LayerRules comma = field("pr1,5");
+    CHECK(comma.priority == weight(1));
+    CHECK(apply_rules(comma) == Layers{5});
+    // Spaces and letter case are normalized as everywhere.
+    CHECK(field("PR - NEG 2.5").priority == weight(-2, -500000));
+    // The minus of pr-neg, of a range and of a formula live side by side.
+    const LayerRules mixed = field("pr-neg2,relay-random1,3x-1,10-12");
+    CHECK(mixed.diagnostics.empty());
+    CHECK(mixed.priority == weight(-2));
+    CHECK(mixed.relay == RelayLabel{true, 1});
+}
+
 TEST_CASE("A weak first priority never passes a strong volume", "[PreciseSeam][Rules]")
 {
-    const LayerRules weak_first = field("pr1"), strong_last = field("pr-100");
+    const LayerRules weak_first = field("pr1"), strong_last = field("pr-neg100");
     const EffectiveOrder order = effective_order({{ModelVolumeType::PRECISE_SEAM_ENFORCED, &weak_first},
                                                   {ModelVolumeType::PRECISE_SEAM_CENTER, &strong_last}});
     CHECK(order.strong == Layers{1});
@@ -1176,7 +1241,7 @@ TEST_CASE("Every source starts from the bed, and the origin changes only the set
     CHECK(others.diagnostics.empty());
     CHECK(others.relay_seed == std::optional<uint32_t>(7));
     CHECK(others.magnet == MagnetRule{2500000});
-    CHECK(others.priority == std::optional<int>(1));
+    CHECK(others.priority == std::optional<int64_t>(weight(1)));
     CHECK(evaluate(others) == Layers{4, 6, 8});
 }
 

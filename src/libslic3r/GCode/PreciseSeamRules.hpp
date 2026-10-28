@@ -101,7 +101,7 @@ struct RuleLayerOperation {
 struct LayerRules {
     std::vector<RuleLayerOperation> operations; // Valid layer sets in application order.
     std::optional<ModelVolumeType>  type;       // First type label over all sources.
-    std::optional<int>              priority;   // First priority over all sources: N for prN, -N for pr-N.
+    std::optional<int64_t>          priority;   // First priority over all sources, a weight in millionths: prN, -N for pr-negN.
     std::optional<RelayLabel>       relay;      // First relay label over all sources.
     std::optional<uint32_t>         relay_seed; // seed of that relay-random element; not part of the group label.
     std::optional<std::string>      id;         // Trimmed original text of the first id element; the language ignores it.
@@ -172,12 +172,12 @@ struct EffectiveOrder {
     std::vector<size_t> strong;       // Priority order, highest first.
     std::vector<size_t> weak;         // Priority order, highest first; applied in reverse.
     std::vector<size_t> type_changed; // Effective type differs from the object list (without nowarn).
-    std::vector<size_t> reordered;    // Their prN changed the order within the group (without nowarn).
+    std::vector<size_t> reordered;    // Their priority changed the order within the group (without nowarn).
     std::vector<size_t> suppressed;   // nowarn volumes that would be in one of the two lists above.
 };
 
-// Groups the volumes by effective type, then orders each group pr1, pr2, ..., without priority,
-// pr-1, pr-2, ..., ties by the input index. A strong group always precedes a weak one.
+// Groups the volumes by effective type, then orders each group by priority weight, the higher first, a volume
+// without priority weighing 0; ties by the input index. A strong group always precedes a weak one.
 EffectiveOrder effective_order(const std::vector<RuledModifier> &modifiers);
 
 } // namespace PreciseSeam
