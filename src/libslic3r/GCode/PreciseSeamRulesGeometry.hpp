@@ -5,6 +5,9 @@
 #include <optional>
 #include <unordered_map>
 #include <vector>
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
 #include "PreciseSeam.hpp"
 
 // Precise Seam with layer rules: the seam point of a perimeter for the modifiers of an object that uses rules.
@@ -40,19 +43,6 @@ std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, c
 // fewer than two crossings, a region crossed once, a discarded fragment, or no vertex deeper than the ends.
 std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                               const SegmentExtraction &extracted);
-
-// Result of weak modifier segment processing
-struct WeakModifierSegment {
-    SeamPlacerImpl::EnforcedBlockedSeamPoint type;  // Enforced/Blocked/Neutral
-    Point left_point;               // Coordinates of left (first) point of segment
-    PerimeterPosition left_position; // Position on the source perimeter before insertion/refinement.
-    Point right_point;              // Coordinates of right (last) point of segment
-    PerimeterPosition right_position; // Retained provenance, not an index into the modified polygon.
-    // Full containment of a weak modifier: the zone is the whole perimeter, without boundaries
-    // (the points and positions above are unused and nothing is inserted for it).
-    bool whole_perimeter = false;
-    const ModelVolume *modifier = nullptr; // Source modifier, for the warnings.
-};
 
 // One Precise Seam modifier as it acts on one print object, set by its layer rules (PreciseSeamRulesApply.hpp).
 struct EffectiveModifier {

@@ -56,6 +56,7 @@
 #include "PreciseSeam.hpp"
 #include "PreciseSeamRules.hpp"
 #include "PreciseSeamRulesApply.hpp"
+#include "PreciseSeamRulesGeometry.hpp"
 
 //#define DEBUG_FILES
 

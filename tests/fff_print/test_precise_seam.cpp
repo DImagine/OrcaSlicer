@@ -10,6 +10,7 @@
 #include "libslic3r/GCode/PreciseSeam.hpp"
 #include "libslic3r/GCode/PreciseSeamRules.hpp"
 #include "libslic3r/GCode/PreciseSeamRulesApply.hpp"
+#include "libslic3r/GCode/PreciseSeamRulesGeometry.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 
