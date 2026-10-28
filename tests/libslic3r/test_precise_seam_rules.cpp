@@ -374,6 +374,21 @@ TEST_CASE("A priority is a weight: the higher first, and none weighs as pr0", "[
                                                   {ModelVolumeType::PRECISE_SEAM_LEFT, &negative_zero}});
     CHECK(zeros.strong == Layers{0, 1, 2});
     CHECK(zeros.reordered.empty());
+
+    // An explicit pr0 that a non-zero weight passes is reported as its partner is; nowarn silences only its own
+    // volume, and a volume without priority in the same place is not reported.
+    const LayerRules one = field("pr1"), quiet_zero = field("pr0,nowarn");
+    const EffectiveOrder passed = effective_order({{ModelVolumeType::PRECISE_SEAM_LEFT, &zero},
+                                                   {ModelVolumeType::PRECISE_SEAM_LEFT, &one}});
+    CHECK(passed.strong == Layers{1, 0});
+    CHECK(passed.reordered == Layers{0, 1});
+    const EffectiveOrder silenced = effective_order({{ModelVolumeType::PRECISE_SEAM_LEFT, &quiet_zero},
+                                                     {ModelVolumeType::PRECISE_SEAM_LEFT, &one}});
+    CHECK(silenced.reordered == Layers{1});
+    CHECK(silenced.suppressed == Layers{0});
+    const EffectiveOrder unnamed = effective_order({{ModelVolumeType::PRECISE_SEAM_LEFT, &none},
+                                                    {ModelVolumeType::PRECISE_SEAM_LEFT, &one}});
+    CHECK(unnamed.reordered == Layers{1});
 }
 
 TEST_CASE("Priority weights are exact decimals compared as numbers", "[PreciseSeam][Rules]")
@@ -391,7 +406,7 @@ TEST_CASE("Priority weights are exact decimals compared as numbers", "[PreciseSe
     CHECK(count_code(field("pr0,pr-neg0").diagnostics, Code::PriorityConflict) == 0);
     CHECK(count_code(field("pr1,pr-neg1").diagnostics, Code::PriorityConflict) == 1);
     // Above the limit or past six decimals the element is out of range and changes nothing.
-    for (const char *text : {"pr1000000.000001", "pr1000001", "pr0.0000001", "pr-neg1000001", "pr99999999999999999999"}) {
+    for (const char *text : {"pr1000000.000001", "pr1000001", "pr0.0000001", "pr0.0000000", "pr-neg0.0000000", "pr-neg1000001", "pr99999999999999999999"}) {
         CAPTURE(text);
         const LayerRules rules = field(text);
         CHECK(count_code(rules.diagnostics, Code::NumberOutOfRange) == 1);
