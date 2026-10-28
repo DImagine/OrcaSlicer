@@ -2731,6 +2731,26 @@ TEST_CASE("A magnet with apex takes a single crossing shorter than its length fo
     CHECK(seam(0.6) == mm(20, 10));
 }
 
+TEST_CASE("A magnet with apex that touches a corner over its tip takes the tip, not an end of the touch", "[PreciseSeam][Magnet]")
+{
+    // A round modifier of radius 2 mm outside the corner (20, 20) of the body, its centre 1.84 mm away: the
+    // corner pokes 0.16 mm into it, one crossing about 0.44 mm long. The circle is symmetric to the diagonal.
+    Polygon round;
+    for (int i = 0; i < 64; ++i)
+        round.points.push_back(mm(21.3 + 2 * std::cos(PI / 4 + 2 * PI * i / 64), 21.3 + 2 * std::sin(PI / 4 + 2 * PI * i / 64)));
+    SeamFixture                     fixture;
+    PreciseSeam::EffectiveModifiers effective;
+    const ModelVolume              *volume = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {round});
+    PreciseSeam::EffectiveModifier  rule   = magnet_rule(ModelVolumeType::PRECISE_SEAM_CENTER);
+    rule.magnet_apex        = true;
+    rule.magnet_apex_length = scale_(1.);
+    effective.emplace(volume, rule);
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    // The touch is the middle of the crossing, the corner; the ends of the crossing lie nearest to the circle.
+    CHECK(PreciseSeam::insert_strong_seam_point({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
+                                                fixture.cache, nullptr, &effective) == mm(20, 20));
+}
+
 TEST_CASE("Strong and weak magnets with apex act on the tip between two crossings", "[PreciseSeam][Magnet]")
 {
     SeamFixture                     fixture;

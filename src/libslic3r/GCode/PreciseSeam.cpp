@@ -570,6 +570,13 @@ struct ArcLengths {
     }
     // The length forward from one position to another, around the start.
     double forward(double from, double to) const { return to >= from ? to - from : to - from + total(); }
+    // The position at an arc length below the total.
+    PerimeterPosition position(double at) const
+    {
+        const size_t edge   = std::min<size_t>(std::upper_bound(start.begin(), start.end(), at) - start.begin(), start.size() - 1) - 1;
+        const double length = start[edge + 1] - start[edge];
+        return {edge, length > 0. ? std::clamp((at - start[edge]) / length, 0., 1.) : 0.};
+    }
     // The point at an arc length.
     Vec2d point(const Lines &lines, double at) const
     {
@@ -678,6 +685,51 @@ static std::optional<MagnetPoint> find_apex_point(const Polygon &perimeter, cons
     if (!tip)
         return std::nullopt;
     return MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
+}
+
+std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
+                                            const PerimeterSegment &touch, std::optional<double> limit, bool apex)
+{
+    if (!prepared.valid)
+        return std::nullopt;
+    const Polygon   &perimeter = prepared.polygon;
+    const Lines      lines     = to_lines(perimeter);
+    const ArcLengths arcs(lines);
+    const double     tolerance = double(TOLERANCE_LINEAR);
+    // The modifier touches the perimeter in the middle of the crossing; a segment runs forward from begin to end.
+    const double begin  = arcs.along(touch.begin);
+    double       middle = begin + arcs.forward(begin, arcs.along(touch.end)) / 2.;
+    if (middle >= arcs.total())
+        middle -= arcs.total();
+    PerimeterPosition position = arcs.position(middle);
+    if (position.parameter == 1.)
+        position = {(position.edge_index + 1) % perimeter.size(), 0.};
+    const MagnetPoint found{Point(arcs.point(lines, middle)), position};
+    if (!apex)
+        return found;
+    // apex looks from the centroid of the region that holds the touch.
+    const auto region = std::find_if(modifier.begin(), modifier.end(), [&found](const ModifierRegion &r) {
+        return r.bounds.contains(found.point) && r.polygon.contains(found.point);
+    });
+    if (region == modifier.end() || region->polygon.contour.area() == 0.)
+        return found;
+    Lines modifier_lines;
+    for (const ModifierRegion &r : modifier) {
+        if (r.polygon.empty())
+            continue;
+        append(modifier_lines, to_lines(r.polygon.contour));
+        for (const Polygon &hole : r.polygon.holes)
+            append(modifier_lines, to_lines(hole));
+    }
+    const auto tree        = AABBTreeLines::build_aabb_tree_over_indexed_lines(modifier_lines);
+    const auto to_modifier = [&](const Vec2d &point) {
+        size_t       line = 0;
+        Vec2d        nearest;
+        const double squared = AABBTreeLines::squared_distance_to_indexed_lines(modifier_lines, tree, point, line, nearest);
+        return squared < 0. ? std::numeric_limits<double>::infinity() : std::sqrt(squared);
+    };
+    return find_apex_point(perimeter, lines, region->polygon.contour.centroid().cast<double>(), found, to_modifier, limit, tolerance)
+        .value_or(found);
 }
 
 std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
@@ -1104,6 +1156,15 @@ static bool magnet_acts(const SegmentExtraction &extracted, const EffectiveModif
             extracted.segments.size() == 1 && extracted.segments.front().polyline.length() < magnet.magnet_apex_length);
 }
 
+// The point of a magnet where it acts: the nearest point, or the middle of the touch of a magnet with apex.
+static std::optional<MagnetPoint> acting_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &regions,
+                                                      const SegmentExtraction &extracted, const EffectiveModifier &magnet)
+{
+    if (magnet_acts(extracted))
+        return find_magnet_point(prepared, regions, magnet.magnet_limit, magnet.magnet_apex);
+    return find_touch_point(prepared, regions, extracted.segments.front(), magnet.magnet_limit, magnet.magnet_apex);
+}
+
 // Records one extraction for the warnings: the type of a modifier with a discarded fragment, the
 // evaluated/reached flags for "had no effect" (a discarded fragment counts as reached, a contact not).
 // `magnet` is set where a magnet acts instead of the type: then only a found point counts as reached.
@@ -1153,7 +1214,7 @@ std::optional<Point> insert_strong_seam_point(
             prepared, it->second[layer_id], type, {layer, modifier, warnings, quiet});
         // A magnet that does not cross the perimeter puts the seam at the nearest point, whatever the type.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet_acts(extracted, *magnet)) {
-            const std::optional<MagnetPoint> point = find_magnet_point(prepared, it->second[layer_id], magnet->magnet_limit, magnet->magnet_apex);
+            const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet);
             record_extraction(warnings, modifier, type, extracted, point.has_value());
             if (!point)
                 continue;
@@ -1413,7 +1474,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         const auto type = convert_weak_modifier_type(volume_type);
         // A magnet that does not cross the perimeter types its nearest point only: a zone of one point.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier_volume); magnet != nullptr && magnet_acts(extracted, *magnet)) {
-            const std::optional<MagnetPoint> point = find_magnet_point(prepared, it->second[layer_id], magnet->magnet_limit, magnet->magnet_apex);
+            const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet);
             record_extraction(warnings, modifier_volume, volume_type, extracted, point.has_value());
             if (point)
                 result.push_back({type, point->point, point->position, point->point, point->position, false, modifier_volume});

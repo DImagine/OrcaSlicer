@@ -310,7 +310,10 @@ print and is tested on its own.
   shorter than it for a touch, so the magnet acts: nearing a corner, the
   modifier touches one side before the other, and the type would move the
   seam for that moment. The default 0 checks no length, as a good default
-  depends on the modifier's size.
+  depends on the modifier's size. The point of a touch is the middle of its
+  crossing (`find_touch_point()`), not the nearest point: over a crossing the
+  nearest points to the modifier's boundary are the crossing's ends, and a
+  corner poking into the modifier lies closer to its centroid than they do.
 - **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
   `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, and runs

@@ -154,6 +154,11 @@ struct MagnetPoint {
 std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                              std::optional<double> limit, bool apex = false);
 
+// The point of a magnet with apex whose only crossing is shorter than its length, a touch: the middle of that
+// crossing, then the tip of the corner the modifier stands in as find_magnet_point() looks for it.
+std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
+                                            const PerimeterSegment &touch, std::optional<double> limit, bool apex);
+
 // magnet apex across crossings: where every region of the modifier that crosses the perimeter does so two or
 // more times, the tip of the corner between the middles of its crossings, on the shortest part of the
 // perimeter that holds them all; the tip nearest the centroid of its region wins. nullopt where the type acts:
