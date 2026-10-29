@@ -122,7 +122,10 @@ print and is tested on its own.
   below); `seedS` after the latter, as in `relay-random1seed7`, gives a seed. `magnet` and `magnetN` (N in mm, a decimal as for heights) draw the
   modifier to the nearest point of a perimeter it does not cross (see Magnet
   below); `apex` after them, as in `magnet2apex`, moves that point to the tip of
-  a corner the modifier stands in. An element that starts with `id` names the volume for external
+  a corner the modifier stands in. A separate `apex`, or one after a type in the
+  same element as in `center apex`, moves the seam of a Center modifier into the
+  corner of its crossing (see Center apex below); with another effective type it
+  is reported and ignored. An element that starts with `id` names the volume for external
   scripts: it is taken as a whole, with any text after `id`, before the
   grammar, and changes nothing. The first id keeps its trimmed original text
   with its case; a later id that differs after normalization is a warning.
@@ -135,7 +138,7 @@ print and is tested on its own.
   every layer in `excl` mode, none otherwise. Without any valid set the
   modifier acts on every layer, as a volume without rules does. The first type
   and the first priority win; a different later one is a warning. The same
-  holds for the relay label and the magnet, whose distances compare as numbers.
+  holds for the relay label, the magnet and apex, whose distances compare as numbers.
 - **Layer numbers.** Rules count the layers as the preview slider does. When
   printing by layer, every event of the export plan
   (`GCode::collect_layers_to_print(const Print&)`) whose tools have extruders,
@@ -324,6 +327,24 @@ print and is tested on its own.
   it; not the point nearest to the boundary: over a crossing those are the
   crossing's ends, and a corner poking into the modifier lies closer to its
   centroid than they do.
+- **Center apex.** A Center modifier that covers a corner unevenly puts the
+  seam in the middle of its crossing, on one side. `apex` then looks at the
+  crossing the Center type chose, after the magnet, which acts first
+  (`find_segment_apex()`): from the chord between its ends, the inner vertex
+  on the side of the middle that lies farthest from the chord's line wins when
+  it lies farther than the middle by more than the threshold. The chord, not
+  the modifier's centroid as for the magnet, keeps the result independent of
+  the modifier's shape. Vertices on the other side are skipped rather than
+  rejecting the crossing: an S-shaped crossing still has its corner on the
+  side of the middle. A middle within the threshold of the line, or a crossing
+  without inner vertices, keeps its place. The threshold defaults to the print
+  `resolution`, the deviation to which Orca simplifies the contour, so a
+  faceted arc does not move the seam from its middle to a facet vertex; a
+  number after `apex` replaces it, and it never falls below the snapping
+  tolerance. Equally far vertices go to the one nearest the middle, then rear
+  and left. Left and Right take an end of the crossing on purpose and ignore
+  apex with a warning. The cost is one pass over the vertices of the chosen
+  crossing.
 - **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
   `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, and runs

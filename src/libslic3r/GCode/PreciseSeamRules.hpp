@@ -32,7 +32,9 @@ enum class RuleDiagnosticCode {
     RelayConflict,       // A later relay label differs from the first one, which stays in effect.
     RelayGroupMixed,     // The relay group of the volume mixes strong and weak members, so it acts without relay.
     IdConflict,          // A later id differs from the first one, which stays in effect.
-    MagnetConflict       // A later magnet differs from the first one, which stays in effect.
+    MagnetConflict,      // A later magnet differs from the first one, which stays in effect.
+    ApexConflict,        // A later apex differs from the first one, which stays in effect.
+    ApexIgnored          // apex with an effective type other than Center; ignored.
 };
 
 // Relay group label. The four spaces relay, relayN, relay-random and relay-randomN never share a group.
@@ -56,6 +58,14 @@ struct MagnetRule {
 
     bool operator==(const MagnetRule &rhs) const { return limit == rhs.limit && apex == rhs.apex && apex_length == rhs.apex_length; }
     bool operator!=(const MagnetRule &rhs) const { return !(*this == rhs); }
+};
+
+// apex: a Center modifier moves its seam from the middle of its crossing to the vertex farthest from the chord.
+struct ApexRule {
+    std::optional<int64_t> threshold; // Nanometres: how much deeper than the middle; none takes the print resolution.
+
+    bool operator==(const ApexRule &rhs) const { return threshold == rhs.threshold; }
+    bool operator!=(const ApexRule &rhs) const { return !(*this == rhs); }
 };
 
 // Name blocks are numbered from 1 in name order; the field always comes after them.
@@ -106,6 +116,7 @@ struct LayerRules {
     std::optional<uint32_t>         relay_seed; // seed of that relay-random element; not part of the group label.
     std::optional<std::string>      id;         // Trimmed original text of the first id element; the language ignores it.
     std::optional<MagnetRule>       magnet;     // First magnet over all sources.
+    std::optional<ApexRule>         apex;       // First apex over all sources, alone or after a type.
     bool                            off             = false;
     bool                            blank           = false; // Acts on no seam: a volume that only holds rules.
     bool                            nowarn          = false;

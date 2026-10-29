@@ -142,7 +142,7 @@ bool in_list(const std::vector<size_t> &list, size_t i) { return std::find(list.
 // order; parsing and empty-set diagnostics of one element keep their order. Differences from the object list
 // concern the volume as a whole and follow them.
 void report_volume(const ModelObject &object, size_t i, const ModelVolume *volume, const LayerRules &rules, std::vector<RuleDiagnostic> own,
-                   const EffectiveOrder &order, bool mixed, std::vector<ModifierDiagnostic> &out)
+                   const EffectiveOrder &order, bool mixed, bool apex_ignored, std::vector<ModifierDiagnostic> &out)
 {
     const auto source_rank = [](const RuleDiagnostic &d) {
         return std::pair<size_t, size_t>(d.source.field ? std::numeric_limits<size_t>::max() : d.source.name_block, d.element);
@@ -155,6 +155,8 @@ void report_volume(const ModelObject &object, size_t i, const ModelVolume *volum
         own.push_back({RuleDiagnosticCode::OrderDiffersFromTree, {}, 0, {}});
     if (mixed)
         own.push_back({RuleDiagnosticCode::RelayGroupMixed, {}, 0, relay_label_text(*rules.relay)});
+    if (apex_ignored)
+        own.push_back({RuleDiagnosticCode::ApexIgnored, {}, 0, {}});
     for (RuleDiagnostic &diagnostic : own)
         out.push_back({volume, std::move(diagnostic)});
     if (rules.name_overridden)
@@ -178,6 +180,12 @@ EffectiveModifier effective_modifier(const RuledModifier &ruled, const LayerRule
         // Kept in scaled units as a double: a limit below one unit must not round to a touch or to none.
         if (rules.magnet->limit)
             modifier.magnet_limit = scale_(double(*rules.magnet->limit) / nanometres_per_mm);
+    }
+    // Other types ignore apex, with a warning from report_volume().
+    if (rules.apex && modifier.type == ModelVolumeType::PRECISE_SEAM_CENTER) {
+        modifier.apex = true;
+        if (rules.apex->threshold)
+            modifier.apex_threshold = scale_(double(*rules.apex->threshold) / nanometres_per_mm);
     }
     return modifier;
 }
@@ -283,7 +291,8 @@ RuleContext prepare_rule_context(std::vector<const ModelVolume*> &strong_volumes
     for (size_t i = 0; i < volumes.size(); ++i) {
         std::vector<RuleDiagnostic> own = std::move(rules[i].diagnostics);
         layers[i]                       = volume_layers(rules[i], numbered, own);
-        report_volume(model_object, i, volumes[i], rules[i], std::move(own), order, groups.mixed[i], diagnostics_out);
+        const bool apex_ignored = rules[i].apex && !rules[i].inert() && ruled[i].effective_type() != ModelVolumeType::PRECISE_SEAM_CENTER;
+        report_volume(model_object, i, volumes[i], rules[i], std::move(own), order, groups.mixed[i], apex_ignored, diagnostics_out);
     }
 
     const auto take_part = [&](size_t i, std::vector<const ModelVolume*> &out) {
@@ -592,6 +601,14 @@ std::vector<std::string> rule_warnings(const std::vector<ModifierDiagnostic> &di
         case Code::MagnetConflict:
             // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text, %4% its place, e.g. "rules field, element 2". Do not translate "magnet".
             message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": magnet \"%3%\" (%4%) differs from the first magnet in its rules and was ignored.")) % volume % object % text % location(d)).str();
+            break;
+        case Code::ApexConflict:
+            // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name, %3% the rule text, %4% its place, e.g. "rules field, element 2". Do not translate "apex".
+            message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": apex \"%3%\" (%4%) differs from the first apex in its rules and was ignored.")) % volume % object % text % location(d)).str();
+            break;
+        case Code::ApexIgnored:
+            // TRN: Precise Seam layer rules. %1% is the modifier name, %2% the object name. Do not translate "apex".
+            message = (boost::format(_u8L("Precise Seam: modifier \"%1%\" of \"%2%\": apex acts only with the Seam Center type and was ignored.")) % volume % object).str();
             break;
         }
         // Equal texts also come from two blocks broken the same way, or equal rules in a source.

@@ -391,10 +391,20 @@ struct ModeWord {
     }
 };
 
-// type: the first label stays in effect; gray and grey are one type.
+// The rest of an apex after its keyword: [decimal], a threshold in mm.
+ParseStatus parse_apex_rest(Cursor &c, ApexRule &out)
+{
+    if (!c.done() && !(out.threshold = c.millionths()))
+        return ParseStatus::Invalid;
+    return ParseStatus::Ok;
+}
+
+// type = label ["apex" [decimal]]: the first label stays in effect; gray and grey are one type. "center apex" is
+// "center, apex" in one element; after another type the apex is reported and ignored once the type is known.
 struct TypeWord {
     struct Payload {
-        ModelVolumeType type = ModelVolumeType::INVALID;
+        ModelVolumeType         type = ModelVolumeType::INVALID;
+        std::optional<ApexRule> apex;
     };
     static constexpr std::pair<std::string_view, ModelVolumeType> labels[] = {
         {"center", ModelVolumeType::PRECISE_SEAM_CENTER},  {"left", ModelVolumeType::PRECISE_SEAM_LEFT},
@@ -407,13 +417,17 @@ struct TypeWord {
         for (const auto &[label, type] : labels)
             if (c.eat(label)) {
                 out.type = type;
-                return ParseStatus::Ok;
+                if (!c.eat("apex"))
+                    return ParseStatus::Ok;
+                return parse_apex_rest(c, out.apex.emplace());
             }
         return ParseStatus::NotMine;
     }
     static void commit(const Payload &in, LayerRules &rules, SourceState &, const ElementRef &element)
     {
         commit_first(rules.type, in.type, RuleDiagnosticCode::TypeConflict, rules, element);
+        if (in.apex)
+            commit_first(rules.apex, *in.apex, RuleDiagnosticCode::ApexConflict, rules, element);
     }
 };
 
@@ -556,6 +570,22 @@ struct MagnetWord {
     }
 };
 
+// apex = "apex" [decimal]: the same as after a type; apart from "magnet ... apex", which belongs to the magnet.
+struct ApexWord {
+    using Payload = ApexRule;
+    static ParseStatus parse(Cursor &c, Payload &out)
+    {
+        if (!c.eat("apex"))
+            return ParseStatus::NotMine;
+        return parse_apex_rest(c, out);
+    }
+    static void commit(const Payload &in, LayerRules &rules, SourceState &, const ElementRef &element)
+    {
+        // Thresholds compare as numbers: apex1 repeats apex1.0; apex and apex0.012 differ.
+        commit_first(rules.apex, in, RuleDiagnosticCode::ApexConflict, rules, element);
+    }
+};
+
 // A layer set on its own, added in the current mode. Last: whatever no keyword claimed is read as a set.
 struct SetWord {
     using Payload = RuleLayerSet;
@@ -597,7 +627,7 @@ using WordReader = ParseStatus (*)(LayerRules &, SourceState &, const ElementRef
 constexpr WordReader words[] = {read_word<IdWord>,       read_word<ModeWord>,  read_word<TypeWord>,
                                 read_word<PriorityWord>, read_word<FlagWord>,  read_word<OverrideWord>,
                                 read_word<RelayWord>,    read_word<OriginWord>, read_word<MagnetWord>,
-                                read_word<SetWord>};
+                                read_word<ApexWord>,     read_word<SetWord>};
 
 // Reads one source: sets, type and priority carry over between sources, the mode and origin do not.
 void parse_source(LayerRules &rules, std::string_view source_text, const RuleSource &source)
