@@ -49,11 +49,11 @@ std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, c
 std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                               const SegmentExtraction &extracted);
 
-// apex of a Center crossing: from its middle `middle` to the inner vertex on the same side of the chord between
-// its ends that lies farthest from the chord's line, when that vertex lies farther than the middle by more than
-// `threshold` (scaled). A middle within the threshold of the line keeps its place. Equally far vertices, within
-// the threshold, go to the one nearest the middle, then to the rear and left one.
-StrongSeamTarget find_segment_apex(const PerimeterSegment &segment, const StrongSeamTarget &middle, double threshold);
+// apex of a Center crossing of a prepared, unchanged perimeter, as magnet apex takes its part: the inner vertex
+// farthest from the chord between the crossing's ends, on either side, or `middle` when every inner vertex lies
+// within `threshold` (scaled) of the chord. Equally far vertices, within the threshold, go to the rear and left one.
+StrongSeamTarget find_segment_apex(const PreparedPerimeter &prepared, const PerimeterSegment &segment, const StrongSeamTarget &middle,
+                                   double threshold);
 
 // One Precise Seam modifier as it acts on one print object, set by its layer rules (PreciseSeamRulesApply.hpp).
 struct EffectiveModifier {
@@ -64,7 +64,7 @@ struct EffectiveModifier {
     bool                  magnet_apex = false; // magnet apex: from the nearest point to the vertex of the corner.
     double                magnet_apex_length = 0.; // Scaled: with apex, one crossing shorter than this is a touch.
     bool                  apex = false;   // apex, Center only: the seam goes to the tip of its crossing.
-    std::optional<double> apex_threshold; // Scaled; none takes the print resolution.
+    std::optional<double> apex_threshold; // Scaled straightness tolerance; none takes the print resolution.
 
     bool active_on(size_t layer_id) const { return layers.empty() || (layer_id < layers.size() && layers[layer_id]); }
 };
