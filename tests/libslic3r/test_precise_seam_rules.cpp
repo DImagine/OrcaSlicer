@@ -137,7 +137,7 @@ TEST_CASE("The first type and priority stay in effect over all sources", "[Preci
     CHECK(count_code(conflict.diagnostics, Code::TypeConflict) == 1);
     CHECK(apply_rules(conflict) == Layers{10});
 
-    const LayerRules name_first = parse_layer_rules("-^ps=red=ps^-", "green");
+    const LayerRules name_first = parse_layer_rules("{ps=red=ps}", "green");
     CHECK(name_first.type == ModelVolumeType::PRECISE_SEAM_BLOCKED);
     CHECK(count_code(name_first.diagnostics, Code::TypeConflict) == 1);
     CHECK(name_first.diagnostics.back().source.field);
@@ -153,32 +153,32 @@ TEST_CASE("The first type and priority stay in effect over all sources", "[Preci
 
 TEST_CASE("Every source starts in the include mode while the set carries over", "[PreciseSeam][Rules]")
 {
-    CHECK(select("-^ps=excl,1-5=ps^-", "20-30") == range(6, 400));
-    CHECK(select("-^ps=1-100=ps^-", "excl,40-50") == join(range(1, 39), range(51, 100)));
+    CHECK(select("{ps=excl,1-5=ps}", "20-30") == range(6, 400));
+    CHECK(select("{ps=1-100=ps}", "excl,40-50") == join(range(1, 39), range(51, 100)));
 
-    const LayerRules two_blocks = parse_layer_rules("-^ps=excl,1=ps^- part -^ps=2=ps^-", {});
+    const LayerRules two_blocks = parse_layer_rules("{ps=excl,1=ps} part {ps=2=ps}", {});
     CHECK(count_code(two_blocks.diagnostics, Code::MultipleBlocks) == 1);
     CHECK(apply_rules(two_blocks) == range(2, 400));
 
     // A type label is not a layer set: the first set, in the field, still picks the initial set.
-    const LayerRules label_then_exclusion = parse_layer_rules("-^ps=red=ps^-", "excl,1");
+    const LayerRules label_then_exclusion = parse_layer_rules("{ps=red=ps}", "excl,1");
     CHECK(label_then_exclusion.type == ModelVolumeType::PRECISE_SEAM_BLOCKED);
     CHECK(apply_rules(label_then_exclusion) == range(2, 400));
 }
 
 TEST_CASE("Name markers are extracted without case and recovered when broken", "[PreciseSeam][Rules]")
 {
-    CHECK(select("Bracket -^PS= 10 - 20 =Ps^- v2") == range(10, 20));
+    CHECK(select("Bracket {PS= 10 - 20 =Ps} v2") == range(10, 20));
 
-    const LayerRules reopened = parse_layer_rules("-^ps=odd -^ps=even=ps^-", {});
+    const LayerRules reopened = parse_layer_rules("{ps=odd {ps=even=ps}", {});
     CHECK(count_code(reopened.diagnostics, Code::BrokenMarker) == 1);
     CHECK(apply_rules(reopened) == range(2, 400, 2));
 
-    const LayerRules unclosed = parse_layer_rules("a -^ps=1-5", {});
+    const LayerRules unclosed = parse_layer_rules("a {ps=1-5", {});
     CHECK(count_code(unclosed.diagnostics, Code::BrokenMarker) == 1);
     CHECK(apply_rules(unclosed) == range(1, 400));
 
-    const LayerRules stray = parse_layer_rules("a =ps^- -^ps=7=ps^-", {});
+    const LayerRules stray = parse_layer_rules("a =ps} {ps=7=ps}", {});
     CHECK(count_code(stray.diagnostics, Code::BrokenMarker) == 1);
     CHECK(apply_rules(stray) == Layers{7});
 }
@@ -253,7 +253,7 @@ TEST_CASE("Step, top, all and the flags follow the additional elements", "[Preci
     const LayerRules off = field("1-5,off");
     CHECK(off.off);
     CHECK(apply_rules(off).empty());
-    const LayerRules nowarn = parse_layer_rules("-^ps=nowarn=ps^-", "nowarn");
+    const LayerRules nowarn = parse_layer_rules("{ps=nowarn=ps}", "nowarn");
     CHECK(nowarn.nowarn);
     CHECK(nowarn.diagnostics.empty());
 }
@@ -293,7 +293,7 @@ TEST_CASE("No layers means every set is empty", "[PreciseSeam][Rules]")
 
 TEST_CASE("Diagnostics name the source and the element position", "[PreciseSeam][Rules]")
 {
-    const LayerRules rules = parse_layer_rules("-^ps=1,bad=ps^- -^ps=,junk=ps^-", "2,,oops");
+    const LayerRules rules = parse_layer_rules("{ps=1,bad=ps} {ps=,junk=ps}", "2,,oops");
     std::vector<RuleDiagnostic> invalid;
     for (const RuleDiagnostic &d : rules.diagnostics)
         if (d.code == Code::InvalidElement)
@@ -463,7 +463,7 @@ TEST_CASE("A blank volume places no seam, whatever else its rules say", "[Precis
     CHECK(order.type_changed.empty());
     CHECK(select({}, "blank,5-10") == Layers{});
     // The name may hold it too.
-    CHECK(parse_layer_rules("-^ps=blank=ps^-", {}).blank);
+    CHECK(parse_layer_rules("{ps=blank=ps}", {}).blank);
 }
 
 TEST_CASE("Unit conversion keeps the rules field of every volume", "[PreciseSeam][Rules]")
@@ -499,7 +499,7 @@ TEST_CASE("Only rules text on a Precise Seam volume selects the rules branch", "
     helper->name = "helper odd relay1"; // Rule words outside a block are plain text.
     CHECK_FALSE(uses_precise_seam_rules(*object));
     // A broken block in any letter case still takes the branch, so that it is reported.
-    for (const std::string name : {"helper -^PS=odd", "helper odd=Ps^-", "-^ps==ps^-"}) {
+    for (const std::string name : {"helper {PS=odd", "helper odd=Ps}", "{ps==ps}"}) {
         CAPTURE(name);
         helper->name = name;
         CHECK(uses_precise_seam_rules(*object));
@@ -509,8 +509,33 @@ TEST_CASE("Only rules text on a Precise Seam volume selects the rules branch", "
     CHECK(uses_precise_seam_rules(*object));
     // A volume that is not Precise Seam keeps its field dormant.
     helper->set_type(ModelVolumeType::PARAMETER_MODIFIER);
-    helper->name = "helper -^ps=odd=ps^-";
+    helper->name = "helper {ps=odd=ps}";
     CHECK_FALSE(uses_precise_seam_rules(*object));
+}
+
+TEST_CASE("Renaming a Precise Seam volume changes its rules only in an object with rules", "[PreciseSeam][Rules]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10, 10, 10))->name = "part";
+    ModelVolume *helper = object->add_volume(make_cube(2, 2, 2));
+    helper->set_type(ModelVolumeType::PRECISE_SEAM_CENTER);
+    helper->name = "front";
+    // The copy keeps the IDs, as the print's copy of the model does.
+    const auto renamed = [&model](const std::string &name) {
+        Model changed(model);
+        changed.objects.front()->volumes.back()->name = name;
+        return model_precise_seam_rules_changed(*model.objects.front(), *changed.objects.front());
+    };
+    // Without rules a rename invalidates no step, as before the rules.
+    CHECK_FALSE(renamed("back"));
+    // A marker added or removed by the rename makes the name count, as do rules in the field.
+    CHECK(renamed("front {ps=odd=ps}"));
+    helper->name = "front {ps=odd=ps}";
+    CHECK(renamed("front"));
+    helper->name = "front";
+    helper->precise_seam_rules = "odd";
+    CHECK(renamed("back"));
 }
 
 namespace {
@@ -799,19 +824,19 @@ TEST_CASE("Height formulas reach the top of their representation", "[PreciseSeam
 
 TEST_CASE("override first in the field replaces the name rules", "[PreciseSeam][Rules][Override]")
 {
-    const LayerRules replaced = parse_layer_rules("-^ps=red,1-10=ps^-", "override,20-30");
+    const LayerRules replaced = parse_layer_rules("{ps=red,1-10=ps}", "override,20-30");
     CHECK(replaced.name_overridden);
     CHECK_FALSE(replaced.type.has_value());
     CHECK(replaced.diagnostics.empty());
     CHECK(apply_rules(replaced) == range(20, 30));
 
-    const LayerRules alone = parse_layer_rules("-^ps=red,1-10=ps^-", "override");
+    const LayerRules alone = parse_layer_rules("{ps=red,1-10=ps}", "override");
     CHECK(alone.name_overridden);
     CHECK_FALSE(alone.type.has_value());
     CHECK(apply_rules(alone) == range(1, 400));
 
     // Every effect and every diagnostic of the name goes, broken markers too.
-    const LayerRules flags = parse_layer_rules("-^ps=off,pr1,nowarn,green,bad=ps^- -^ps=odd -^ps=even=ps^-", "override");
+    const LayerRules flags = parse_layer_rules("{ps=off,pr1,nowarn,green,bad=ps} {ps=odd {ps=even=ps}", "override");
     CHECK_FALSE(flags.off);
     CHECK_FALSE(flags.nowarn);
     CHECK_FALSE(flags.priority.has_value());
@@ -819,7 +844,7 @@ TEST_CASE("override first in the field replaces the name rules", "[PreciseSeam][
     CHECK(flags.diagnostics.empty());
 
     // Empty elements and whitespace before it do not count.
-    const LayerRules spaced = parse_layer_rules("-^ps=red=ps^-", ", \t , Override ,5");
+    const LayerRules spaced = parse_layer_rules("{ps=red=ps}", ", \t , Override ,5");
     CHECK(spaced.name_overridden);
     CHECK_FALSE(spaced.type.has_value());
     CHECK(apply_rules(spaced) == Layers{5});
@@ -827,9 +852,9 @@ TEST_CASE("override first in the field replaces the name rules", "[PreciseSeam][
 
 TEST_CASE("The rest of the field after override starts afresh", "[PreciseSeam][Rules][Override]")
 {
-    CHECK(select("-^ps=1-10=ps^-", "override,excl,5") == join(range(1, 4), range(6, 400)));
-    CHECK(parse_layer_rules("-^ps=1-10=ps^-", "override,off").off);
-    const LayerSelection empty = select_layers(parse_layer_rules("-^ps=1-10=ps^-", "override,zin12.5"), 400, object_layers(400),
+    CHECK(select("{ps=1-10=ps}", "override,excl,5") == join(range(1, 4), range(6, 400)));
+    CHECK(parse_layer_rules("{ps=1-10=ps}", "override,off").off);
+    const LayerSelection empty = select_layers(parse_layer_rules("{ps=1-10=ps}", "override,zin12.5"), 400, object_layers(400),
                                                grid(400, 0.2));
     CHECK(selected(empty).empty());
     CHECK(count_code(empty.diagnostics, Code::EmptySet) == 1);
@@ -837,7 +862,7 @@ TEST_CASE("The rest of the field after override starts afresh", "[PreciseSeam][R
 
 TEST_CASE("override elsewhere is an invalid element and keeps the name", "[PreciseSeam][Rules][Override]")
 {
-    const LayerRules late = parse_layer_rules("-^ps=red=ps^-", "20-30,override");
+    const LayerRules late = parse_layer_rules("{ps=red=ps}", "20-30,override");
     CHECK_FALSE(late.name_overridden);
     CHECK(late.type == ModelVolumeType::PRECISE_SEAM_BLOCKED);
     REQUIRE(late.diagnostics.size() == 1);
@@ -846,22 +871,22 @@ TEST_CASE("override elsewhere is an invalid element and keeps the name", "[Preci
     CHECK(late.diagnostics.front().element == 2);
     CHECK(apply_rules(late) == range(20, 30));
 
-    const LayerRules after_bad = parse_layer_rules("-^ps=red=ps^-", "bad,override,5");
+    const LayerRules after_bad = parse_layer_rules("{ps=red=ps}", "bad,override,5");
     CHECK_FALSE(after_bad.name_overridden);
     CHECK(after_bad.type == ModelVolumeType::PRECISE_SEAM_BLOCKED);
     CHECK(count_code(after_bad.diagnostics, Code::InvalidElement) == 2);
-    CHECK_FALSE(parse_layer_rules("-^ps=red=ps^-", "incl,override").name_overridden);
+    CHECK_FALSE(parse_layer_rules("{ps=red=ps}", "incl,override").name_overridden);
 
-    const LayerRules in_name = parse_layer_rules("-^ps=override,5=ps^-", {});
+    const LayerRules in_name = parse_layer_rules("{ps=override,5=ps}", {});
     CHECK_FALSE(in_name.name_overridden);
     REQUIRE(in_name.diagnostics.size() == 1);
     CHECK(in_name.diagnostics.front().source == RuleSource{false, 1});
     CHECK(apply_rules(in_name) == Layers{5});
     // The override in the name is not reported once the field replaces the name.
-    CHECK(parse_layer_rules("-^ps=override,5=ps^-", "override").diagnostics.empty());
+    CHECK(parse_layer_rules("{ps=override,5=ps}", "override").diagnostics.empty());
 
     // A repeat is invalid but leaves the name replaced; element positions count the empty elements.
-    const LayerRules repeated = parse_layer_rules("-^ps=red=ps^-", ",override,bad,override");
+    const LayerRules repeated = parse_layer_rules("{ps=red=ps}", ",override,bad,override");
     CHECK(repeated.name_overridden);
     CHECK_FALSE(repeated.type.has_value());
     REQUIRE(repeated.diagnostics.size() == 2);
@@ -887,7 +912,7 @@ TEST_CASE("relay labels a group, and the first label stays in effect", "[Precise
         CHECK(rules.diagnostics.front().element == 2);
     }
     // The label carries over from the name to the field, like the type.
-    const LayerRules both = parse_layer_rules("-^ps=relay2=ps^-", "relay3,odd");
+    const LayerRules both = parse_layer_rules("{ps=relay2=ps}", "relay3,odd");
     CHECK(both.relay == RelayLabel{false, 2});
     CHECK(count_code(both.diagnostics, Code::RelayConflict) == 1);
     CHECK(apply_rules(both) == range(1, 399, 2));
@@ -944,12 +969,12 @@ TEST_CASE("magnet takes an optional distance in mm, and the first one stays in e
     CHECK(count_code(late.diagnostics, Code::MagnetConflict) == 0);
     // It keeps the mode and the sets, and carries over from the name to the field; nowarn keeps the conflict.
     CHECK(select({}, "excl,magnet,odd") == range(2, 400, 2));
-    const LayerRules both = parse_layer_rules("-^ps=magnet2=ps^-", "magnet3,nowarn");
+    const LayerRules both = parse_layer_rules("{ps=magnet2=ps}", "magnet3,nowarn");
     CHECK(both.magnet == MagnetRule{2000000});
     REQUIRE(both.diagnostics.size() == 1);
     CHECK(both.diagnostics.front().code == Code::MagnetConflict);
     CHECK(both.diagnostics.front().source == RuleSource{true, 0});
-    const LayerRules overridden = parse_layer_rules("-^ps=magnet2=ps^-", "override,magnet3");
+    const LayerRules overridden = parse_layer_rules("{ps=magnet2=ps}", "override,magnet3");
     CHECK(overridden.magnet == MagnetRule{3000000});
     CHECK(overridden.diagnostics.empty());
 }
@@ -980,7 +1005,7 @@ TEST_CASE("magnet takes an optional apex after its distance", "[PreciseSeam][Rul
 TEST_CASE("id names a volume for scripts and changes nothing else", "[PreciseSeam][Rules]")
 {
     // Any text may follow id, non-ASCII too, and keeps its case.
-    for (const std::string text : {"idFront", "id", "id\xD0\x9F", "idA=ps^-B", "idoff", "idoverride", "idrelay-random1", "id5-1x"}) {
+    for (const std::string text : {"idFront", "id", "id\xD0\x9F", "idA=ps}B", "idoff", "idoverride", "idrelay-random1", "id5-1x"}) {
         CAPTURE(text);
         const LayerRules rules = field(text);
         CHECK(rules.diagnostics.empty());
@@ -1010,16 +1035,16 @@ TEST_CASE("id names a volume for scripts and changes nothing else", "[PreciseSea
     CHECK(select({}, "excl,idA,odd") == range(2, 400, 2));
     CHECK(select({}, "idA,5") == Layers{5});
     // The id carries over from the name to the field, unless override leaves the name out.
-    const LayerRules both = parse_layer_rules("-^ps=idN=ps^-", "idF");
+    const LayerRules both = parse_layer_rules("{ps=idN=ps}", "idF");
     CHECK(both.id == "idN");
     REQUIRE(both.diagnostics.size() == 1);
     CHECK(both.diagnostics.front().source == RuleSource{true, 0});
-    const LayerRules overridden = parse_layer_rules("-^ps=idN=ps^-", "override,idF");
+    const LayerRules overridden = parse_layer_rules("{ps=idN=ps}", "override,idF");
     CHECK(overridden.name_overridden);
     CHECK(overridden.id == "idF");
     CHECK(overridden.diagnostics.empty());
     // override after an id is no longer the first element.
-    const LayerRules late = parse_layer_rules("-^ps=5=ps^-", "idF,override");
+    const LayerRules late = parse_layer_rules("{ps=5=ps}", "idF,override");
     CHECK_FALSE(late.name_overridden);
     REQUIRE(late.diagnostics.size() == 1);
     CHECK(late.diagnostics.front().code == Code::InvalidElement);
@@ -1044,12 +1069,12 @@ TEST_CASE("id takes a quote as any character, and a comma still ends it", "[Prec
 TEST_CASE("Name markers and commas bound an id", "[PreciseSeam][Rules]")
 {
     // The name block ends at the first closing marker: off falls outside, and the second closing is stray.
-    const LayerRules closed = parse_layer_rules("-^ps=idA=ps^-B,off=ps^-", {});
+    const LayerRules closed = parse_layer_rules("{ps=idA=ps}B,off=ps}", {});
     CHECK(closed.id == "idA");
     CHECK_FALSE(closed.off);
     CHECK(count_code(closed.diagnostics, Code::BrokenMarker) == 1);
     // A second opening discards the block with the id.
-    const LayerRules reopened = parse_layer_rules("-^ps=idA-^ps=off=ps^-", {});
+    const LayerRules reopened = parse_layer_rules("{ps=idA{ps=off=ps}", {});
     CHECK_FALSE(reopened.id.has_value());
     CHECK(reopened.off);
     CHECK(count_code(reopened.diagnostics, Code::BrokenMarker) == 1);
@@ -1244,8 +1269,8 @@ TEST_CASE("Every source starts from the bed, and the origin changes only the set
 {
     const Layers model_to_bed{4, 5, 6, 7, 8}; // A raft takes numbers 1..3.
     const auto   evaluate = [&](const LayerRules &rules) { return selected(select_layers(rules, 8, {4, 5, 6, 7, 8}, {}, model_to_bed)); };
-    CHECK(evaluate(parse_layer_rules("a -^ps=model,1=ps^- -^ps=2=ps^-", "3")) == Layers{2, 3, 4});
-    CHECK(evaluate(parse_layer_rules("a -^ps=model=ps^-", "1")) == Layers{1});
+    CHECK(evaluate(parse_layer_rules("a {ps=model,1=ps} {ps=2=ps}", "3")) == Layers{2, 3, 4});
+    CHECK(evaluate(parse_layer_rules("a {ps=model=ps}", "1")) == Layers{1});
     // A malformed element keeps the origin.
     CHECK(evaluate(field("model,modelx,2")) == Layers{5});
     // Only flags restrict nothing.
