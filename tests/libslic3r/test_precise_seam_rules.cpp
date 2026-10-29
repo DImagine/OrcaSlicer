@@ -1002,6 +1002,49 @@ TEST_CASE("magnet takes an optional apex after its distance", "[PreciseSeam][Rul
     CHECK(count_code(field("magnetapex1000001").diagnostics, Code::NumberOutOfRange) == 1);
 }
 
+TEST_CASE("apex stands alone or after a type, apart from the magnet", "[PreciseSeam][Rules][Apex]")
+{
+    CHECK(field("apex").apex == ApexRule{});
+    CHECK(field("Apex 0.05").apex == ApexRule{50000});
+    CHECK(field("apex0").apex == ApexRule{0});
+    // After a type it is the same as on its own, and the type stays.
+    const LayerRules center = field("center apex0.05");
+    CHECK(center.type == ModelVolumeType::PRECISE_SEAM_CENTER);
+    CHECK(center.apex == ApexRule{50000});
+    CHECK(field("centerapex").apex == ApexRule{});
+    // After another type it is kept; it is reported and ignored once the effective type is known.
+    const LayerRules left = field("left apex");
+    CHECK(left.type == ModelVolumeType::PRECISE_SEAM_LEFT);
+    CHECK(left.apex == ApexRule{});
+    CHECK(left.diagnostics.empty());
+    // "magnet ... apex" belongs to the magnet; after a comma apex is a rule of its own.
+    CHECK_FALSE(field("magnet2apex").apex.has_value());
+    const LayerRules both = field("magnet2, apex");
+    CHECK(both.magnet == MagnetRule{2000000});
+    CHECK(both.apex == ApexRule{});
+    // Repeats compare as numbers; no threshold differs from any threshold.
+    CHECK(field("apex1,center apex1.0").diagnostics.empty());
+    CHECK(field("center apex,apex").diagnostics.empty());
+    for (const std::string text : {"apex,apex0.01", "apex0.1,apex0.2", "center apex0.1,apex"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(rules.apex == field(text.substr(0, text.find(','))).apex);
+        REQUIRE(rules.diagnostics.size() == 1);
+        CHECK(rules.diagnostics.front().code == Code::ApexConflict);
+        CHECK(rules.diagnostics.front().element == 2);
+    }
+    // A broken element changes nothing, its type included.
+    for (const std::string text : {"apexx", "apex.5", "apex0.5x", "center apex x", "centerapexapex"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK_FALSE(rules.apex.has_value());
+        CHECK_FALSE(rules.type.has_value());
+        CHECK(count_code(rules.diagnostics, Code::InvalidElement) == 1);
+    }
+    CHECK(count_code(field("apex1000001").diagnostics, Code::NumberOutOfRange) == 1);
+    CHECK(count_code(field("center apex1.0000001").diagnostics, Code::NumberOutOfRange) == 1);
+}
+
 TEST_CASE("id names a volume for scripts and changes nothing else", "[PreciseSeam][Rules]")
 {
     // Any text may follow id, non-ASCII too, and keeps its case.

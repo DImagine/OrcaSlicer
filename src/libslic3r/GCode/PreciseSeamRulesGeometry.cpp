@@ -290,6 +290,47 @@ std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared,
     return best;
 }
 
+StrongSeamTarget find_segment_apex(const PerimeterSegment &segment, const StrongSeamTarget &middle, double threshold)
+{
+    const Points &points = segment.polyline.points;
+    assert(segment.edge_indices.size() + 1 == points.size() || points.size() < 2);
+    // A crossing within one edge has no inner vertex.
+    if (points.size() < 3)
+        return middle;
+    const Vec2d  a      = points.front().cast<double>();
+    const Vec2d  chord  = points.back().cast<double>() - a;
+    const double length = chord.norm();
+    // A chord this short gives no line to measure from.
+    if (length <= threshold)
+        return middle;
+    // Signed distance from the chord's line: its sign is the side.
+    const auto   offset = [&](const Point &p) { return cross2(chord, p.cast<double>() - a) / length; };
+    const double depth  = offset(middle.point);
+    if (std::abs(depth) <= threshold)
+        return middle;
+    const auto beside = [depth](double d) { return (d > 0.) == (depth > 0.); };
+    double     deepest = 0.;
+    for (size_t k = 1; k + 1 < points.size(); ++k)
+        if (const double d = offset(points[k]); d != 0. && beside(d))
+            deepest = std::max(deepest, std::abs(d));
+    if (deepest <= std::abs(depth) + threshold)
+        return middle;
+    std::optional<size_t> best;
+    double                best_to_middle = 0.;
+    for (size_t k = 1; k + 1 < points.size(); ++k) {
+        const double d = offset(points[k]);
+        if (d == 0. || !beside(d) || std::abs(d) < deepest - threshold)
+            continue;
+        const double to_middle = (points[k] - middle.point).cast<double>().norm();
+        if (!best || to_middle < best_to_middle || (to_middle == best_to_middle && rear_then_left(points[k], points[*best]))) {
+            best           = k;
+            best_to_middle = to_middle;
+        }
+    }
+    // Interval k starts at vertex k and lies on edge_indices[k] of the unchanged perimeter.
+    return StrongSeamTarget{points[*best], segment.edge_indices[*best]};
+}
+
 std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                              std::optional<double> limit, bool apex)
 {
@@ -498,6 +539,21 @@ static const EffectiveModifier *magnet_of(const EffectiveModifiers &effective, c
     return nullptr;
 }
 
+// The apex of a Center modifier, or null.
+static const EffectiveModifier *apex_of(const EffectiveModifiers &effective, const ModelVolume *modifier)
+{
+    if (const auto it = effective.find(modifier); it != effective.end() && it->second.apex)
+        return &it->second;
+    return nullptr;
+}
+
+// The apex threshold: the rule's, or the print resolution; never below the snapping tolerance.
+static double apex_threshold(const EffectiveModifier &modifier, const Layer &layer)
+{
+    const double threshold = modifier.apex_threshold ? *modifier.apex_threshold : scale_(layer.object()->print()->config().resolution.value);
+    return std::max(threshold, double(TOLERANCE_LINEAR));
+}
+
 // Whether a magnet acts instead of the type: the modifier does not cross the perimeter. Full containment
 // comes first, as it keeps its closed segment; only discarded fragments still count as a crossing.
 static bool magnet_acts(const SegmentExtraction &extracted)
@@ -602,6 +658,7 @@ std::optional<Point> insert_strong_seam_point_by_rules(const std::vector<const M
         // Lengths are compared exactly: for a symmetric modifier the chosen face may alternate between
         // layers, which is accepted (the user gets the multiple-intersections warning).
         StrongSeamTarget target{Point(0, 0), 0};
+        const PerimeterSegment *chosen = nullptr;
         double longest = -1.;
         for (const PerimeterSegment &segment : extracted.segments) {
             assert(segment.strong_target.has_value());
@@ -610,8 +667,12 @@ std::optional<Point> insert_strong_seam_point_by_rules(const std::vector<const M
             if (segment.length > longest || (segment.length == longest && farther_or_left)) {
                 longest = segment.length;
                 target = candidate;
+                chosen = &segment;
             }
         }
+        // apex: from the middle of the chosen crossing to the tip of its corner.
+        if (const EffectiveModifier *apex = apex_of(effective, modifier); apex != nullptr && type == ModelVolumeType::PRECISE_SEAM_CENTER)
+            target = find_segment_apex(*chosen, target, apex_threshold(*apex, *layer));
         const auto [seam_point, seam_index] = insert_point_into_perimeter(target.point, target.edge_index, polygon);
         // Preserve the insertion order: refining before first would shift the seam index.
         refine_at_vertex(seam_index, +1, polygon);
