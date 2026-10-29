@@ -95,9 +95,10 @@ Layer rules can override both the type and the place in this order (see
 A short language limits a modifier to some layers and can set its type and
 priority. The language is experimental and its syntax may change; the group
 title and the help say so. It is read only from Precise Seam volumes, from two sources: blocks
-between `-^ps=` and `=ps^-` in the volume name, so that a CAD model can carry
+between `{ps=` and `=ps}` in the volume name, so that a CAD model can carry
 the rules through repeated exports, and the volume's rules field
-(`ModelVolume::precise_seam_rules`). Name blocks apply left to right, then the
+(`ModelVolume::precise_seam_rules`). The markers and the 3MF key
+`precise_seam_rules` are a stored format and do not change with the syntax. Name blocks apply left to right, then the
 field. The parser is `GCode/PreciseSeamRules.cpp`; it has no dependency on the
 print and is tested on its own.
 
@@ -818,10 +819,11 @@ cached.
 Removing the last helper of a single-part object reslices it, as removing any
 last modifier would.
 
-The name and the rules field of a Precise Seam volume hold its layer rules, so a
-change of either invalidates `psGCodeExport` as well
+The rules field of a Precise Seam volume, and its name in an object with rules,
+hold its layer rules, so a change of either invalidates `psGCodeExport` as well
 (`model_precise_seam_rules_changed()`), checked before the new data is copied
-into the print's model. The layer numbers come from the export plan and are
+into the print's model. A rename that leaves an object without rules before and
+after invalidates nothing, as without the language. The layer numbers come from the export plan and are
 rebuilt on every export.
 
 ### User interface
@@ -843,7 +845,8 @@ rebuilt on every export.
 - The part settings edit the rules field of a Precise Seam volume, three lines
   high, in a *Precise Seam Rules (experimental)* group on the Frequent and the Others page, for
   a single selected Precise Seam volume only; there is no separate menu item.
-  Renaming such a volume also updates the print, since the name may hold rules. The field is no config option: the part tab adds
+  Renaming such a volume updates the print when the object has rules or the old
+  name held a marker. The field is no config option: the part tab adds
   the groups after its option filter, and a visibility condition of the group
   hides them for other selections. `PreciseSeamRulesEditor` keeps the shown
   volume and a pending edit by volume ID; typing changes only the draft, which

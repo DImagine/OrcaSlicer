@@ -1937,7 +1937,7 @@ bool model_custom_supports_data_changed(const ModelObject& mo, const ModelObject
 // Test whether the now ModelObject has newer custom seam data than the old one.
 // The function assumes that volumes list is synchronized.
 bool model_custom_seam_data_changed(const ModelObject& mo, const ModelObject& mo_new);
-// Test whether the name or the rules field of a Precise Seam volume differ: both hold its layer rules.
+// Test whether the layer rules of a Precise Seam volume differ: its rules field, or its name in an object with rules.
 bool model_precise_seam_rules_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 // Test whether the now ModelObject has newer MMU segmentation data than the old one.

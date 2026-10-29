@@ -24,11 +24,6 @@ class Layer;
 class PrintObject;
 namespace PreciseSeam {
 
-// Whether any Precise Seam volume of the object uses the rules language: a non-empty rules field, or a
-// name block marker in either direction, in any letter case. Broken or invalid rules count too, so that
-// they are reported. The check reads the raw text and parses nothing.
-bool uses_precise_seam_rules(const ModelObject &object);
-
 // A rule diagnostic tied to its volume, for the export warnings.
 struct ModifierDiagnostic {
     const ModelVolume *volume;

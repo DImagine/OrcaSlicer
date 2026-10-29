@@ -9,7 +9,7 @@
 #include <vector>
 #include "libslic3r/Model.hpp"
 
-// Precise Seam layer rules: a short language in the volume name (`-^ps=...=ps^-` blocks) and in a
+// Precise Seam layer rules: a short language in the volume name (`{ps=...=ps}` blocks) and in a
 // per-volume field that selects the layers, type and priority of one Precise Seam modifier.
 // Design: docs/HLSD/precise-seam.md
 
@@ -101,7 +101,7 @@ struct RuleLayerOperation {
 struct LayerRules {
     std::vector<RuleLayerOperation> operations; // Valid layer sets in application order.
     std::optional<ModelVolumeType>  type;       // First type label over all sources.
-    std::optional<int64_t>          priority;   // First priority over all sources, a weight in millionths: prN, -N for pr-negN.
+    std::optional<int64_t>          priority;   // First priority over all sources, prN in millionths; pr-negN gives -N.
     std::optional<RelayLabel>       relay;      // First relay label over all sources.
     std::optional<uint32_t>         relay_seed; // seed of that relay-random element; not part of the group label.
     std::optional<std::string>      id;         // Trimmed original text of the first id element; the language ignores it.
@@ -120,6 +120,11 @@ struct LayerRules {
 
 // Whether the name holds a block marker in either direction, in any letter case, whole block or not.
 bool has_rule_marker(std::string_view volume_name);
+
+// Whether any Precise Seam volume of the object uses the rules language: a non-empty rules field, or a
+// name block marker in either direction, in any letter case. Broken or invalid rules count too, so that
+// they are reported. The check reads the raw text and parses nothing.
+bool uses_precise_seam_rules(const ModelObject &object);
 
 // Parses the name blocks, then the field, of one Precise Seam volume. When the first element of the field is
 // override, the name is not parsed at all.

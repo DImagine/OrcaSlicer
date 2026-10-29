@@ -4291,11 +4291,11 @@ TabPrintPart::~TabPrintPart() = default;
 void TabPrintPart::build()
 {
     TabPrintModel::build();
-    // The Precise Seam rules are a field of the volume, not an option: they join after the option filter
-    // above, which drops every line without options.
+    // The Precise Seam rules are a field of the volume, not an option: they join after the option filter above.
     for (const char *name : {"Frequent", "Others"}) {
         const auto it = std::find_if(m_pages.begin(), m_pages.end(), [name](const PageShp &page) { return page->title() == name; });
-        m_precise_seam_rules->add_group(it != m_pages.end() ? **it : *add_options_page(L("Others"), "custom-gcode_other"));
+        if (it != m_pages.end())
+            m_precise_seam_rules->add_group(**it);
     }
 }
 

@@ -27,7 +27,8 @@ class Page;
 wxString precise_seam_rules_help();
 
 // Writes raw rules to the volume with `volume_id` in the current model: when the text differs, one undo
-// snapshot, then a background update. False when that volume is gone or no longer Precise Seam.
+// snapshot, then a background update. The field is kept for any volume type, so a draft survives a type change.
+// False when that volume is gone.
 bool apply_precise_seam_rules(ObjectID volume_id, const std::string &rules);
 
 class PreciseSeamRulesEditor

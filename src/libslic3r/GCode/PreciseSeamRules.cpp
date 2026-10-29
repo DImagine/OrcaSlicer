@@ -18,8 +18,8 @@ namespace PreciseSeam {
 
 namespace {
 
-constexpr std::string_view open_marker  = "-^ps=";
-constexpr std::string_view close_marker = "=ps^-";
+constexpr std::string_view open_marker  = "{ps=";
+constexpr std::string_view close_marker = "=ps}";
 
 // ASCII only and independent of the locale, as the language is defined over ASCII.
 char ascii_lower(char c) { return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c; }
@@ -734,6 +734,13 @@ bool has_rule_marker(std::string_view volume_name)
         if (marker_at(volume_name, pos, open_marker) || marker_at(volume_name, pos, close_marker))
             return true;
     return false;
+}
+
+bool uses_precise_seam_rules(const ModelObject &object)
+{
+    return std::any_of(object.volumes.begin(), object.volumes.end(), [](const ModelVolume *volume) {
+        return volume->is_precise_seam() && (!volume->precise_seam_rules.empty() || has_rule_marker(volume->name));
+    });
 }
 
 LayerRules parse_layer_rules(std::string_view volume_name, std::string_view field)

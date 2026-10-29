@@ -549,6 +549,7 @@ std::optional<Point> insert_strong_seam_point_by_rules(const std::vector<const M
                                                        const ModifierRegionsCache &slices_cache, PreciseSeamWarnings *warnings,
                                                        const EffectiveModifiers &effective, bool quiet)
 {
+    // Mirrors insert_strong_seam_point() in PreciseSeam.cpp: keep the shared steps in step.
     assert(&prepared.polygon == &polygon);
     // A probe records nothing: the usage flags and warning masks belong to the real pass.
     assert(!quiet || warnings == nullptr);
@@ -625,6 +626,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments_by_rules(const s
                                                                          const Layer *layer, const ModifierRegionsCache &slices_cache,
                                                                          PreciseSeamWarnings *warnings, const EffectiveModifiers &effective)
 {
+    // Mirrors collect_weak_modifier_segments() in PreciseSeam.cpp: keep the shared steps in step.
     assert(&prepared.polygon == &polygon);
     std::vector<WeakModifierSegment> result;
     if (weak_volumes.empty() || layer == nullptr || !prepared.valid)

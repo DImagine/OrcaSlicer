@@ -58,13 +58,13 @@ wxString precise_seam_rules_help()
               "idName: a name for scripts; the rules ignore it\n"
               "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
               "Heights are measured from the bed by default, as on the slider. Decimals take a point: a comma separates rules.\n"
-              "The name may hold more rules between -^ps= and =ps^-; override as the first rule here ignores them.");
+              "The name may hold more rules between {ps= and =ps}; override as the first rule here ignores them.");
 }
 
 bool apply_precise_seam_rules(ObjectID volume_id, const std::string &rules)
 {
     ModelVolume *volume = find_volume(volume_id);
-    if (volume == nullptr || !volume->is_precise_seam())
+    if (volume == nullptr)
         return false;
     if (rules != volume->precise_seam_rules) {
         wxGetApp().plater()->take_snapshot(_u8L("Edit Precise Seam Rules"));

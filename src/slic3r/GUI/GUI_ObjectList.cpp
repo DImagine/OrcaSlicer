@@ -17,6 +17,7 @@
 #include "Tab.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/GCode/PreciseSeamRules.hpp"
 #include "GLCanvas3D.hpp"
 #include "Selection.hpp"
 #include "PartPlate.hpp"
@@ -1240,8 +1241,10 @@ void ObjectList::update_name_in_model(const wxDataViewItem& item) const
 
     const std::string previous_name = obj->volumes[volume_id]->name;
     obj->volumes[volume_id]->name = name;
-    // The name of a Precise Seam volume may hold layer rules, which the G-code export reads.
-    if (obj->volumes[volume_id]->is_precise_seam())
+    // The name of a Precise Seam volume may hold layer rules, which the G-code export reads; without rules
+    // before or after, a rename changes nothing there.
+    if (obj->volumes[volume_id]->is_precise_seam() &&
+        (PreciseSeam::uses_precise_seam_rules(*obj) || PreciseSeam::has_rule_marker(previous_name)))
         wxGetApp().plater()->schedule_background_process();
 
     LifecycleEventContext ctx;

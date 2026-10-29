@@ -28,6 +28,7 @@
 #include "Geometry.hpp"
 #include "MTUtils.hpp"
 #include "TriangleMeshSlicer.hpp"
+#include "GCode/PreciseSeamRules.hpp"
 #include "TriangleSelector.hpp"
 #include "MaterialType.hpp"
 #include "Tesselate.hpp"
@@ -4287,11 +4288,13 @@ bool model_custom_seam_data_changed(const ModelObject& mo, const ModelObject& mo
 
 bool model_precise_seam_rules_changed(const ModelObject& mo, const ModelObject& mo_new)
 {
-    // Layer rules come from the name blocks and the rules field of each Precise Seam volume.
+    // Layer rules come from the name blocks and the rules field of each Precise Seam volume. Names count only
+    // for an object with rules, which its warnings name; without rules a rename changes no step.
+    const bool names_count = PreciseSeam::uses_precise_seam_rules(mo) || PreciseSeam::uses_precise_seam_rules(mo_new);
     return model_property_changed(mo, mo_new,
         [](const ModelVolumeType t) { return is_precise_seam(t); },
-        [](const ModelVolume &mv_old, const ModelVolume &mv_new) {
-            return mv_old.name == mv_new.name && mv_old.precise_seam_rules == mv_new.precise_seam_rules;
+        [names_count](const ModelVolume &mv_old, const ModelVolume &mv_new) {
+            return (!names_count || mv_old.name == mv_new.name) && mv_old.precise_seam_rules == mv_new.precise_seam_rules;
         });
 }
 

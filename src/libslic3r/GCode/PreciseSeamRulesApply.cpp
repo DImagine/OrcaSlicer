@@ -4,9 +4,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
-#include <iterator>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -30,13 +30,6 @@
 
 namespace Slic3r {
 namespace PreciseSeam {
-
-bool uses_precise_seam_rules(const ModelObject &object)
-{
-    return std::any_of(object.volumes.begin(), object.volumes.end(), [](const ModelVolume *volume) {
-        return volume->is_precise_seam() && (!volume->precise_seam_rules.empty() || has_rule_marker(volume->name));
-    });
-}
 
 const std::vector<const ModelVolume*> &RuleContext::strong_on(size_t layer, const std::vector<const ModelVolume*> &strong,
                                                               std::vector<const ModelVolume*> &buffer) const
@@ -389,7 +382,6 @@ std::vector<size_t> relay_random_holders(const std::vector<std::vector<uint8_t>>
 {
     std::vector<size_t> holders(wins.size(), RelayOrder::no_holder);
     size_t              previous = RelayOrder::no_holder; // Holder of the last layer with a winner.
-    const uint64_t      seed     = group_seed;
     for (size_t layer = 0; layer < wins.size(); ++layer) {
         const std::vector<uint8_t> &row = wins[layer];
         if (row.empty())
@@ -407,7 +399,7 @@ std::vector<size_t> relay_random_holders(const std::vector<std::vector<uint8_t>>
         // The previous holder is left out, unless it is the only winner.
         const bool   skip_previous = previous_won && winners > 1;
         const size_t candidates    = winners - (skip_previous ? 1 : 0);
-        size_t       rank          = candidates == 1 ? 0 : size_t(mix(seed ^ uint64_t(layer)) % candidates);
+        size_t       rank          = candidates == 1 ? 0 : size_t(mix(group_seed ^ uint64_t(layer)) % candidates);
         for (size_t member = 0; member < member_count; ++member)
             if (row[member] != 0 && !(skip_previous && member == previous) && rank-- == 0) {
                 holders[layer] = member;

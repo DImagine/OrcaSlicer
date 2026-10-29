@@ -10,6 +10,8 @@
 #include "libslic3r/GCode/PreciseSeam.hpp"
 #include "libslic3r/GCode/PreciseSeamRules.hpp"
 #include "libslic3r/GCode/PreciseSeamRulesApply.hpp"
+#include "libslic3r/GCode/PreciseSeamRulesExport.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/GCode/PreciseSeamRulesGeometry.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
@@ -1569,7 +1571,7 @@ TEST_CASE("Layer rules limit a modifier to the layers numbered as on the preview
     const auto [raft_layers, rule] = GENERATE(table<int, std::string>({{0, "1-3"}, {2, "3-5"}}));
     CAPTURE(raft_layers, rule);
     ExportFixture fixture("back", raft_layers);
-    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=" + rule + "=ps^-");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front {ps=" + rule + "=ps}");
     const auto loops = outer_wall_loops(fixture.export_gcode());
     REQUIRE(loops.size() == 10);
     for (size_t i = 0; i < loops.size(); ++i) {
@@ -1583,7 +1585,7 @@ TEST_CASE("The rules field combines with the name and can retype the modifier", 
 {
     // A Blocked volume relabelled Center by its field acts as a strong modifier on even layers only.
     ExportFixture fixture("back");
-    fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=center=ps^-");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_BLOCKED, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front {ps=center=ps}");
     fixture.model.objects.front()->volumes.back()->precise_seam_rules = "excl, odd";
     const auto loops = outer_wall_loops(fixture.export_gcode());
     REQUIRE(loops.size() == 10);
@@ -1592,7 +1594,7 @@ TEST_CASE("The rules field combines with the name and can retype the modifier", 
         CHECK(seam_on_front_helper(loops[i]) == (i % 2 == 1)); // Loop i is layer i + 1.
     }
     // The type differs from the object list, which is reported once with the modifier name.
-    CHECK(fixture.warning().find("front -^ps=center=ps^-") != std::string::npos);
+    CHECK(fixture.warning().find("front {ps=center=ps}") != std::string::npos);
 }
 
 TEST_CASE("Changing only the rules updates the exported seam", "[PreciseSeam][Rules]")
@@ -1629,6 +1631,36 @@ TEST_CASE("Changing only the rules updates the exported seam", "[PreciseSeam][Ru
     REQUIRE(restored.size() == 10);
     CHECK(std::all_of(restored.begin(), restored.end(), seam_on_front_helper));
     CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("Without rules the export collects no layer plan early", "[PreciseSeam][Rules]")
+{
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front");
+    fixture.print.apply(fixture.model, fixture.config);
+    // Counts every use of what the export lends; without rules there is none.
+    int calls = 0;
+    const PreciseSeam::ExportPlan::Access access{
+        [&calls] { ++calls; return PreciseSeam::ExportPlan::LayersByZ{}; },
+        [&calls](const PrintObject &) { ++calls; return PreciseSeam::ExportPlan::ObjectLayers{}; },
+        [&calls](const PrintObject &, const Layer &) { ++calls; return true; }};
+    for (const bool by_object : {false, true}) {
+        CAPTURE(by_object);
+        PreciseSeam::ExportPlan plan;
+        plan.prepare(fixture.print, ToolOrdering{}, by_object, access);
+        CHECK(calls == 0);
+        CHECK(plan.numbering().empty());
+        CHECK_FALSE(plan.take_layers_by_z().has_value());
+        CHECK(plan.object_layers(*fixture.print.objects().front()) == nullptr);
+    }
+
+    // The control: rules make the export collect the plan of the plate once.
+    fixture.model.objects.front()->volumes.back()->precise_seam_rules = "odd";
+    fixture.print.apply(fixture.model, fixture.config);
+    PreciseSeam::ExportPlan plan;
+    plan.prepare(fixture.print, ToolOrdering{}, false, access);
+    CHECK(calls == 1);
+    CHECK(plan.take_layers_by_z().has_value());
 }
 
 TEST_CASE("Printing by object, an object with rules and one without keep their own seams", "[PreciseSeam][Rules]")
@@ -1714,7 +1746,7 @@ TEST_CASE("Rules that keep every layer and type give the seams of no rules", "[P
 TEST_CASE("Each layer rule problem is a separate export warning", "[PreciseSeam][Rules]")
 {
     ExportFixture fixture("back");
-    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=bad, 1-3=ps^-");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front {ps=bad, 1-3=ps}");
     fixture.model.objects.front()->volumes.back()->precise_seam_rules = "500";
     const auto loops = outer_wall_loops(fixture.export_gcode());
     REQUIRE(loops.size() == 10);
@@ -1755,7 +1787,7 @@ TEST_CASE("A by-object print exported by layer for its wipe tower keeps its laye
     fixture.config.set_deserialize_strict("print_sequence", "by object");
     fixture.config.set_deserialize_strict("enable_prime_tower", "1");
     fixture.config.set_deserialize_strict("timelapse_type", "1");
-    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=1-3=ps^-");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front {ps=1-3=ps}");
     const std::string gcode = fixture.export_gcode();
     // The tower is printed, so the export took the by-layer branch.
     REQUIRE(gcode.find("TYPE:Prime tower") != std::string::npos);
@@ -1776,7 +1808,7 @@ TEST_CASE("Rule warnings stay distinct per source and count equal texts", "[Prec
     fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(2, 6, 4), Vec3d(14, -3, -1), "helper");
     fixture.model.objects.front()->volumes.back()->precise_seam_rules = "bad";
     // One modifier with the same bad rule in its name and its field gives two messages.
-    fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, make_cube(2, 6, 4), Vec3d(9, -3, -1), "twice -^ps=bad=ps^-");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_NEUTRAL, make_cube(2, 6, 4), Vec3d(9, -3, -1), "twice {ps=bad=ps}");
     fixture.model.objects.front()->volumes.back()->precise_seam_rules = "bad";
     fixture.export_gcode();
     const std::vector<std::string> warnings = rule_warnings(fixture);
@@ -1824,7 +1856,7 @@ TEST_CASE("Height rules keep their place in mm when the layer height changes", "
     ExportFixture fixture("back");
     fixture.config.set_deserialize_strict("layer_height", height);
     fixture.config.set_deserialize_strict("initial_layer_print_height", height);
-    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=" + rule + "=ps^-");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front {ps=" + rule + "=ps}");
     const auto loops = outer_wall_loops(fixture.export_gcode());
     REQUIRE(loops.size() == (height == "0.2" ? 10 : 20));
     for (size_t i = 0; i < loops.size(); ++i) {
@@ -1837,7 +1869,7 @@ TEST_CASE("Height rules keep their place in mm when the layer height changes", "
 TEST_CASE("Heights count from the bed, so a raft lifts the model layers", "[PreciseSeam][Rules][Heights]")
 {
     ExportFixture fixture("back", 2);
-    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=z0-2=ps^-");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front {ps=z0-2=ps}");
     const auto loops = outer_wall_loops(fixture.export_gcode());
     const PrintObject &object = *fixture.print.objects().front();
     REQUIRE(loops.size() == 10);
@@ -1858,7 +1890,7 @@ TEST_CASE("Heights count from the bed, so a raft lifts the model layers", "[Prec
 TEST_CASE("override in the field replaces the name rules of the exported seam", "[PreciseSeam][Rules][Override]")
 {
     ExportFixture fixture("back");
-    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front -^ps=1-3=ps^-");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 4), Vec3d(4, -3, -1), "front {ps=1-3=ps}");
     ModelVolume &helper = *fixture.model.objects.front()->volumes.back();
     helper.precise_seam_rules = "override, excl, odd";
     const auto replaced = outer_wall_loops(fixture.export_gcode());
@@ -1933,7 +1965,7 @@ TEST_CASE("Relay members take the seam in turn, layer by layer", "[PreciseSeam][
     fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
     fixture.add(ModelVolumeType::PRECISE_SEAM_LEFT, front_box(), Vec3d(9, -3, -1), "B");
     fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay";
-    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "C -^ps=relay=ps^-");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "C {ps=relay=ps}");
     const std::vector<double> centres{-7., -1., 7.};
     const auto loops = outer_wall_loops(fixture.export_gcode());
     REQUIRE(loops.size() == 10);
@@ -2101,7 +2133,7 @@ TEST_CASE("relay-random members take the seam at random, never twice in a row", 
     fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random";
     fixture.add(ModelVolumeType::PRECISE_SEAM_LEFT, front_box(), Vec3d(9, -3, -1), "B");
     fixture.model.objects.front()->volumes.back()->precise_seam_rules = "relay-random";
-    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "C -^ps=relay-random=ps^-");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, front_box(), Vec3d(16, -3, -1), "C {ps=relay-random=ps}");
     const std::vector<double> centres{-7., -1., 7.};
     const auto loops = outer_wall_loops(fixture.export_gcode());
     REQUIRE(loops.size() == 10);
