@@ -62,7 +62,7 @@ struct MagnetRule {
 
 // apex: a Center modifier moves its seam from the middle of its crossing to the vertex farthest from the chord.
 struct ApexRule {
-    std::optional<int64_t> threshold; // Nanometres: how much deeper than the middle; none takes the print resolution.
+    std::optional<int64_t> threshold; // Nanometres: a crossing within it of its chord is straight; none takes the print resolution.
 
     bool operator==(const ApexRule &rhs) const { return threshold == rhs.threshold; }
     bool operator!=(const ApexRule &rhs) const { return !(*this == rhs); }

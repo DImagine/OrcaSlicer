@@ -2717,18 +2717,18 @@ TEST_CASE("A magnet with apex keeps the nearest point where no corner holds the 
 
 TEST_CASE("A magnet with apex on a round wall takes the middle of the arc from P to Q", "[PreciseSeam][Magnet]")
 {
-    // A round hole has no corner, but the arc from P to Q bulges from its chord: the vertex farthest from the
-    // chord is the middle of the arc, about 36 degrees round from P at (15, 10), where the ray to Q meets the
-    // wall about 72 degrees round. Two vertices lie that far within the tolerance.
+    // A round hole has no corner, but the arc from P to Q bulges from its chord. P lies on the edge after vertex 0,
+    // at (14.99, 10.27), where the rear corner of the dot projects; the nearer ray from the dot meets the wall at
+    // Q, about 72 degrees below the axis, and vertex 58, at -33.75 degrees, lies farthest from the chord PQ, 14 um
+    // farther than vertex 59.
     Polygon hole;
     for (int i = 0; i < 64; ++i)
         hole.points.push_back(mm(10 + 5 * std::cos(2 * PI * i / 64), 10 + 5 * std::sin(2 * PI * i / 64)));
     const Polygon              dot   = rectangle(11.4, 9.9, 11.6, 10.1);
     const std::optional<Point> plain = magnet_point(hole, Polygons{dot});
     REQUIRE(plain.has_value());
-    CHECK((unscaled(*plain) - Vec2d(15, 10)).norm() < 0.01);
-    const std::optional<Point> tip = magnet_point(hole, Polygons{dot}, std::nullopt, true);
-    CHECK((tip == hole.points[6] || tip == hole.points[7]));
+    CHECK((unscaled(*plain) - Vec2d(14.987, 10.266)).norm() < 0.002);
+    CHECK(magnet_point(hole, Polygons{dot}, std::nullopt, true) == hole.points[58]);
 }
 
 namespace {
@@ -2931,7 +2931,7 @@ PreciseSeam::PerimeterSegment center_crossing(const Polygon &perimeter, const Po
 Point segment_apex(const Polygon &perimeter, const Polygon &loop, double threshold)
 {
     const PreciseSeam::PerimeterSegment segment = center_crossing(perimeter, loop);
-    return PreciseSeam::find_segment_apex(segment, *segment.strong_target, scale_(threshold)).point;
+    return PreciseSeam::find_segment_apex(PreciseSeam::PreparedPerimeter(perimeter), segment, *segment.strong_target, scale_(threshold)).point;
 }
 } // namespace
 
@@ -2939,39 +2939,38 @@ TEST_CASE("apex moves the middle of a Center crossing to the tip farthest from i
 {
     const size_t shift = GENERATE(0, 3, 5);
     CAPTURE(shift);
-    SECTION("A tip deeper than the middle by more than the threshold")
+    SECTION("A tip farther from the chord than the threshold; within it the crossing is straight")
     {
-        // The crossing runs (23, 16) - (20, 10) - (19, 12); its middle (21, 12) lies 1.414 mm from the chord, the
-        // tip 2.121 mm: 0.707 mm deeper.
+        // The crossing runs (23, 16) - (20, 10) - (19, 12); its middle is (21, 12), the tip 2.121 mm from the chord.
         const Polygon perimeter = rotated(notched(), shift);
         const Polygon loop      = rectangle(19, 8, 30, 16);
         CHECK((unscaled(center_crossing(perimeter, loop).strong_target->point) - Vec2d(21, 12)).norm() < 0.001);
         CHECK(segment_apex(perimeter, loop, 0.001) == mm(20, 10));
-        CHECK(segment_apex(perimeter, loop, 0.7) == mm(20, 10));
-        CHECK(segment_apex(perimeter, loop, 0.71) != mm(20, 10));
+        CHECK(segment_apex(perimeter, loop, 2.1) == mm(20, 10));
+        CHECK((unscaled(segment_apex(perimeter, loop, 2.2)) - Vec2d(21, 12)).norm() < 0.001);
     }
-    SECTION("A middle on the chord, or a crossing without inner vertices, keeps its place")
+    SECTION("A crossing without inner vertices keeps its middle")
     {
-        // Over a corner symmetrically: the middle is the corner itself, as deep as any vertex.
+        // Over a corner symmetrically: the corner is the middle too.
         const Polygon square = rotated(rectangle(0, 0, 20, 20), shift % 4);
         CHECK(segment_apex(square, rectangle(18, 18, 22, 22), 0.001) == mm(20, 20));
         // Across one face: two points only.
         const PreciseSeam::PerimeterSegment face = center_crossing(square, rectangle(8, -2, 12, 2));
-        CHECK(PreciseSeam::find_segment_apex(face, *face.strong_target, scale_(0.001)).point == face.strong_target->point);
+        CHECK(PreciseSeam::find_segment_apex(PreciseSeam::PreparedPerimeter(square), face, *face.strong_target, scale_(0.001)).point ==
+              face.strong_target->point);
     }
-    SECTION("A vertex on the other side of the chord is skipped, the others still count")
+    SECTION("Vertices on both sides of the chord: the farthest wins")
     {
-        // A step in the front face: the crossing runs (20, 0) - (26, 0) - (26, 2) - (28, 2), its middle (25, 0).
-        // (26, 0) lies on the side of the middle and deeper; (26, 2) on the other side.
+        // A step in the front face: the crossing runs (20, 0) - (26, 0) - (26, 2) - (28, 2). (26, 0) lies 1.46 mm
+        // from the chord on one side, (26, 2) 0.49 mm on the other.
         const Polygon stepped(Points{mm(0, 0), mm(26, 0), mm(26, 2), mm(40, 2), mm(40, 20), mm(0, 20)});
         CHECK(segment_apex(rotated(stepped, shift), rectangle(20, -1, 28, 3), 0.001) == mm(26, 0));
     }
-    SECTION("Equally deep tips go to the one nearest the middle")
+    SECTION("Equally far tips go to the rear and left one, as for magnet apex")
     {
-        // Two V notches 8 mm deep under a horizontal chord; the ridge between them is off centre, and the middle
-        // (22.65, 15.58) lies nearer the right tip, which rear-then-left alone would not pick.
+        // Two V notches 8 mm deep under a horizontal chord.
         const Polygon twin(Points{mm(0, 0), mm(40, 0), mm(40, 20), mm(28, 20), mm(26, 10), mm(23, 16), mm(18, 10), mm(16, 20), mm(0, 20)});
-        CHECK(segment_apex(rotated(twin, shift), rectangle(15, 5, 30, 18), 0.001) == mm(26, 10));
+        CHECK(segment_apex(rotated(twin, shift), rectangle(15, 5, 30, 18), 0.001) == mm(18, 10));
     }
 }
 
@@ -2990,13 +2989,14 @@ TEST_CASE("The strong driver applies apex to Center only, with the print resolut
         return PreciseSeam::insert_strong_seam_point_by_rules({volume}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
                                                               fixture.cache, nullptr, effective);
     };
-    REQUIRE(fixture.print.config().resolution.value < 0.7);
+    // The tip lies 2.121 mm from the chord of the crossing.
+    REQUIRE(fixture.print.config().resolution.value < 2.);
     CHECK(seam(ModelVolumeType::PRECISE_SEAM_CENTER, true) == mm(20, 10));
-    CHECK(seam(ModelVolumeType::PRECISE_SEAM_CENTER, true, 0.5) == mm(20, 10));
+    CHECK(seam(ModelVolumeType::PRECISE_SEAM_CENTER, true, 2.) == mm(20, 10));
     const std::optional<Point> middle = seam(ModelVolumeType::PRECISE_SEAM_CENTER, false);
     REQUIRE(middle.has_value());
     CHECK((unscaled(*middle) - Vec2d(21, 12)).norm() < 0.001);
-    CHECK(seam(ModelVolumeType::PRECISE_SEAM_CENTER, true, 1.) == middle);
+    CHECK(seam(ModelVolumeType::PRECISE_SEAM_CENTER, true, 2.2) == middle);
     // Left keeps the start of the crossing.
     const std::optional<Point> left = seam(ModelVolumeType::PRECISE_SEAM_LEFT, true);
     REQUIRE(left.has_value());
@@ -3121,13 +3121,13 @@ TEST_CASE("apex puts the exported seam of a Center modifier into the corner it c
 {
     // The helper covers the front left corner unevenly: the outer wall crosses it 0.8 mm down the left face,
     // then 2.8 mm along the front face, so the middle lies 1 mm right of the corner (0.2, 0.2), and the corner
-    // 0.275 mm farther from the chord than the middle.
+    // 0.77 mm from the chord.
     const auto [type, rules, x, y, ignored] = GENERATE(table<ModelVolumeType, std::string, double, double, bool>({
         {ModelVolumeType::PRECISE_SEAM_CENTER, "", 1.2, 0.2, false},
         {ModelVolumeType::PRECISE_SEAM_CENTER, "apex", 0.2, 0.2, false},
         {ModelVolumeType::PRECISE_SEAM_LEFT, "center apex", 0.2, 0.2, false},
-        {ModelVolumeType::PRECISE_SEAM_CENTER, "apex0.25", 0.2, 0.2, false},
-        {ModelVolumeType::PRECISE_SEAM_CENTER, "apex0.3", 1.2, 0.2, false},
+        {ModelVolumeType::PRECISE_SEAM_CENTER, "apex0.7", 0.2, 0.2, false},
+        {ModelVolumeType::PRECISE_SEAM_CENTER, "apex0.8", 1.2, 0.2, false},
         // Left takes the start of the crossing, on the left face; its apex is reported and ignored.
         {ModelVolumeType::PRECISE_SEAM_LEFT, "apex", 0.2, 1., true},
         {ModelVolumeType::PRECISE_SEAM_CENTER, "left apex", 0.2, 1., true}}));

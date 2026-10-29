@@ -335,22 +335,18 @@ print and is tested on its own.
   the corner; Left and Right keep their end, as they place the seam beside a
   corner on purpose.
 - **Center apex.** A Center modifier that covers a corner unevenly puts the
-  seam in the middle of its crossing, on one side. `apex` then looks at the
-  crossing the Center type chose, after the magnet, which acts first
-  (`find_segment_apex()`): from the chord between its ends, the inner vertex
-  on the side of the middle that lies farthest from the chord's line wins when
-  it lies farther than the middle by more than the threshold. Unlike magnet
-  apex, it compares with the middle, so an arc keeps its seam. Vertices on the other side are skipped rather than
-  rejecting the crossing: an S-shaped crossing still has its corner on the
-  side of the middle. A middle within the threshold of the line, or a crossing
-  without inner vertices, keeps its place. The threshold defaults to the print
-  `resolution`, the deviation to which Orca simplifies the contour, so a
-  faceted arc does not move the seam from its middle to a facet vertex; a
-  number after `apex` replaces it, and it never falls below the snapping
-  tolerance. Equally far vertices go to the one nearest the middle, then rear
-  and left. Left and Right take an end of the crossing on purpose and ignore
-  apex with a warning. The cost is one pass over the vertices of the chosen
-  crossing.
+  seam in the middle of its crossing, on one side. `apex` then takes the rule
+  of magnet apex on the crossing the Center type chose, after the magnet,
+  which acts first (`find_segment_apex()`): the inner vertex farthest from the
+  chord between the crossing's ends, on either side, unless every vertex lies
+  within the threshold of the chord, when the middle stays. On an arc the
+  farthest vertex is next to the middle, so the seam moves by half a facet at
+  most. The threshold defaults to the print `resolution`, the deviation to
+  which Orca simplifies the contour; a number after `apex` replaces it, and it
+  never falls below the snapping tolerance. Equally far vertices go to the rear
+  and left one. Left and Right take an end of the crossing on purpose and
+  ignore apex with a warning. The cost is one pass over the vertices of the
+  perimeter.
 - **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
   `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, and runs
