@@ -1095,6 +1095,32 @@ TEST_CASE("id names a volume for scripts and changes nothing else", "[PreciseSea
     CHECK(apply_rules(late) == Layers{5});
 }
 
+TEST_CASE("A comment after a semicolon changes nothing, repeats freely and ends at a comma", "[PreciseSeam][Rules]")
+{
+    const LayerRules plain = field("odd, center apex, pr2");
+    for (const std::string text : {"odd, ;front face, center apex, pr2", ";a, odd, ; b ;c, center apex, ;, pr2, ;Front Face 2"}) {
+        CAPTURE(text);
+        const LayerRules rules = field(text);
+        CHECK(rules.diagnostics.empty());
+        CHECK(rules.type == plain.type);
+        CHECK(rules.priority == plain.priority);
+        CHECK(rules.apex == plain.apex);
+        CHECK(rules.operations.size() == plain.operations.size());
+        CHECK_FALSE(rules.id.has_value());
+    }
+    // A comma ends it: what follows is a rule again, and is reported when invalid.
+    CHECK(select({}, ";note, 1-3") == range(1, 3));
+    CHECK(count_code(field(";note, bad").diagnostics, Code::InvalidElement) == 1);
+    // In the name it ends with its block; the field goes on afterwards.
+    const LayerRules named = parse_layer_rules("front {ps=;left side, 5=ps}", "7");
+    CHECK(named.diagnostics.empty());
+    CHECK(apply_rules(named) == Layers{5, 7});
+    // A comment alone keeps every layer, as no rules do; before override it takes the first place.
+    CHECK_FALSE(field(";only a note").restricts_layers());
+    CHECK(count_code(field(";note, override").diagnostics, Code::InvalidElement) == 1);
+    CHECK(field("override, ;note").name_overridden);
+}
+
 TEST_CASE("id takes a quote as any character, and a comma still ends it", "[PreciseSeam][Rules]")
 {
     const LayerRules id = field("id\"tag,5");
