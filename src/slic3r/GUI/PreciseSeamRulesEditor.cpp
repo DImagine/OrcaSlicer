@@ -59,7 +59,8 @@ wxString precise_seam_rules_help()
               "the line between the crossing ends, if it lies deeper than the middle by more than the print resolution, or 0.05 mm "
               "with apex0.05; other types ignore it. magnet2apex is part of the magnet, magnet2, apex are two rules\n"
               "idName: a name for scripts; the rules ignore it\n"
-              ";text: a comment up to the next comma; the rules ignore it\n"
+              ";text: a comment; the rules ignore it. A comma ends it, as it ends every rule: "
+              "a comment cannot hold a comma, and the text after one is read as the next rule\n"
               "Layers are numbered as on the preview slider; when printing by object, from 1 for each object.\n"
               "Heights are measured from the bed by default, as on the slider. Decimals take a point: a comma separates rules.\n"
               "The name may hold more rules between {ps= and =ps}; override as the first rule here ignores them.");
