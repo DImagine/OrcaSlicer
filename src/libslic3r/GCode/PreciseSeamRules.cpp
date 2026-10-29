@@ -367,6 +367,20 @@ struct IdWord {
     }
 };
 
+// comment = ";" {any character except ","}: a note for the reader, as in G-code; it changes nothing, may repeat
+// and is never reported. No other keyword starts with ";".
+struct CommentWord {
+    struct Payload {};
+    static ParseStatus parse(Cursor &c, Payload &)
+    {
+        if (!c.eat(';'))
+            return ParseStatus::NotMine;
+        c.skip_rest();
+        return ParseStatus::Ok;
+    }
+    static void commit(const Payload &, LayerRules &, SourceState &, const ElementRef &) {}
+};
+
 // mode = ("incl" | "excl") [layer_set]: switches the mode of the source, and may add a set in it.
 struct ModeWord {
     struct Payload {
@@ -622,9 +636,10 @@ ParseStatus read_word(LayerRules &rules, SourceState &state, const ElementRef &e
 }
 
 // The families in the order they are tried. No keyword of the language is a prefix of another but those noted
-// at their families; id comes first, as any text may follow it, and a bare layer set last.
+// at their families; a comment and id come first, as any text may follow them, and a bare layer set last.
 using WordReader = ParseStatus (*)(LayerRules &, SourceState &, const ElementRef &);
-constexpr WordReader words[] = {read_word<IdWord>,       read_word<ModeWord>,  read_word<TypeWord>,
+constexpr WordReader words[] = {read_word<CommentWord>,  read_word<IdWord>,
+                                read_word<ModeWord>,     read_word<TypeWord>,
                                 read_word<PriorityWord>, read_word<FlagWord>,  read_word<OverrideWord>,
                                 read_word<RelayWord>,    read_word<OriginWord>, read_word<MagnetWord>,
                                 read_word<ApexWord>,     read_word<SetWord>};

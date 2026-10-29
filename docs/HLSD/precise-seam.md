@@ -129,6 +129,9 @@ print and is tested on its own.
   scripts: it is taken as a whole, with any text after `id`, before the
   grammar, and changes nothing. The first id keeps its trimmed original text
   with its case; a later id that differs after normalization is a warning.
+  An element that starts with `;` is a comment, as in G-code, taken the same
+  way up to the next comma; it changes nothing, may repeat and is never
+  reported. `*` would read better but Orca forbids it in names.
 - **Atomic elements.** An element that does not match the grammar as a whole,
   or has a number above 1 000 000, is dropped with a warning and changes
   nothing, not even the mode. Numbers are bounded before any arithmetic and a
