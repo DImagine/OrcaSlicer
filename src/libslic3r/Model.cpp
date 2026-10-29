@@ -28,11 +28,11 @@
 #include "Geometry.hpp"
 #include "MTUtils.hpp"
 #include "TriangleMeshSlicer.hpp"
-#include "GCode/PreciseSeamRules.hpp"
 #include "TriangleSelector.hpp"
 #include "MaterialType.hpp"
 #include "Tesselate.hpp"
 #include "MeshRepair.hpp"
+#include "GCode/PreciseSeamRules.hpp"
 
 #include "Format/AMF.hpp"
 #include "Format/svg.hpp"
