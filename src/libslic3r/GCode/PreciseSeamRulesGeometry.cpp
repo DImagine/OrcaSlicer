@@ -83,16 +83,17 @@ struct PerimeterPart {
     double span;
 };
 
-// magnet apex: the vertex strictly inside a part that lies farthest from the line through the part's ends, on
-// either side, or nullopt for a straight part, every vertex within the tolerance of that line, and for ends
-// that meet. Equally far vertices, within the tolerance, go to the rear and left one.
+// apex (magnet and Center): the vertex strictly inside a part that lies farthest from the line through the part's
+// ends, on either side, or nullopt for a straight part, every vertex within `straight` of that line, and for ends
+// that meet. Equally far vertices, within the snapping tolerance, go to the rear and left one.
 static std::optional<size_t> chord_tip(const Polygon &perimeter, const Lines &lines, const ArcLengths &arcs, const PerimeterPart &part,
-                                       double tolerance)
+                                       double straight)
 {
-    const double end    = part.from + part.span >= arcs.total() ? part.from + part.span - arcs.total() : part.from + part.span;
-    const Vec2d  a      = arcs.point(lines, part.from);
-    const Vec2d  chord  = arcs.point(lines, end) - a;
-    const double length = chord.norm();
+    const double tolerance = double(TOLERANCE_LINEAR);
+    const double end       = part.from + part.span >= arcs.total() ? part.from + part.span - arcs.total() : part.from + part.span;
+    const Vec2d  a         = arcs.point(lines, part.from);
+    const Vec2d  chord     = arcs.point(lines, end) - a;
+    const double length    = chord.norm();
     if (length <= tolerance)
         return std::nullopt;
     std::vector<std::pair<size_t, double>> inside;
@@ -105,7 +106,7 @@ static std::optional<size_t> chord_tip(const Polygon &perimeter, const Lines &li
         inside.emplace_back(k, distance);
         farthest = std::max(farthest, distance);
     }
-    if (farthest <= tolerance)
+    if (farthest <= std::max(straight, tolerance))
         return std::nullopt;
     std::optional<size_t> best;
     for (const auto &[k, distance] : inside)
@@ -126,10 +127,10 @@ static MagnetPoint part_middle(const Polygon &perimeter, const Lines &lines, con
     return MagnetPoint{Point(arcs.point(lines, at)), position};
 }
 
-// The tip of a part as a magnet point, or its middle when the part is straight.
-static MagnetPoint part_apex(const Polygon &perimeter, const Lines &lines, const ArcLengths &arcs, const PerimeterPart &part, double tolerance)
+// The tip of a part as a magnet point, or its middle when the part is straight within `straight`.
+static MagnetPoint part_apex(const Polygon &perimeter, const Lines &lines, const ArcLengths &arcs, const PerimeterPart &part, double straight)
 {
-    if (const std::optional<size_t> tip = chord_tip(perimeter, lines, arcs, part, tolerance))
+    if (const std::optional<size_t> tip = chord_tip(perimeter, lines, arcs, part, straight))
         return MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
     return part_middle(perimeter, lines, arcs, part);
 }
@@ -190,7 +191,7 @@ static std::optional<PerimeterPart> apex_part(const Polygon &perimeter, const Li
 
 std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                             const PerimeterSegment &touch, ModelVolumeType type, std::optional<double> limit,
-                                            bool apex)
+                                            bool apex, double straight)
 {
     if (!prepared.valid)
         return std::nullopt;
@@ -241,7 +242,7 @@ std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, c
         };
         const Vec2d centre = region->polygon.contour.centroid().cast<double>();
         if (const std::optional<PerimeterPart> part = apex_part(perimeter, lines, arcs, centre, found, to_modifier, limit, tolerance)) {
-            if (const std::optional<size_t> tip = chord_tip(perimeter, lines, arcs, *part, tolerance))
+            if (const std::optional<size_t> tip = chord_tip(perimeter, lines, arcs, *part, straight))
                 return MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
             return takes_middle ? part_middle(perimeter, lines, arcs, *part) : found;
         }
@@ -250,13 +251,13 @@ std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, c
     // is straight; Left and Right keep their end.
     if (!takes_middle)
         return found;
-    if (const std::optional<size_t> tip = chord_tip(perimeter, lines, arcs, PerimeterPart{begin, arcs.forward(begin, arcs.along(touch.end))}, tolerance))
+    if (const std::optional<size_t> tip = chord_tip(perimeter, lines, arcs, PerimeterPart{begin, arcs.forward(begin, arcs.along(touch.end))}, straight))
         return MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
     return found;
 }
 
 std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
-                                              const SegmentExtraction &extracted)
+                                              const SegmentExtraction &extracted, double straight)
 {
     if (!prepared.valid || !extracted.valid || extracted.full_containment || extracted.discarded_fragments > 0 ||
         extracted.segments.size() < 2)
@@ -265,11 +266,14 @@ std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared,
     const Lines      lines     = to_lines(perimeter);
     const ArcLengths arcs(lines);
     const double     tolerance = double(TOLERANCE_LINEAR);
-    // The middle of each crossing, by the region it lies in. Segments run forward from begin to end.
+    // The middle of each crossing and the total crossing length, by the region it lies in. Segments run forward
+    // from begin to end.
     std::vector<std::vector<double>> middles(modifier.size());
+    std::vector<double>              lengths(modifier.size(), 0.);
     for (const PerimeterSegment &segment : extracted.segments) {
         const double begin  = arcs.along(segment.begin);
-        double       middle = begin + arcs.forward(begin, arcs.along(segment.end)) / 2.;
+        const double length = arcs.forward(begin, arcs.along(segment.end));
+        double       middle = begin + length / 2.;
         if (middle >= arcs.total())
             middle -= arcs.total();
         const Point point(arcs.point(lines, middle));
@@ -280,12 +284,13 @@ std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared,
         if (region == modifier.end())
             return std::nullopt;
         middles[region - modifier.begin()].push_back(middle);
+        lengths[region - modifier.begin()] += length;
     }
     // A region crossed once makes the type act, apex or not.
     if (std::any_of(middles.begin(), middles.end(), [](const std::vector<double> &m) { return m.size() == 1; }))
         return std::nullopt;
     std::optional<MagnetPoint> best;
-    double                     best_distance = std::numeric_limits<double>::infinity();
+    double                     best_length = 0.;
     for (size_t r = 0; r < modifier.size(); ++r) {
         std::vector<double> &m = middles[r];
         if (m.size() < 2 || modifier[r].polygon.contour.area() == 0.)
@@ -298,14 +303,13 @@ std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared,
                 gap = i;
         const double from = m[(gap + 1) % m.size()];
         // Its tip from the chord between the outer middles, or its middle when it is straight.
-        const MagnetPoint point  = part_apex(perimeter, lines, arcs, PerimeterPart{from, arcs.total() - arcs.forward(m[gap], from)}, tolerance);
-        const Vec2d       centre = modifier[r].polygon.contour.centroid().cast<double>();
-        // Points of several regions: the one nearest the centroid of its own region, then the rear and left one.
-        const double distance = (point.point.cast<double>() - centre).norm();
-        if (!best || distance < best_distance - tolerance ||
-            (distance <= best_distance + tolerance && rear_then_left(point.point, best->point))) {
-            best          = point;
-            best_distance = distance;
+        const MagnetPoint point = part_apex(perimeter, lines, arcs, PerimeterPart{from, arcs.total() - arcs.forward(m[gap], from)}, straight);
+        // Several regions: the one crossed over the greatest total length, as Center takes the longest crossing,
+        // then the rear and left point.
+        if (!best || lengths[r] > best_length + tolerance ||
+            (lengths[r] >= best_length - tolerance && rear_then_left(point.point, best->point))) {
+            best        = point;
+            best_length = lengths[r];
         }
     }
     return best;
@@ -326,7 +330,7 @@ StrongSeamTarget find_segment_apex(const PreparedPerimeter &prepared, const Peri
 }
 
 std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
-                                             std::optional<double> limit, bool apex)
+                                             std::optional<double> limit, bool apex, double straight)
 {
     if (!prepared.valid)
         return std::nullopt;
@@ -513,7 +517,7 @@ std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, 
             const ArcLengths arcs(perimeter_lines);
             if (const std::optional<PerimeterPart> part = apex_part(perimeter, perimeter_lines, arcs, *centroids[loop], found, to_modifier,
                                                                     limit, tolerance))
-                return part_apex(perimeter, perimeter_lines, arcs, *part, tolerance);
+                return part_apex(perimeter, perimeter_lines, arcs, *part, straight);
             return found;
         }
     return found;
@@ -546,11 +550,16 @@ static const EffectiveModifier *apex_of(const EffectiveModifiers &effective, con
     return nullptr;
 }
 
-// The apex threshold: the rule's, or the print resolution; never below the snapping tolerance.
+// The straightness threshold of magnet apex: the print resolution, never below the snapping tolerance.
+static double resolution_threshold(const Layer &layer)
+{
+    return std::max(scale_(layer.object()->print()->config().resolution.value), double(TOLERANCE_LINEAR));
+}
+
+// The straightness threshold of Center apex: the rule's, or the print resolution; never below the snapping tolerance.
 static double apex_threshold(const EffectiveModifier &modifier, const Layer &layer)
 {
-    const double threshold = modifier.apex_threshold ? *modifier.apex_threshold : scale_(layer.object()->print()->config().resolution.value);
-    return std::max(threshold, double(TOLERANCE_LINEAR));
+    return modifier.apex_threshold ? std::max(*modifier.apex_threshold, double(TOLERANCE_LINEAR)) : resolution_threshold(layer);
 }
 
 // Whether a magnet acts instead of the type: the modifier does not cross the perimeter. Full containment
@@ -573,11 +582,11 @@ static bool magnet_acts(const SegmentExtraction &extracted, const EffectiveModif
 // type takes on the touch.
 static std::optional<MagnetPoint> acting_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &regions,
                                                       const SegmentExtraction &extracted, const EffectiveModifier &magnet,
-                                                      ModelVolumeType type)
+                                                      ModelVolumeType type, double straight)
 {
     if (magnet_acts(extracted))
-        return find_magnet_point(prepared, regions, magnet.magnet_limit, magnet.magnet_apex);
-    return find_touch_point(prepared, regions, extracted.segments.front(), type, magnet.magnet_limit, magnet.magnet_apex);
+        return find_magnet_point(prepared, regions, magnet.magnet_limit, magnet.magnet_apex, straight);
+    return find_touch_point(prepared, regions, extracted.segments.front(), type, magnet.magnet_limit, magnet.magnet_apex, straight);
 }
 
 // Records one extraction for the warnings: the type of a modifier with a discarded fragment, the
@@ -624,7 +633,7 @@ std::optional<Point> insert_strong_seam_point_by_rules(const std::vector<const M
             prepared, it->second[layer_id], type, {layer, modifier, warnings, quiet});
         // A magnet that does not cross the perimeter puts the seam at the nearest point, whatever the type.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet_acts(extracted, *magnet)) {
-            const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet, type);
+            const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet, type, resolution_threshold(*layer));
             record_extraction(warnings, modifier, type, extracted, point.has_value());
             if (!point)
                 continue;
@@ -636,7 +645,7 @@ std::optional<Point> insert_strong_seam_point_by_rules(const std::vector<const M
         record_extraction(warnings, modifier, type, extracted);
         // apex: two or more crossings put the seam at the tip of the corner between them.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet->magnet_apex)
-            if (const std::optional<MagnetPoint> tip = find_crossing_apex(prepared, it->second[layer_id], extracted)) {
+            if (const std::optional<MagnetPoint> tip = find_crossing_apex(prepared, it->second[layer_id], extracted, resolution_threshold(*layer))) {
                 const auto [seam_point, seam_index] = insert_point_into_perimeter(tip->point, tip->position.edge_index, polygon);
                 refine_at_vertex(seam_index, +1, polygon);
                 refine_at_vertex(seam_index, -1, polygon);
@@ -708,7 +717,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments_by_rules(const s
         const auto type = convert_weak_modifier_type(volume_type);
         // A magnet that does not cross the perimeter types its nearest point only: a zone of one point.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier_volume); magnet != nullptr && magnet_acts(extracted, *magnet)) {
-            const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet, volume_type);
+            const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet, volume_type, resolution_threshold(*layer));
             record_extraction(warnings, modifier_volume, volume_type, extracted, point.has_value());
             if (point)
                 result.push_back({type, point->point, point->position, point->point, point->position, false, modifier_volume});
@@ -717,7 +726,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments_by_rules(const s
         record_extraction(warnings, modifier_volume, volume_type, extracted);
         // apex: two or more crossings type the tip of the corner between them only.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier_volume); magnet != nullptr && magnet->magnet_apex)
-            if (const std::optional<MagnetPoint> tip = find_crossing_apex(prepared, it->second[layer_id], extracted)) {
+            if (const std::optional<MagnetPoint> tip = find_crossing_apex(prepared, it->second[layer_id], extracted, resolution_threshold(*layer))) {
                 result.push_back({type, tip->point, tip->position, tip->point, tip->position, false, modifier_volume});
                 continue;
             }

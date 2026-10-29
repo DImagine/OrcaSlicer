@@ -1111,6 +1111,10 @@ TEST_CASE("A comment after a semicolon changes nothing, repeats freely and ends 
     // A comma ends it: what follows is a rule again, and is reported when invalid.
     CHECK(select({}, ";note, 1-3") == range(1, 3));
     CHECK(count_code(field(";note, bad").diagnostics, Code::InvalidElement) == 1);
+    // Only at the start of an element: after a set, without a comma, it breaks the set, which is then lost.
+    const LayerRules trailing = field("5-10 ;note");
+    CHECK(count_code(trailing.diagnostics, Code::InvalidElement) == 1);
+    CHECK_FALSE(trailing.restricts_layers());
     // In the name it ends with its block; the field goes on afterwards.
     const LayerRules named = parse_layer_rules("front {ps=;left side, 5=ps}", "7");
     CHECK(named.diagnostics.empty());

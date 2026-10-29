@@ -302,8 +302,10 @@ print and is tested on its own.
   that holds the corner. Every case of apex then takes the same rule on its
   part: the vertex strictly inside it farthest from the chord between its ends,
   on either side, and the middle of the part when it is straight, every vertex
-  within the tolerance of the chord. Equally far vertices go to the rear and
-  left one. The chord, not the distance from C, finds a corner that lies on the
+  within the print `resolution` of the chord, the deviation to which Orca
+  simplifies the contour, so that magnet and Center apex mean the same by
+  straight. Equally far vertices, within the snapping tolerance, go to the rear
+  and left one. The chord, not the distance from C, finds a corner that lies on the
   modifier's side of the wall, where it is the point nearest to C. A round wall
   has no corner, but its arc bulges from the chord: the seam then goes to the
   middle of the arc, which is accepted. Without Q, P stays. The cost is a pass
@@ -319,8 +321,9 @@ print and is tested on its own.
   perimeter, and the part that holds them all without its longest gap, the
   shortest such part, takes the chord rule above, its ends being the outer
   middles; on a straight wall the seam goes to the middle between the
-  crossings. Of the points of several regions the one nearest its own
-  centroid wins, then rear and left. Regions that do not cross take no part then.
+  crossings. Of several regions the one crossed over the greatest total length
+  wins, as Center takes the longest crossing, then the rear and left point.
+  Regions that do not cross take no part then.
   A length after `apex`, as in `magnet2apex0.5`, takes a single crossing
   shorter than it for a touch, so the magnet acts: nearing a corner, the
   modifier touches one side before the other, and the type would move the
@@ -343,7 +346,8 @@ print and is tested on its own.
   farthest vertex is next to the middle, so the seam moves by half a facet at
   most. The threshold defaults to the print `resolution`, the deviation to
   which Orca simplifies the contour; a number after `apex` replaces it, and it
-  never falls below the snapping tolerance. Equally far vertices go to the rear
+  never falls below the snapping tolerance. It only says when the crossing is
+  straight: equally far vertices, within the snapping tolerance, go to the rear
   and left one. Left and Right take an end of the crossing on purpose and
   ignore apex with a warning. The cost is one pass over the vertices of the
   perimeter.

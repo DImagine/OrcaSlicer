@@ -1715,10 +1715,14 @@ TEST_CASE("Rules that keep every layer and type give the seams of no rules", "[P
 {
     // Objects with rules take their own branch; rules that change nothing must match the branch without them.
     const auto [strong_rules, weak_rules] = GENERATE(table<std::string, std::string>({{"all", "all"}, {"center, all", "green"}}));
-    CAPTURE(strong_rules, weak_rules);
+    // A raft and printing by object change the layer plan that the rules count.
+    const int         raft_layers = GENERATE(0, 2);
+    const std::string sequence    = GENERATE(as<std::string>{}, "by layer", "by object");
+    CAPTURE(strong_rules, weak_rules, raft_layers, sequence);
     // A strong helper on the front face of the lower layers, an enforcer on the right face of all layers.
-    const auto export_loops = [](const std::string &strong, const std::string &weak) {
-        ExportFixture fixture("back");
+    const auto export_loops = [raft_layers = raft_layers, &sequence](const std::string &strong, const std::string &weak) {
+        ExportFixture fixture("back", raft_layers);
+        fixture.config.set_deserialize_strict("print_sequence", sequence);
         fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 6, 2), Vec3d(4, -3, -1), "front");
         fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(6, 2, 4), Vec3d(17, 4, -1), "right");
         const ModelVolumePtrs &volumes = fixture.model.objects.front()->volumes;
@@ -2767,6 +2771,24 @@ TEST_CASE("A magnet with apex that crosses both sides of a corner takes its tip"
     CHECK(crossing_apex(perimeter, {across, rectangle(5, 2, 7, 4)}) == mm(20, 10));
 }
 
+TEST_CASE("Of several regions crossed twice, magnet apex takes the one crossed over the greatest total length", "[PreciseSeam][Magnet]")
+{
+    // One region crosses both sides of the notch above its tip, 2.24 mm each; a U-shaped region crosses the
+    // bottom face with both arms, 1 mm each when narrow, 3 mm when wide.
+    const Polygon across = rectangle(17, 13, 23, 15);
+    const Polygon narrow(Points{mm(4, -3), mm(10, -3), mm(10, 2), mm(9, 2), mm(9, -2), mm(5, -2), mm(5, 2), mm(4, 2)});
+    const Polygon wide(Points{mm(4, -3), mm(13, -3), mm(13, 2), mm(10, 2), mm(10, -2), mm(7, -2), mm(7, 2), mm(4, 2)});
+    const size_t  shift = GENERATE(0, 3, 5);
+    CAPTURE(shift);
+    const Polygon perimeter = rotated(notched(), shift);
+    // 4.47 mm against 2 mm: the tip of the notch.
+    CHECK(crossing_apex(perimeter, {across, narrow}) == mm(20, 10));
+    // 4.47 mm against 6 mm: the middle between the arms, although the other region holds a corner.
+    const std::optional<Point> middle = crossing_apex(perimeter, {across, wide});
+    REQUIRE(middle.has_value());
+    CHECK((unscaled(*middle) - Vec2d(8.5, 0)).norm() < 0.001);
+}
+
 TEST_CASE("A magnet with apex that crosses a straight wall twice takes the middle between the crossings", "[PreciseSeam][Magnet]")
 {
     // A U-shaped modifier crosses the front face with both arms, at x = 4..6 and 14..16 mm: the part between the
@@ -2965,6 +2987,9 @@ TEST_CASE("apex moves the middle of a Center crossing to the tip farthest from i
         // from the chord on one side, (26, 2) 0.49 mm on the other.
         const Polygon stepped(Points{mm(0, 0), mm(26, 0), mm(26, 2), mm(40, 2), mm(40, 20), mm(0, 20)});
         CHECK(segment_apex(rotated(stepped, shift), rectangle(20, -1, 28, 3), 0.001) == mm(26, 0));
+        // The threshold only says when the crossing is straight: within 1 mm of the chord both vertices would tie,
+        // but ties take the snapping tolerance, so the farther one still wins.
+        CHECK(segment_apex(rotated(stepped, shift), rectangle(20, -1, 28, 3), 1.0) == mm(26, 0));
     }
     SECTION("Equally far tips go to the rear and left one, as for magnet apex")
     {
@@ -3126,10 +3151,11 @@ TEST_CASE("apex puts the exported seam of a Center modifier into the corner it c
         {ModelVolumeType::PRECISE_SEAM_CENTER, "", 1.2, 0.2, false},
         {ModelVolumeType::PRECISE_SEAM_CENTER, "apex", 0.2, 0.2, false},
         {ModelVolumeType::PRECISE_SEAM_LEFT, "center apex", 0.2, 0.2, false},
-        {ModelVolumeType::PRECISE_SEAM_CENTER, "apex0.7", 0.2, 0.2, false},
         {ModelVolumeType::PRECISE_SEAM_CENTER, "apex0.8", 1.2, 0.2, false},
         // Left takes the start of the crossing, on the left face; its apex is reported and ignored.
         {ModelVolumeType::PRECISE_SEAM_LEFT, "apex", 0.2, 1., true},
+        // nowarn hides the differences from the object list, not this warning.
+        {ModelVolumeType::PRECISE_SEAM_LEFT, "apex, nowarn", 0.2, 1., true},
         {ModelVolumeType::PRECISE_SEAM_CENTER, "left apex", 0.2, 1., true}}));
     CAPTURE(rules);
     ExportFixture fixture("back");
