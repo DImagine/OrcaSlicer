@@ -2713,12 +2713,22 @@ TEST_CASE("A magnet with apex keeps the nearest point where no corner holds the 
     CHECK(magnet_point(perimeter, Polygons{rectangle(8, -5, 12, -3)}, std::nullopt, true) == mm(10, 0));
     // Outside a corner the nearest point is the corner itself.
     CHECK(magnet_point(perimeter, Polygons{rectangle(21, 21, 22, 22)}, std::nullopt, true) == mm(20, 20));
-    // Off the centre of a round hole the farthest point of the part is its end, not a vertex inside it.
+}
+
+TEST_CASE("A magnet with apex on a round wall takes the middle of the arc from P to Q", "[PreciseSeam][Magnet]")
+{
+    // A round hole has no corner, but the arc from P to Q bulges from its chord: the vertex farthest from the
+    // chord is the middle of the arc, about 36 degrees round from P at (15, 10), where the ray to Q meets the
+    // wall about 72 degrees round. Two vertices lie that far within the tolerance.
     Polygon hole;
     for (int i = 0; i < 64; ++i)
         hole.points.push_back(mm(10 + 5 * std::cos(2 * PI * i / 64), 10 + 5 * std::sin(2 * PI * i / 64)));
-    const Polygon dot = rectangle(11.4, 9.9, 11.6, 10.1);
-    CHECK(magnet_point(hole, Polygons{dot}, std::nullopt, true) == magnet_point(hole, Polygons{dot}));
+    const Polygon              dot   = rectangle(11.4, 9.9, 11.6, 10.1);
+    const std::optional<Point> plain = magnet_point(hole, Polygons{dot});
+    REQUIRE(plain.has_value());
+    CHECK((unscaled(*plain) - Vec2d(15, 10)).norm() < 0.01);
+    const std::optional<Point> tip = magnet_point(hole, Polygons{dot}, std::nullopt, true);
+    CHECK((tip == hole.points[6] || tip == hole.points[7]));
 }
 
 namespace {
@@ -2755,6 +2765,60 @@ TEST_CASE("A magnet with apex that crosses both sides of a corner takes its tip"
     CHECK_FALSE(crossing_apex(perimeter, {across, rectangle(5, -1, 7, 1)}).has_value());
     // A loop that does not cross takes no part; the crossing one still finds the tip.
     CHECK(crossing_apex(perimeter, {across, rectangle(5, 2, 7, 4)}) == mm(20, 10));
+}
+
+TEST_CASE("A magnet with apex that crosses a straight wall twice takes the middle between the crossings", "[PreciseSeam][Magnet]")
+{
+    // A U-shaped modifier crosses the front face with both arms, at x = 4..6 and 14..16 mm: the part between the
+    // middles of the crossings is straight, so the seam goes to its middle, between the arms.
+    const Polygon u(Points{mm(4, -3), mm(16, -3), mm(16, 2), mm(14, 2), mm(14, -2), mm(6, -2), mm(6, 2), mm(4, 2)});
+    const size_t  shift = GENERATE(0, 1, 3);
+    CAPTURE(shift);
+    const std::optional<Point> middle = crossing_apex(rotated(rectangle(0, 0, 20, 20), shift), {u});
+    REQUIRE(middle.has_value());
+    CHECK((unscaled(*middle) - Vec2d(10, 0)).norm() < 0.001);
+}
+
+TEST_CASE("A magnet with apex that touches an inner corner takes the vertex farthest from the chord of the touch", "[PreciseSeam][Magnet]")
+{
+    // The round modifier stands in the body by its inner corner (10, 10) and covers it unevenly: 0.17 mm of the
+    // wall above it and 0.3 mm of the wall to its left, one touch shorter than 1 mm. The corner is the point
+    // nearest the modifier's centre, so only the chord of the touch finds it; the rays meet no wall within 2 mm.
+    Polygon round;
+    for (int i = 0; i < 64; ++i)
+        round.points.push_back(mm(10.6 + 1.5 * std::cos(2 * PI * i / 64), 8.8 + 1.5 * std::sin(2 * PI * i / 64)));
+    SeamFixture                     fixture;
+    PreciseSeam::EffectiveModifiers effective;
+    const auto add = [&](ModelVolumeType type) {
+        const ModelVolume             *volume = fixture.add(type, {round});
+        PreciseSeam::EffectiveModifier rule   = magnet_rule(type, 2.);
+        rule.magnet_apex        = true;
+        rule.magnet_apex_length = scale_(1.);
+        effective.emplace(volume, rule);
+        return volume;
+    };
+    const auto seam = [&](ModelVolumeType type) {
+        Polygon perimeter = right_heavy_l();
+        return PreciseSeam::insert_strong_seam_point_by_rules({add(type)}, perimeter, PreciseSeam::PreparedPerimeter(perimeter), fixture.layer,
+                                                              fixture.cache, nullptr, effective);
+    };
+    // Center leaves the middle of the touch, 0.06 mm along the left wall, for the corner.
+    CHECK(seam(ModelVolumeType::PRECISE_SEAM_CENTER) == mm(10, 10));
+    // Left and Right keep the start and the end of the touch.
+    const std::optional<Point> left  = seam(ModelVolumeType::PRECISE_SEAM_LEFT);
+    const std::optional<Point> right = seam(ModelVolumeType::PRECISE_SEAM_RIGHT);
+    REQUIRE(left.has_value());
+    REQUIRE(right.has_value());
+    CHECK((unscaled(*left) - Vec2d(10, 10.17)).norm() < 0.02);
+    CHECK((unscaled(*right) - Vec2d(9.7, 10)).norm() < 0.02);
+    // A weak one types the corner alone, as Center places it.
+    const ModelVolume *green     = add(ModelVolumeType::PRECISE_SEAM_ENFORCED);
+    Polygon            perimeter = right_heavy_l();
+    const auto segments = PreciseSeam::collect_weak_modifier_segments_by_rules({green}, perimeter, PreciseSeam::PreparedPerimeter(perimeter),
+                                                                               fixture.layer, fixture.cache, nullptr, effective);
+    REQUIRE(segments.size() == 1);
+    CHECK(segments.front().left_point == mm(10, 10));
+    CHECK(segments.front().right_point == mm(10, 10));
 }
 
 TEST_CASE("A magnet with apex takes a single crossing shorter than its length for a touch", "[PreciseSeam][Magnet]")

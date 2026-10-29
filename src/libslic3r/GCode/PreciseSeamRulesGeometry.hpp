@@ -27,22 +27,25 @@ struct MagnetPoint {
 // Point of a prepared, unchanged perimeter nearest to the boundaries of the modifier's regions, or nullopt
 // when there are none or all are farther than `limit` (scaled units, compared with the snapping tolerance).
 // Equally near points go to the one nearest the centroid of its modifier loop, then of the perimeter,
-// then to the rear and left one. With `apex`, the point then moves to the vertex of a corner that the modifier
-// stands in, when there is one within reach.
+// then to the rear and left one. With `apex`, the point P then moves along the part of the perimeter from P to
+// Q, the first crossing of a ray square to the line from the modifier centroid to P, within reach: to its vertex
+// farthest from the chord PQ, or to its middle when the part is straight. Without Q the point stays.
 std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                              std::optional<double> limit, bool apex = false);
 
 // The point of a magnet with apex whose only crossing is shorter than its length, a touch: the point the type
 // takes on that crossing (its start for Left, its end for Right, its middle for Center and the weak types),
-// then the tip of the corner the modifier stands in as find_magnet_point() looks for it.
+// then moved along the part from it to Q as find_magnet_point() does, Left and Right keeping their end on a
+// straight part. Without Q, Center and the weak types take the vertex of the touch farthest from its chord.
 std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                             const PerimeterSegment &touch, ModelVolumeType type, std::optional<double> limit,
                                             bool apex);
 
 // magnet apex across crossings: where every region of the modifier that crosses the perimeter does so two or
-// more times, the tip of the corner between the middles of its crossings, on the shortest part of the
-// perimeter that holds them all; the tip nearest the centroid of its region wins. nullopt where the type acts:
-// fewer than two crossings, a region crossed once, a discarded fragment, or no vertex deeper than the ends.
+// more times, on the shortest part of the perimeter that holds the middles of its crossings, the vertex
+// farthest from the chord between the outer middles, or the middle of the part when it is straight; the point
+// nearest the centroid of its region wins. nullopt where the type acts: fewer than two crossings, a region
+// crossed once or a discarded fragment.
 std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                               const SegmentExtraction &extracted);
 

@@ -299,15 +299,16 @@ print and is tested on its own.
   modifier's boundaries, as P is, which keeps P outside a corner, at a wall and
   against a far crossing of a complex perimeter. The ray halfway between CP and
   CQ crosses the perimeter at R, which picks the part of the loop from P to Q
-  that holds the corner. The farthest point from C on a polyline is a vertex,
-  so the vertices strictly inside that part are compared; when the deepest is
-  not deeper than both ends by more than the tolerance there is no corner, and
-  P stays. Equally deep vertices go to the one nearest the perimeter centroid,
-  then rear and left. A rounded corner works the same way, its deepest vertex
-  winning; a modifier at the very centre of a rounding or of a round hole gets
-  a point decided by the polygon, which the help covers by asking for a
-  modifier wider than the rounding. The cost is a pass over the edges per ray
-  and one over the vertices, after the magnet's own search.
+  that holds the corner. Every case of apex then takes the same rule on its
+  part: the vertex strictly inside it farthest from the chord between its ends,
+  on either side, and the middle of the part when it is straight, every vertex
+  within the tolerance of the chord. Equally far vertices go to the rear and
+  left one. The chord, not the distance from C, finds a corner that lies on the
+  modifier's side of the wall, where it is the point nearest to C. A round wall
+  has no corner, but its arc bulges from the chord: the seam then goes to the
+  middle of the arc, which is accepted. Without Q, P stays. The cost is a pass
+  over the edges per ray and one over the vertices, after the magnet's own
+  search.
   Full containment counts as no crossing here too. A modifier moved close to a
   corner crosses both sides, and the tip lies outside it, between the
   crossings: where the magnet gives way to the type, `find_crossing_apex()`
@@ -316,10 +317,10 @@ print and is tested on its own.
   region holds leaves the type to act, as one crossing does without apex. For
   each region crossed two or more times the middles are sorted along the
   perimeter, and the part that holds them all without its longest gap, the
-  shortest such part, is searched as above from the region's contour centroid,
-  its ends being the outer middles. Of the tips of several regions the one
-  nearest its own centroid wins, then rear and left; with no tip deeper than
-  its ends the type acts. Regions that do not cross take no part then.
+  shortest such part, takes the chord rule above, its ends being the outer
+  middles; on a straight wall the seam goes to the middle between the
+  crossings. Of the points of several regions the one nearest its own
+  centroid wins, then rear and left. Regions that do not cross take no part then.
   A length after `apex`, as in `magnet2apex0.5`, takes a single crossing
   shorter than it for a touch, so the magnet acts: nearing a corner, the
   modifier touches one side before the other, and the type would move the
@@ -328,16 +329,18 @@ print and is tested on its own.
   is the one its type takes on the crossing, its start for Left, its end for
   Right, its middle for Center and the weak types, and apex then looks from
   it; not the point nearest to the boundary: over a crossing those are the
-  crossing's ends, and a corner poking into the modifier lies closer to its
-  centroid than they do.
+  crossing's ends. On a straight part P to Q, Left and Right keep their end.
+  Without Q, Center and the weak types take the touch itself as the part, so a
+  corner inside the touch wins over its middle, which an uneven cover moves off
+  the corner; Left and Right keep their end, as they place the seam beside a
+  corner on purpose.
 - **Center apex.** A Center modifier that covers a corner unevenly puts the
   seam in the middle of its crossing, on one side. `apex` then looks at the
   crossing the Center type chose, after the magnet, which acts first
   (`find_segment_apex()`): from the chord between its ends, the inner vertex
   on the side of the middle that lies farthest from the chord's line wins when
-  it lies farther than the middle by more than the threshold. The chord, not
-  the modifier's centroid as for the magnet, keeps the result independent of
-  the modifier's shape. Vertices on the other side are skipped rather than
+  it lies farther than the middle by more than the threshold. Unlike magnet
+  apex, it compares with the middle, so an arc keeps its seam. Vertices on the other side are skipped rather than
   rejecting the crossing: an S-shaped crossing still has its corner on the
   side of the middle. A middle within the threshold of the line, or a crossing
   without inner vertices, keeps its place. The threshold defaults to the print
