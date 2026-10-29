@@ -77,54 +77,71 @@ struct ArcLengths {
     }
 };
 
-// The tip of a corner: the vertex strictly inside the part `span` long forward from `from` that is farthest
-// from `centre`, when it lies deeper than `ends` (the depth of the part's ends) by more than the tolerance.
-// The distance along a segment is convex, so no point between vertices lies deeper. Equally deep vertices go
-// to the one nearest the perimeter centroid, then to the rear and left one.
-static std::optional<size_t> deepest_vertex(const Polygon &perimeter, const ArcLengths &arcs, double from, double span,
-                                            const Vec2d &centre, double ends, double tolerance)
+// A part of a perimeter, `span` long forward from the arc length `from`.
+struct PerimeterPart {
+    double from;
+    double span;
+};
+
+// magnet apex: the vertex strictly inside a part that lies farthest from the line through the part's ends, on
+// either side, or nullopt for a straight part, every vertex within the tolerance of that line, and for ends
+// that meet. Equally far vertices, within the tolerance, go to the rear and left one.
+static std::optional<size_t> chord_tip(const Polygon &perimeter, const Lines &lines, const ArcLengths &arcs, const PerimeterPart &part,
+                                       double tolerance)
 {
-    std::vector<std::pair<size_t, double>> inside;
-    double                                 deepest = 0.;
-    for (size_t k = 0; k < perimeter.size(); ++k) {
-        const double offset = arcs.forward(from, arcs.start[k]);
-        if (offset <= 0. || offset >= span)
-            continue;
-        const double distance = (perimeter[k].cast<double>() - centre).norm();
-        inside.emplace_back(k, distance);
-        deepest = std::max(deepest, distance);
-    }
-    if (inside.empty() || deepest <= ends + tolerance)
+    const double end    = part.from + part.span >= arcs.total() ? part.from + part.span - arcs.total() : part.from + part.span;
+    const Vec2d  a      = arcs.point(lines, part.from);
+    const Vec2d  chord  = arcs.point(lines, end) - a;
+    const double length = chord.norm();
+    if (length <= tolerance)
         return std::nullopt;
-    std::vector<size_t> candidates;
-    for (const auto &[k, distance] : inside)
-        if (distance >= deepest - tolerance)
-            candidates.push_back(k);
-    if (perimeter.area() != 0.) {
-        const Vec2d centroid    = perimeter.centroid().cast<double>();
-        const auto  to_centroid = [&](size_t k) { return (perimeter[k].cast<double>() - centroid).norm(); };
-        double      nearest     = std::numeric_limits<double>::infinity();
-        for (size_t k : candidates)
-            nearest = std::min(nearest, to_centroid(k));
-        candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](size_t k) { return to_centroid(k) > nearest + tolerance; }),
-                         candidates.end());
+    std::vector<std::pair<size_t, double>> inside;
+    double                                 farthest = 0.;
+    for (size_t k = 0; k < perimeter.size(); ++k) {
+        const double offset = arcs.forward(part.from, arcs.start[k]);
+        if (offset <= 0. || offset >= part.span)
+            continue;
+        const double distance = std::abs(cross2(chord, perimeter[k].cast<double>() - a)) / length;
+        inside.emplace_back(k, distance);
+        farthest = std::max(farthest, distance);
     }
-    size_t best = candidates.front();
-    for (size_t k : candidates)
-        if (rear_then_left(perimeter[k], perimeter[best]))
+    if (farthest <= tolerance)
+        return std::nullopt;
+    std::optional<size_t> best;
+    for (const auto &[k, distance] : inside)
+        if (distance >= farthest - tolerance && (!best || rear_then_left(perimeter[k], perimeter[*best])))
             best = k;
     return best;
 }
 
-// magnet apex: the vertex of the corner the modifier stands in, from its loop centroid `centre` and the
-// nearest point `nearest`, or nullopt to keep that point. Q is the first crossing of a ray from the centre
-// square to the line to P, within the limit as P is; the ray halfway between them picks which part of the
-// loop from P to Q holds the corner; its vertex farthest from the centre wins when it lies deeper than P and Q.
+// The point halfway along a part.
+static MagnetPoint part_middle(const Polygon &perimeter, const Lines &lines, const ArcLengths &arcs, const PerimeterPart &part)
+{
+    double at = part.from + part.span / 2.;
+    if (at >= arcs.total())
+        at -= arcs.total();
+    PerimeterPosition position = arcs.position(at);
+    if (position.parameter == 1.)
+        position = {(position.edge_index + 1) % perimeter.size(), 0.};
+    return MagnetPoint{Point(arcs.point(lines, at)), position};
+}
+
+// The tip of a part as a magnet point, or its middle when the part is straight.
+static MagnetPoint part_apex(const Polygon &perimeter, const Lines &lines, const ArcLengths &arcs, const PerimeterPart &part, double tolerance)
+{
+    if (const std::optional<size_t> tip = chord_tip(perimeter, lines, arcs, part, tolerance))
+        return MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
+    return part_middle(perimeter, lines, arcs, part);
+}
+
+// magnet apex: the part of the perimeter from the nearest point P to Q, or nullopt without Q. From the
+// centroid `centre` of the modifier loop, Q is the first crossing of a ray square to the line to P, within the
+// limit as P is; the ray halfway between them picks which part of the loop from P to Q holds the corner.
 // `modifier_distance` gives the distance of a point to the modifier's boundaries.
 template<typename Distance>
-static std::optional<MagnetPoint> find_apex_point(const Polygon &perimeter, const Lines &perimeter_lines, const Vec2d &centre,
-                                                  const MagnetPoint &nearest, const Distance &modifier_distance,
-                                                  std::optional<double> limit, double tolerance)
+static std::optional<PerimeterPart> apex_part(const Polygon &perimeter, const Lines &perimeter_lines, const ArcLengths &arcs,
+                                              const Vec2d &centre, const MagnetPoint &nearest, const Distance &modifier_distance,
+                                              std::optional<double> limit, double tolerance)
 {
     const size_t count = perimeter.size();
     const Vec2d  to_p  = nearest.point.cast<double>() - centre;
@@ -165,16 +182,10 @@ static std::optional<MagnetPoint> find_apex_point(const Polygon &perimeter, cons
         return std::nullopt;
 
     // The part from P to Q that holds R, taken forward: backward from P is forward from Q.
-    const ArcLengths arcs(perimeter_lines);
-    const double     sp    = arcs.along(nearest.position);
-    const double     sq    = arcs.along(q->position);
-    const bool       ahead = arcs.forward(sp, arcs.along(r->position)) <= arcs.forward(sp, sq);
-    const double     ends  = std::max(to_p.norm(), q->distance);
-    const std::optional<size_t> tip = ahead ? deepest_vertex(perimeter, arcs, sp, arcs.forward(sp, sq), centre, ends, tolerance) :
-                                              deepest_vertex(perimeter, arcs, sq, arcs.forward(sq, sp), centre, ends, tolerance);
-    if (!tip)
-        return std::nullopt;
-    return MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
+    const double sp    = arcs.along(nearest.position);
+    const double sq    = arcs.along(q->position);
+    const bool   ahead = arcs.forward(sp, arcs.along(r->position)) <= arcs.forward(sp, sq);
+    return ahead ? PerimeterPart{sp, arcs.forward(sp, sq)} : PerimeterPart{sq, arcs.forward(sq, sp)};
 }
 
 std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
@@ -205,30 +216,43 @@ std::optional<MagnetPoint> find_touch_point(const PreparedPerimeter &prepared, c
     const MagnetPoint found{seam, position};
     if (!apex)
         return found;
+    // Left and Right keep their end where a part is straight; the other types take its middle.
+    const bool takes_middle = type != ModelVolumeType::PRECISE_SEAM_LEFT && type != ModelVolumeType::PRECISE_SEAM_RIGHT;
     // apex looks from the centroid of the region that holds the touch, found by its middle: its ends lie on the
     // region's boundary.
     const auto region = std::find_if(modifier.begin(), modifier.end(), [&middle_point](const ModifierRegion &r) {
         return r.bounds.contains(middle_point) && r.polygon.contains(middle_point);
     });
-    if (region == modifier.end() || region->polygon.contour.area() == 0.)
-        return found;
-    Lines modifier_lines;
-    for (const ModifierRegion &r : modifier) {
-        if (r.polygon.empty())
-            continue;
-        append(modifier_lines, to_lines(r.polygon.contour));
-        for (const Polygon &hole : r.polygon.holes)
-            append(modifier_lines, to_lines(hole));
+    if (region != modifier.end() && region->polygon.contour.area() != 0.) {
+        Lines modifier_lines;
+        for (const ModifierRegion &r : modifier) {
+            if (r.polygon.empty())
+                continue;
+            append(modifier_lines, to_lines(r.polygon.contour));
+            for (const Polygon &hole : r.polygon.holes)
+                append(modifier_lines, to_lines(hole));
+        }
+        const auto tree        = AABBTreeLines::build_aabb_tree_over_indexed_lines(modifier_lines);
+        const auto to_modifier = [&](const Vec2d &point) {
+            size_t       line = 0;
+            Vec2d        nearest;
+            const double squared = AABBTreeLines::squared_distance_to_indexed_lines(modifier_lines, tree, point, line, nearest);
+            return squared < 0. ? std::numeric_limits<double>::infinity() : std::sqrt(squared);
+        };
+        const Vec2d centre = region->polygon.contour.centroid().cast<double>();
+        if (const std::optional<PerimeterPart> part = apex_part(perimeter, lines, arcs, centre, found, to_modifier, limit, tolerance)) {
+            if (const std::optional<size_t> tip = chord_tip(perimeter, lines, arcs, *part, tolerance))
+                return MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
+            return takes_middle ? part_middle(perimeter, lines, arcs, *part) : found;
+        }
     }
-    const auto tree        = AABBTreeLines::build_aabb_tree_over_indexed_lines(modifier_lines);
-    const auto to_modifier = [&](const Vec2d &point) {
-        size_t       line = 0;
-        Vec2d        nearest;
-        const double squared = AABBTreeLines::squared_distance_to_indexed_lines(modifier_lines, tree, point, line, nearest);
-        return squared < 0. ? std::numeric_limits<double>::infinity() : std::sqrt(squared);
-    };
-    return find_apex_point(perimeter, lines, region->polygon.contour.centroid().cast<double>(), found, to_modifier, limit, tolerance)
-        .value_or(found);
+    // Without Q the touch itself is the part: Center and the weak types take its tip, or keep its middle when it
+    // is straight; Left and Right keep their end.
+    if (!takes_middle)
+        return found;
+    if (const std::optional<size_t> tip = chord_tip(perimeter, lines, arcs, PerimeterPart{begin, arcs.forward(begin, arcs.along(touch.end))}, tolerance))
+        return MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
+    return found;
 }
 
 std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
@@ -272,18 +296,15 @@ std::optional<MagnetPoint> find_crossing_apex(const PreparedPerimeter &prepared,
         for (size_t i = 1; i < m.size(); ++i)
             if (arcs.forward(m[i], m[(i + 1) % m.size()]) > arcs.forward(m[gap], m[(gap + 1) % m.size()]))
                 gap = i;
-        const double from   = m[(gap + 1) % m.size()];
-        const double span   = arcs.total() - arcs.forward(m[gap], from);
-        const Vec2d  centre = modifier[r].polygon.contour.centroid().cast<double>();
-        const double ends   = std::max((arcs.point(lines, from) - centre).norm(), (arcs.point(lines, m[gap]) - centre).norm());
-        const std::optional<size_t> tip = deepest_vertex(perimeter, arcs, from, span, centre, ends, tolerance);
-        if (!tip)
-            continue;
-        // Tips of several regions: the one nearest the centroid of its own region, then the rear and left one.
-        const double distance = (perimeter[*tip].cast<double>() - centre).norm();
+        const double from = m[(gap + 1) % m.size()];
+        // Its tip from the chord between the outer middles, or its middle when it is straight.
+        const MagnetPoint point  = part_apex(perimeter, lines, arcs, PerimeterPart{from, arcs.total() - arcs.forward(m[gap], from)}, tolerance);
+        const Vec2d       centre = modifier[r].polygon.contour.centroid().cast<double>();
+        // Points of several regions: the one nearest the centroid of its own region, then the rear and left one.
+        const double distance = (point.point.cast<double>() - centre).norm();
         if (!best || distance < best_distance - tolerance ||
-            (distance <= best_distance + tolerance && rear_then_left(perimeter[*tip], best->point))) {
-            best          = MagnetPoint{perimeter[*tip], PerimeterPosition{*tip, 0.}};
+            (distance <= best_distance + tolerance && rear_then_left(point.point, best->point))) {
+            best          = point;
             best_distance = distance;
         }
     }
@@ -511,11 +532,16 @@ std::optional<MagnetPoint> find_magnet_point(const PreparedPerimeter &prepared, 
     const MagnetPoint found{best_point, position};
     if (!apex)
         return found;
-    // apex looks from the centroid of the modifier loop that the nearest point is nearest to.
+    // apex looks from the centroid of the modifier loop that the nearest point is nearest to; without Q the
+    // nearest point stays.
     for (size_t loop : best->loops)
         if (centroids[loop]) {
-            const auto to_modifier = [&](const Vec2d &point) { return distance_to(modifier_lines, modifier_tree, point); };
-            return find_apex_point(perimeter, perimeter_lines, *centroids[loop], found, to_modifier, limit, tolerance).value_or(found);
+            const auto       to_modifier = [&](const Vec2d &point) { return distance_to(modifier_lines, modifier_tree, point); };
+            const ArcLengths arcs(perimeter_lines);
+            if (const std::optional<PerimeterPart> part = apex_part(perimeter, perimeter_lines, arcs, *centroids[loop], found, to_modifier,
+                                                                    limit, tolerance))
+                return part_apex(perimeter, perimeter_lines, arcs, *part, tolerance);
+            return found;
         }
     return found;
 }
