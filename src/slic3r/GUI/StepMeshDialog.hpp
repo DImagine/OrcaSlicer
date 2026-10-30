@@ -9,7 +9,7 @@
 #include "Widgets/Button.hpp"
 #include "GeometryImportDialog.hpp"
 class Button;
-class wxRadioButton;
+class RadioGroup;
 
 class StepMeshDialog : public Slic3r::GUI::DPIDialog
 {
@@ -35,18 +35,19 @@ public:
         }
     }
     inline bool get_split_compound_value() {
-        return m_split_compound_checkbox->GetValue();
+        return m_split_compound_checkbox.GetValue();
     }
 private:
     // A non-null context defers all preference writes until the whole import is ready.
     Slic3r::GUI::GeometryImportOptions* m_import_options = nullptr;
-    wxCheckBox* m_keep_names_checkbox = nullptr;
-    wxCheckBox* m_sort_names_checkbox = nullptr;
-    wxRadioButton* m_assembly_radio = nullptr;
+    Slic3r::GUI::ImportCheckBox m_keep_names_checkbox;
+    Slic3r::GUI::ImportCheckBox m_sort_names_checkbox;
+    // Item 0 loads as an assembly, item 1 as a single object.
+    RadioGroup* m_load_mode = nullptr;
     Slic3r::Step& m_file;
-    wxCheckBox* m_checkbox = nullptr;
-    wxCheckBox* m_split_compound_checkbox = nullptr;
-    wxCheckBox* m_save_default_checkbox = nullptr;
+    Slic3r::GUI::ImportCheckBox m_checkbox;
+    Slic3r::GUI::ImportCheckBox m_split_compound_checkbox;
+    Slic3r::GUI::ImportCheckBox m_save_default_checkbox;
     wxString m_linear_last;
     wxString m_angle_last;
     wxStaticText* mesh_face_number_text;
