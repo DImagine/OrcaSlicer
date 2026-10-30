@@ -2122,6 +2122,31 @@ void ObjectList::OnDrop(wxDataViewEvent &event)
             return;
         }
 
+        // Move in the displayed order too, keeping presentation independent of slicing precedence.
+        const bool imported_order = std::any_of(volumes.begin(), volumes.end(), [](const ModelVolume* volume) {
+            return volume->import_display_order >= 0;
+        });
+        ModelVolume* dragged_volume = volumes[visible_volume_indices[size_t(from_volume_id)]];
+        if (imported_order) {
+            wxDataViewItemArray children;
+            m_objects_model->GetChildren(m_objects_model->GetParent(item), children);
+            std::vector<ModelVolume*> displayed;
+            for (const auto& child : children) {
+                const int index = m_objects_model->GetVolumeIdByItem(child);
+                if (index >= 0 && size_t(index) < visible_volume_indices.size())
+                    displayed.push_back(volumes[visible_volume_indices[size_t(index)]]);
+            }
+            ModelVolume* target_volume = volumes[visible_volume_indices[size_t(to_volume_id)]];
+            const auto from = std::find(displayed.begin(), displayed.end(), dragged_volume);
+            const auto to = std::find(displayed.begin(), displayed.end(), target_volume);
+            if (from != displayed.end() && to != displayed.end()) {
+                const auto target_position = to - displayed.begin();
+                displayed.erase(from);
+                displayed.insert(displayed.begin() + target_position, dragged_volume);
+                for (size_t i = 0; i < displayed.size(); ++i)
+                    displayed[i]->import_display_order = static_cast<int>(i);
+            }
+        }
         // Move through visible slots only, keeping hidden cut connectors at their original indices.
         // The local mapping stays valid because no hidden volume changes slots during the move.
         for (int id = from_volume_id; id != to_volume_id; id += delta) {
@@ -2136,7 +2161,15 @@ void ObjectList::OnDrop(wxDataViewEvent &event)
         for (size_t idx = 0; idx < visible_volume_indices.size(); ++idx)
             ui_to_model[int(idx)] = int(visible_volume_indices[idx]);
 
-        select_item(m_objects_model->ReorganizeChildren(from_volume_id, to_volume_id, m_objects_model->GetParent(item)));
+        if (imported_order) {
+            // Rebuild re-reads presentation ranks; native ReorganizeChildren assumes model order.
+            const auto selected = add_volumes_to_object_in_list(size_t(obj_idx), [dragged_volume](const ModelVolume* volume) {
+                return volume == dragged_volume;
+            });
+            if (!selected.empty())
+                select_item(selected.front());
+        } else
+            select_item(m_objects_model->ReorganizeChildren(from_volume_id, to_volume_id, m_objects_model->GetParent(item)));
 
         changed_object(m_dragged_data.obj_idx());
     }
@@ -3079,6 +3112,16 @@ void ObjectList::split()
     if (!item || obj_idx < 0)
         return;
 
+    ModelObject* imported = (*m_objects)[obj_idx];
+    if (imported->imported_parts_hidden && imported->volumes.size() > 1) {
+        // Reveal the original CAD bodies, including their names and exact transforms.
+        take_snapshot(_u8L("Split to parts"));
+        imported->imported_parts_hidden = false;
+        add_volumes_to_object_in_list(size_t(obj_idx));
+        changed_object(obj_idx);
+        return;
+    }
+
     ModelVolume* volume;
     if (!get_volume_by_item(item, volume)) return;
     DynamicPrintConfig&	config = printer_config();
@@ -3614,6 +3657,13 @@ bool ObjectList::is_splittable(bool to_objects)
 {
     const wxDataViewItem item = GetSelection();
     if (!item) return false;
+
+    const int selected_object = get_selected_obj_idx();
+    if (!to_objects && selected_object >= 0) {
+        const ModelObject* object = (*m_objects)[size_t(selected_object)];
+        if (object->imported_parts_hidden && object->volumes.size() > 1)
+            return true;
+    }
 
     if (to_objects)
     {
@@ -4359,8 +4409,19 @@ void ObjectList::add_object_to_list(size_t obj_idx, bool call_selection_changed,
 #endif //__WXMSW__
 }
 
-static bool can_add_volumes_to_object(const ModelObject *object)
+static bool can_add_volumes_to_object(ModelObject *object)
 {
+    // Single-object imports retain their bodies internally until the user chooses Split to parts.
+    if (object->imported_parts_hidden) {
+        const bool plain_parts = std::all_of(object->volumes.begin(), object->volumes.end(), [](const ModelVolume* volume) {
+            return volume->is_model_part() && volume->config.empty() && volume->texture_displacement_layers.empty();
+        });
+        if (plain_parts && !object->is_fdm_support_painted() && !object->is_seam_painted() &&
+            !object->is_mm_painted() && !object->is_fuzzy_skin_painted())
+            return false;
+        // Never leave effective per-part print controls hidden after editing the object.
+        object->imported_parts_hidden = false;
+    }
     bool can = object->volumes.size() > 1;
 
     if (can && object->is_cut()) {
@@ -4387,7 +4448,7 @@ wxDataViewItemArray ObjectList::add_volumes_to_object_in_list(size_t obj_idx, st
 
     wxDataViewItemArray items;
 
-    const ModelObject *object = (*m_objects)[obj_idx];
+    ModelObject *object = (*m_objects)[obj_idx];
     // add volumes to the object
     if (can_add_volumes_to_object(object)) {
         if (object->volumes.size() > 1) {

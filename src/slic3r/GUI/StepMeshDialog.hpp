@@ -7,12 +7,15 @@
 #include "GUI_Utils.hpp"
 #include "libslic3r/Format/STEP.hpp"
 #include "Widgets/Button.hpp"
+#include "GeometryImportDialog.hpp"
 class Button;
+class wxRadioButton;
 
 class StepMeshDialog : public Slic3r::GUI::DPIDialog
 {
 public:
-    StepMeshDialog(wxWindow* parent, Slic3r::Step& file, double linear_init, double angle_init);
+    StepMeshDialog(wxWindow* parent, Slic3r::Step& file, double linear_init, double angle_init,
+                   Slic3r::GUI::GeometryImportOptions* import_options = nullptr);
     ~StepMeshDialog() override;
     void on_dpi_changed(const wxRect& suggested_rect) override;
     inline double get_linear_deflection() {
@@ -35,6 +38,11 @@ public:
         return m_split_compound_checkbox->GetValue();
     }
 private:
+    // A non-null context defers all preference writes until the whole import is ready.
+    Slic3r::GUI::GeometryImportOptions* m_import_options = nullptr;
+    wxCheckBox* m_keep_names_checkbox = nullptr;
+    wxCheckBox* m_sort_names_checkbox = nullptr;
+    wxRadioButton* m_assembly_radio = nullptr;
     Slic3r::Step& m_file;
     wxCheckBox* m_checkbox = nullptr;
     wxCheckBox* m_split_compound_checkbox = nullptr;

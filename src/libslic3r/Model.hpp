@@ -403,6 +403,8 @@ public:
     // Whether this object is snapped to the build plate after transformations.
     // Instance Z offsets are shared by all instances of an object.
     bool                    auto_drop { true };
+    // Single-object import keeps named bodies internally until the user reveals its parts.
+    bool                    imported_parts_hidden { false };
 
     // This vector holds position of selected support points for SLA. The data are
     // saved in mesh coordinates to allow using them for several instances.
@@ -709,7 +711,7 @@ private:
         Internal::StaticSerializationWrapper<ModelConfigObject const> config_wrapper(config);
         Internal::StaticSerializationWrapper<LayerHeightProfile const> layer_heigth_profile_wrapper(layer_height_profile);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
-            sla_support_points, sla_points_status, sla_drain_holes, printable, auto_drop, origin_translation, brim_points,
+            sla_support_points, sla_points_status, sla_drain_holes, printable, auto_drop, imported_parts_hidden, origin_translation, brim_points,
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
@@ -722,7 +724,7 @@ private:
         // BBS: add backup, check modify
         SaveObjectGaurd gaurd(*this);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
-            sla_support_points, sla_points_status, sla_drain_holes, printable, auto_drop, origin_translation, brim_points,
+            sla_support_points, sla_points_status, sla_drain_holes, printable, auto_drop, imported_parts_hidden, origin_translation, brim_points,
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
@@ -832,6 +834,8 @@ class ModelVolume final : public ObjectBase
 {
 public:
     std::string         name;
+    // Session-only tree position; snapshots preserve it without changing project file order.
+    int                 import_display_order { -1 };
     // struct used by reload from disk command to recover data from disk
     struct Source
     {
@@ -1253,7 +1257,7 @@ private:
     // Copying an existing volume, therefore this volume will get a copy of the ID assigned.
     ModelVolume(ModelObject *object, const ModelVolume &other) :
         ObjectBase(other),
-        name(other.name), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
+        name(other.name), import_display_order(other.import_display_order), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
         config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation),
         supported_facets(other.supported_facets), seam_facets(other.seam_facets), mmu_segmentation_facets(other.mmu_segmentation_facets),
         fuzzy_skin_facets(other.fuzzy_skin_facets),
@@ -1286,7 +1290,7 @@ private:
     }
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.
     ModelVolume(ModelObject *object, const ModelVolume &other, TriangleMesh &&mesh) :
-        name(other.name), source(other.source), config(other.config), object(object), m_mesh(new TriangleMesh(std::move(mesh))), m_type(other.m_type), m_transformation(other.m_transformation),
+        name(other.name), import_display_order(other.import_display_order), source(other.source), config(other.config), object(object), m_mesh(new TriangleMesh(std::move(mesh))), m_type(other.m_type), m_transformation(other.m_transformation),
         cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
     {
 		assert(this->id().valid()); 
@@ -1343,7 +1347,7 @@ private:
         // BBS: add backup, check modify
         bool mesh_changed = false;
         auto tr = m_transformation;
-        ar(name, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info);
+        ar(name, import_display_order, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info);
         mesh_changed |= !(tr == m_transformation);
         auto t = supported_facets.timestamp();
         cereal::load_by_value(ar, supported_facets);
@@ -1379,7 +1383,7 @@ private:
 	}
 	template<class Archive> void save(Archive &ar) const {
 		bool has_convex_hull = m_convex_hull.get() != nullptr;
-        ar(name, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info);
+        ar(name, import_display_order, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info);
         cereal::save_by_value(ar, supported_facets);
         cereal::save_by_value(ar, seam_facets);
         cereal::save_by_value(ar, mmu_segmentation_facets);
@@ -1845,7 +1849,7 @@ public:
     void duplicate_objects_grid(size_t x, size_t y, coordf_t dist);
 
     bool 		  looks_like_multipart_object() const;
-    void 		  convert_multipart_object(unsigned int max_extruders);
+    void 		  convert_multipart_object(unsigned int max_extruders, bool preserve_volume_names = false);
     bool          looks_like_imperial_units() const;
     void          convert_from_imperial_units(bool only_small_volumes);
     bool          looks_like_saved_in_meters() const;

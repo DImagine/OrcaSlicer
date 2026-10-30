@@ -1,12 +1,14 @@
 #include "StepMeshDialog.hpp"
 
 #include "libslic3r/Format/STEP.hpp"
+#include "slic3r/GUI/GeometryImportDialog.hpp"
 #include "slic3r/GUI/GUI_Utils.hpp"
 #include "slic3r/GUI/Widgets/StateColor.hpp"
 #include "slic3r/GUI/Widgets/Label.hpp"
 #include "slic3r/GUI/MsgDialog.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Thread.hpp"
+#include <initializer_list>
 #include <thread>
 #include <wx/dialog.h>
 #include <wx/colour.h>
@@ -14,6 +16,7 @@
 #include <wx/gdicmn.h>
 #include <wx/sizer.h>
 #include <wx/slider.h>
+#include <wx/radiobut.h>
 #include <wx/dcmemory.h>
 #include "GUI_App.hpp"
 #include "I18N.hpp"
@@ -84,13 +87,14 @@ bool StepMeshDialog:: validate_number_range(const wxString& value, double min, d
     return (num >= min && num <= max);
 }
 
-StepMeshDialog::StepMeshDialog(wxWindow* parent, Slic3r::Step& file, double linear_init, double angle_init)
+StepMeshDialog::StepMeshDialog(wxWindow* parent, Slic3r::Step& file, double linear_init, double angle_init,
+                             Slic3r::GUI::GeometryImportOptions* import_options)
     : DPIDialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe),
                 wxID_ANY,
                 _(L("Step file import parameters")),
                 wxDefaultPosition,
                 wxDefaultSize,
-                wxDEFAULT_DIALOG_STYLE /* | wxRESIZE_BORDER*/), m_file(file)
+                wxDEFAULT_DIALOG_STYLE /* | wxRESIZE_BORDER*/), m_import_options(import_options), m_file(file)
 {
     m_linear_last = wxString::Format("%.3f", linear_init);
     m_angle_last = wxString::Format("%.2f", angle_init);
@@ -262,6 +266,45 @@ StepMeshDialog::StepMeshDialog(wxWindow* parent, Slic3r::Step& file, double line
     m_split_compound_checkbox->SetValue(wxGetApp().app_config->get_bool("is_split_compound"));
     check_sizer->Add(m_split_compound_checkbox, 0, wxALIGN_LEFT);
     bSizer->Add(check_sizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, LEFT_RIGHT_PADING);
+    if (m_import_options != nullptr) {
+        m_split_compound_checkbox->SetToolTip(_L("Loads each body of a multi-body part separately. Needed to keep the bodies' original names."));
+        m_split_compound_checkbox->SetValue(m_import_options->split_compound);
+        m_assembly_radio = new wxRadioButton(this, wxID_ANY, _L("Load as an assembly"), wxDefaultPosition, wxDefaultSize, wxRB_GROUP);
+        auto* single_radio = new wxRadioButton(this, wxID_ANY, _L("Load as a single object (can be split later)"));
+        m_assembly_radio->SetValue(m_import_options->load_as_assembly);
+        single_radio->SetValue(!m_import_options->load_as_assembly);
+        single_radio->SetToolTip(_L("The original bodies and names are kept inside the object. Use Split to parts to show them as separate parts."));
+        bSizer->Add(m_assembly_radio, 0, wxLEFT | wxRIGHT | wxTOP, LEFT_RIGHT_PADING);
+        bSizer->Add(single_radio, 0, wxLEFT | wxRIGHT | wxTOP, LEFT_RIGHT_PADING);
+        m_keep_names_checkbox = new wxCheckBox(this, wxID_ANY, _L("Keep original names"));
+        m_keep_names_checkbox->SetValue(m_import_options->keep_names);
+        m_keep_names_checkbox->SetToolTip(_L("Use the body names stored in the file, when there are any. Needs Split compound for parts with several bodies."));
+        m_sort_names_checkbox = new wxCheckBox(this, wxID_ANY, _L("Sort parts by name"));
+        m_sort_names_checkbox->SetValue(m_import_options->sort_names);
+        m_sort_names_checkbox->SetToolTip(_L("Sort the parts inside each imported assembly in the object list. This does not change the order used for slicing. Available when Keep original names is on."));
+        // Match the dialog's existing check boxes instead of the default wx font.
+        for (wxWindow* control : std::initializer_list<wxWindow*>{m_assembly_radio, single_radio, m_keep_names_checkbox, m_sort_names_checkbox}) {
+            control->SetFont(::Label::Body_14);
+            control->SetForegroundColour(StateColor::darkModeColorFor(FONT_COLOR));
+        }
+        bSizer->Add(m_keep_names_checkbox, 0, wxLEFT | wxRIGHT | wxTOP, LEFT_RIGHT_PADING);
+        bSizer->Add(m_sort_names_checkbox, 0, wxLEFT | wxRIGHT | wxTOP, LEFT_RIGHT_PADING);
+        // The dialog opens with the remembered values; only the user's clicks move the linked option.
+        m_keep_names_checkbox->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent& e) {
+            // Body names of a multi-body part exist only after splitting it.
+            if (m_keep_names_checkbox->GetValue())
+                m_split_compound_checkbox->SetValue(true);
+            e.Skip();
+        });
+        m_split_compound_checkbox->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent& e) {
+            if (!m_split_compound_checkbox->GetValue() && m_keep_names_checkbox->GetValue()) {
+                m_keep_names_checkbox->SetValue(false);
+                m_sort_names_checkbox->Enable(false);
+            }
+            e.Skip();
+        });
+        Slic3r::GUI::link_sort_to_keep(m_keep_names_checkbox, m_sort_names_checkbox);
+    }
 
     wxBoxSizer* mesh_face_number_sizer = new wxBoxSizer(wxHORIZONTAL);
     wxStaticText *mesh_face_number_title = new wxStaticText(this, wxID_ANY, _L("Number of triangular facets") + ": ");
@@ -277,7 +320,8 @@ StepMeshDialog::StepMeshDialog(wxWindow* parent, Slic3r::Step& file, double line
     bSizer->AddSpacer(FromDIP(10));
 
     wxBoxSizer* save_default_sizer = new wxBoxSizer(wxHORIZONTAL);
-    m_save_default_checkbox = new wxCheckBox(this, wxID_ANY, _L("Save these settings as default"), wxDefaultPosition, wxDefaultSize, 0);
+    m_save_default_checkbox = new wxCheckBox(this, wxID_ANY,
+        m_import_options ? _L("Remember my choice") : _L("Save these settings as default"), wxDefaultPosition, wxDefaultSize, 0);
     m_save_default_checkbox->SetFont(::Label::Body_14);
     m_save_default_checkbox->SetForegroundColour(StateColor::darkModeColorFor(FONT_COLOR));
     m_save_default_checkbox->SetToolTip(_L("If enabled, the values above are stored as the defaults used for future STEP imports (and shown in Preferences)."));
@@ -286,9 +330,12 @@ StepMeshDialog::StepMeshDialog(wxWindow* parent, Slic3r::Step& file, double line
 
     bSizer->AddSpacer(FromDIP(10));
 
-    m_checkbox = new wxCheckBox(this, wxID_ANY, _L("Don't show again"), wxDefaultPosition, wxDefaultSize, 0);
+    m_checkbox = new wxCheckBox(this, wxID_ANY,
+        m_import_options ? _L("Don't ask again") : _L("Don't show again"), wxDefaultPosition, wxDefaultSize, 0);
     m_checkbox->SetFont(::Label::Body_14);
     m_checkbox->SetForegroundColour(StateColor::darkModeColorFor(FONT_COLOR));
+    if (m_import_options != nullptr)
+        m_checkbox->SetToolTip(_L("Save these choices and apply them without asking next time. You can show this dialog again in Preferences."));
     bSizer->Add(m_checkbox, 0, wxLEFT, LEFT_RIGHT_PADING);
 
     wxBoxSizer* bSizer_button = new wxBoxSizer(wxHORIZONTAL);
@@ -312,13 +359,26 @@ StepMeshDialog::StepMeshDialog(wxWindow* parent, Slic3r::Step& file, double line
         stop_task();
         if (validate_number_range(angle_input->GetTextCtrl()->GetValue(), 0.01, 1) &&
             validate_number_range(linear_input->GetTextCtrl()->GetValue(), 0.001, 0.1)) {
-            if (m_checkbox->IsChecked()) {
-                wxGetApp().app_config->set_bool("enable_step_mesh_setting", false);
-            }
-            if (m_save_default_checkbox->IsChecked()) {
-                wxGetApp().app_config->set_bool("is_split_compound", m_split_compound_checkbox->GetValue());
-                wxGetApp().app_config->set("linear_deflection", float_to_string_decimal_point(get_linear_deflection(), 3));
-                wxGetApp().app_config->set("angle_deflection", float_to_string_decimal_point(get_angle_deflection(), 2));
+            if (m_import_options != nullptr) {
+                // The callback uses these values now; AppConfig is updated only after batch success.
+                m_import_options->keep_names = m_keep_names_checkbox->GetValue();
+                m_import_options->split_compound = m_split_compound_checkbox->GetValue();
+                m_import_options->sort_names = m_sort_names_checkbox->GetValue();
+                m_import_options->load_as_assembly = m_assembly_radio->GetValue();
+                m_import_options->remember = m_save_default_checkbox->GetValue();
+                m_import_options->dont_ask = m_checkbox->GetValue();
+                m_import_options->linear_deflection = get_linear_deflection();
+                m_import_options->angle_deflection = get_angle_deflection();
+                m_import_options->chosen = true;
+            } else {
+                if (m_checkbox->IsChecked()) {
+                    wxGetApp().app_config->set_bool("enable_step_mesh_setting", false);
+                }
+                if (m_save_default_checkbox->IsChecked()) {
+                    wxGetApp().app_config->set_bool("is_split_compound", m_split_compound_checkbox->GetValue());
+                    wxGetApp().app_config->set("linear_deflection", float_to_string_decimal_point(get_linear_deflection(), 3));
+                    wxGetApp().app_config->set("angle_deflection", float_to_string_decimal_point(get_angle_deflection(), 2));
+                }
             }
 
             EndModal(wxID_OK);
@@ -336,6 +396,8 @@ StepMeshDialog::StepMeshDialog(wxWindow* parent, Slic3r::Step& file, double line
     this->SetSizerAndFit(bSizer);
     update_mesh_number_text();
     this->Layout();
+    // DPIDialog centres itself before the sizer sets the final size.
+    CenterOnParent();
 
     this->Bind(wxEVT_LEFT_DOWN, [this](auto& e) {
         SetFocusIgnoringChildren();
