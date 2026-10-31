@@ -1528,6 +1528,27 @@ bool ModelObject::is_fuzzy_skin_painted() const
     return std::any_of(this->volumes.cbegin(), this->volumes.cend(), [](const ModelVolume *mv) { return mv->is_fuzzy_skin_painted(); });
 }
 
+bool ModelObject::has_individual_part_settings() const
+{
+    // Copying objects gives them filament 1, and merging copies it to their parts.
+    const int object_extruder = this->config.has("extruder") && this->config.extruder() > 0 ? this->config.extruder() : 1;
+    const bool part_settings = std::any_of(this->volumes.cbegin(), this->volumes.cend(), [object_extruder](const ModelVolume *mv) {
+        if (!mv->is_model_part() || !mv->texture_displacement_layers.empty())
+            return true;
+        const size_t keys = mv->config.size();
+        const bool same_filament = keys == 1 && mv->config.has("extruder") &&
+            (mv->config.extruder() == 0 || mv->config.extruder() == object_extruder);
+        return keys > 0 && !same_filament;
+    });
+    return part_settings || this->is_fdm_support_painted() || this->is_seam_painted() || this->is_mm_painted() ||
+        this->is_fuzzy_skin_painted();
+}
+
+bool ModelObject::hides_imported_parts() const
+{
+    return this->imported_parts_hidden && this->volumes.size() > 1 && !this->has_individual_part_settings();
+}
+
 void ModelObject::sort_volumes(bool full_sort)
 {
     // sort volumes inside the object to order "Model Part, Negative Volume, Modifier, Support Blocker and Support Enforcer. "

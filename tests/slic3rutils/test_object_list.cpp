@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_message.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
 #include "slic3r/GUI/GUI_ObjectList.hpp"
@@ -6,6 +7,7 @@
 #include <libslic3r/Model.hpp>
 #include <libslic3r/Point.hpp>
 #include <libslic3r/TriangleMesh.hpp>
+#include <libslic3r/TriangleSelector.hpp>
 
 #include <string>
 #include <cstddef>
@@ -146,4 +148,54 @@ TEST_CASE("Adding a part or modifier reveals a single-object import", "[ObjectLi
     CHECK_FALSE(object->imported_parts_hidden);
     REQUIRE(object->volumes.size() == 3);
     CHECK(object->volumes.back()->type() == type);
+}
+
+TEST_CASE("Part settings show a single-object import without changing it", "[ObjectList][OriginalNames]")
+{
+    Model model;
+    ModelObject* object = model.add_object();
+    object->add_volume(make_cube(10., 10., 10.));
+    ModelVolume* body = object->add_volume(make_cube(2., 2., 2.));
+    object->imported_parts_hidden = true;
+    REQUIRE(object->hides_imported_parts());
+
+    // The check only reads the object: the stored choice survives while part settings show the parts.
+    body->config.set("wall_loops", 3);
+    CHECK_FALSE(object->hides_imported_parts());
+    CHECK(object->imported_parts_hidden);
+    CHECK(body->config.has("wall_loops"));
+
+    body->config.erase("wall_loops");
+    CHECK(object->hides_imported_parts());
+
+    TriangleSelector selector(body->mesh());
+    selector.set_facet(0, EnforcerBlockerType::ENFORCER);
+    REQUIRE(body->seam_facets.set(selector));
+    CHECK_FALSE(object->hides_imported_parts());
+    CHECK(object->imported_parts_hidden);
+
+    body->seam_facets.reset();
+    CHECK(object->hides_imported_parts());
+}
+
+TEST_CASE("A part that repeats the object's filament has no settings of its own", "[ObjectList][OriginalNames]")
+{
+    struct Case { int object_filament; int part_filament; bool extra_setting; bool individual; };
+    // object_filament 0 means no object filament, which prints with filament 1.
+    const Case c = GENERATE(Case{0, 1, false, false}, Case{2, 2, false, false}, Case{2, 0, false, false},
+                            Case{2, 1, false, true}, Case{0, 2, false, true}, Case{2, 2, true, true});
+    CAPTURE(c.object_filament, c.part_filament, c.extra_setting);
+    Model model;
+    ModelObject* object = model.add_object();
+    object->config.erase("extruder");
+    if (c.object_filament > 0)
+        object->config.set("extruder", c.object_filament);
+    object->add_volume(make_cube(10., 10., 10.));
+    ModelVolume* body = object->add_volume(make_cube(2., 2., 2.));
+    body->config.set("extruder", c.part_filament);
+    if (c.extra_setting)
+        body->config.set("wall_loops", 3);
+    object->imported_parts_hidden = true;
+    CHECK(object->has_individual_part_settings() == c.individual);
+    CHECK(object->hides_imported_parts() == !c.individual);
 }

@@ -162,6 +162,8 @@ GeometryImportOptions geometry_import_options(const AppConfig& config, const std
     options.sort_names = config_bool(config, option_key(format, "sort"), false);
     // A 3MF keeps the structure written in it, so it has no presentation choice.
     options.load_as_assembly = format == "3mf" || config_bool(config, option_key(format, "assembly"), true);
+    // Files from other slicers keep a whole plate in one AMF group, so assembling it is opt-in.
+    options.separate_objects = format == "amf" && config_bool(config, option_key(format, "separate"), true);
     // The same key drives Preferences, Replace and Reload, so all STEP paths split alike.
     options.split_compound = format == "step" && config_bool(config, "is_split_compound", true);
     options.show_dialog = config_bool(config, format == "step" ? "enable_step_mesh_setting" : option_key(format, "show_dialog"), true);
@@ -286,14 +288,16 @@ bool show_geometry_import_options(wxWindow* parent, const std::string& format, G
     auto* sizer = new wxBoxSizer(wxVERTICAL);
     // A 3MF keeps its own structure, so only the naming choices remain for it.
     add_tip(dialog, *sizer, format == "3mf" ? _L("Choose how to name and order the parts of this file.") :
-                                              _L("Choose how to load the bodies in this file. Their relative positions are preserved."), 430);
+                                              _L("Choose how to load the bodies in this file."), 430);
 
-    // Item 0 loads as an assembly, item 1 as a single object.
+    // Item 0 loads separate objects, item 1 an assembly, item 2 a single object.
     RadioGroup* load_mode = nullptr;
     if (format != "3mf") {
-        load_mode = add_radio_group(dialog, {_L("Load as an assembly"), _L("Load as a single object (can be split later)")},
-                                    options.load_as_assembly ? 0 : 1, wxVERTICAL);
-        load_mode->SetRadioTooltip(1, _L("The original bodies and names are kept inside the object. Use Split to parts to show them as separate parts."));
+        load_mode = add_radio_group(dialog, {_L("Separate objects (as before)"), _L("Load as an assembly"), _L("Load as a single object (can be split later)")},
+                                    options.separate_objects ? 0 : options.load_as_assembly ? 1 : 2, wxVERTICAL);
+        load_mode->SetRadioTooltip(0, _L("Each object in the file is loaded on its own, as OrcaSlicer always loaded AMF files."));
+        load_mode->SetRadioTooltip(1, _L("The bodies of each group in the file become parts of one object, in their relative positions."));
+        load_mode->SetRadioTooltip(2, _L("The original bodies and names are kept inside the object. Use Split to parts to show them as separate parts."));
         sizer->Add(load_mode, 0, wxLEFT | wxRIGHT | wxTOP, dialog.FromDIP(12));
     }
     const auto keep = add_checkbox(dialog, *sizer, _L("Keep original names"), options.keep_names);
@@ -319,8 +323,12 @@ bool show_geometry_import_options(wxWindow* parent, const std::string& format, G
 
     options.keep_names = keep.GetValue();
     options.sort_names = sort.GetValue();
-    if (load_mode != nullptr)
-        options.load_as_assembly = load_mode->GetSelection() == 0;
+    if (load_mode != nullptr) {
+        options.separate_objects = load_mode->GetSelection() == 0;
+        // Separate objects leave the remembered assembly choice as it was.
+        if (!options.separate_objects)
+            options.load_as_assembly = load_mode->GetSelection() == 1;
+    }
     options.remember = remember.GetValue();
     options.dont_ask = dont_ask.GetValue();
     return true;
@@ -428,6 +436,8 @@ void save_geometry_import_options(AppConfig& config, const std::string& format, 
         config.set_bool(option_key(format, "sort"), options.sort_names);
     if (format != "3mf")
         config.set_bool(option_key(format, "assembly"), options.load_as_assembly);
+    if (format == "amf")
+        config.set_bool(option_key(format, "separate"), options.separate_objects);
     if (format == "step")
         config.set_bool("is_split_compound", options.split_compound);
     if (options.dont_ask)

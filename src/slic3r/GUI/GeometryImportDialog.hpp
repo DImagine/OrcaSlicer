@@ -20,6 +20,8 @@ struct GeometryImportOptions {
     bool keep_names = true;
     bool sort_names = false;
     bool load_as_assembly = true;
+    // AMF only: load the objects as separate objects, as OrcaSlicer did before; the assembly choice is then unused.
+    bool separate_objects = false;
     // STEP only: Orca's Split compound choice; without it a multi-body compound loses its body names.
     bool split_compound = true;
     bool show_dialog = true;
@@ -28,6 +30,7 @@ struct GeometryImportOptions {
     bool chosen = false;
     double linear_deflection = 0.003;
     double angle_deflection = 0.5;
+    bool single_object() const { return !separate_objects && !load_as_assembly; }
 };
 
 struct GeometryImportNamePolicy {

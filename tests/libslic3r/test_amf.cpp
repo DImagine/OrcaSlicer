@@ -568,3 +568,26 @@ TEST_CASE("Unnamed AMF assembly parts use the existing filename fallback", "[AMF
     CHECK(separated[0]->name == fallback);
     CHECK(separated[1]->name == fallback);
 }
+
+TEST_CASE("AMF assemblies have no part settings of their own", "[AMF][OriginalNames]")
+{
+    ScopedTemporaryFile tmp(".amf");
+    write_file(tmp.string(), "<amf unit=\"millimeter\">" +
+        named_amf_object(0, "ParentA", "LeafA") + named_amf_object(1, "ParentB", "LeafB") +
+        "<constellation id=\"1\"><instance objectid=\"0\"/><instance objectid=\"0\"><deltax>10</deltax></instance>"
+        "<instance objectid=\"1\"><deltax>20</deltax></instance></constellation></amf>");
+    Model model;
+    REQUIRE(load_amf_with_options(tmp.string(), model,
+        LoadStrategy::LoadModel | LoadStrategy::AssembleParts | LoadStrategy::KeepOriginalNames));
+    REQUIRE(model.objects.size() == 1);
+    ModelObject& object = *model.objects.front();
+    REQUIRE(object.volumes.size() == 3);
+    // Merging copies the object's filament to every part; repeating it is not a setting of the part.
+    CHECK_FALSE(object.has_individual_part_settings());
+    object.imported_parts_hidden = true;
+    CHECK(object.hides_imported_parts());
+
+    object.volumes[1]->config.set("extruder", 2);
+    CHECK(object.has_individual_part_settings());
+    CHECK_FALSE(object.hides_imported_parts());
+}

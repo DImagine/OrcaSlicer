@@ -4,7 +4,6 @@
 #include "GUI_App.hpp"
 #include "GUI_Factories.hpp"
 #include "GUI.hpp"
-#include "GUI_ObjectList.hpp"
 #include "I18N.hpp"
 #include "PartPlate.hpp"
 
@@ -24,7 +23,6 @@
 #include <tuple>
 #include <wx/bmpcbox.h>
 #include <wx/chartype.h>
-#include <wx/arrstr.h>
 #include <wx/dataview.h>
 #include <wx/dc.h>
 #include <wx/event.h>
@@ -1301,7 +1299,9 @@ void ObjectDataViewModel::DeleteVolumeChildren(wxDataViewItem& parent)
 
     // set m_containet to FALSE if parent has no child
 #ifndef __WXGTK__
-    root->m_container = false;
+    // Instances, settings and other rows may remain after the volumes are gone.
+    if (root->GetChildCount() == 0)
+        root->m_container = false;
 #endif //__WXGTK__
 }
 
@@ -2082,19 +2082,6 @@ bool ObjectDataViewModel::IsContainer(const wxDataViewItem &item) const
 
 	ObjectDataViewModelNode *node = static_cast<ObjectDataViewModelNode*>(item.GetID());
 	return node->IsContainer();
-}
-
-void set_import_volume_order(ModelObject& object, bool sort_names)
-{
-    // Capture after the final clone and before the model's required type grouping.
-    auto parts = object.volumes;
-    if (sort_names)
-        std::stable_sort(parts.begin(), parts.end(), [](const ModelVolume* a, const ModelVolume* b) {
-            return wxCmpNatural(from_u8(a->name).Lower(), from_u8(b->name).Lower()) < 0;
-        });
-    // The rank travels with the volume through cloning and Undo/Redo, without changing slicing order.
-    for (size_t i = 0; i < parts.size(); ++i)
-        parts[i]->import_display_order = static_cast<int>(i);
 }
 
 unsigned int ObjectDataViewModel::GetChildren(const wxDataViewItem &parent, wxDataViewItemArray &array) const

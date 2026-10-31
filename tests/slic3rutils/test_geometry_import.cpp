@@ -112,3 +112,30 @@ TEST_CASE("Geometry import treats STEP and STP extensions as the same format", "
     CHECK(geometry_import_format("model.3MF") == "3mf");
     CHECK(geometry_import_format("model.stl").empty());
 }
+
+TEST_CASE("AMF loads separate objects unless an assembly mode was chosen", "[GeometryImport]")
+{
+    AppConfig config;
+    // Files from other slicers hold a whole plate in one group, so the default keeps them apart.
+    CHECK(geometry_import_options(config, "amf").separate_objects);
+    CHECK_FALSE(geometry_import_options(config, "amf").single_object());
+    CHECK_FALSE(geometry_import_options(config, "step").separate_objects);
+    CHECK_FALSE(geometry_import_options(config, "3mf").separate_objects);
+
+    const bool separate = GENERATE(false, true);
+    const bool assembly = GENERATE(false, true);
+    CAPTURE(separate, assembly);
+    config.set_bool("import_names_amf_assembly", !assembly);
+    GeometryImportOptions options;
+    options.separate_objects = separate;
+    options.load_as_assembly = assembly;
+    options.chosen = true;
+    options.remember = true;
+    save_geometry_import_options(config, "amf", options);
+    const GeometryImportOptions restored = geometry_import_options(config, "amf");
+    CHECK(restored.separate_objects == separate);
+    CHECK(restored.load_as_assembly == assembly);
+    CHECK(restored.single_object() == (!separate && !assembly));
+    // The STEP dialog has no separate mode and keeps its own key.
+    CHECK_FALSE(config.has("import_names_step_separate"));
+}

@@ -716,6 +716,8 @@ void AppConfig::set_defaults()
             set_bool(prefix + "sort", false);
         if (format != "3mf" && get(prefix + "assembly").empty())
             set_bool(prefix + "assembly", true);
+        if (format == "amf" && get(prefix + "separate").empty())
+            set_bool(prefix + "separate", true);
         if (format != "step" && get(prefix + "show_dialog").empty())
             set_bool(prefix + "show_dialog", true);
     }

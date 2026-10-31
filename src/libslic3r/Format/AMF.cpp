@@ -897,7 +897,7 @@ bool AMFParserContext::assemble_constellations()
         if (id.empty())
             continue;
         if (object_index(id) >= 0)
-            BOOST_LOG_TRIVIAL(error) << "AMF constellation id " << id << " equals an object id; references resolve to the object";
+            BOOST_LOG_TRIVIAL(warning) << "AMF constellation id " << id << " equals an object id; references resolve to the object";
         else if (!constellation_index.emplace(id, index).second)
             BOOST_LOG_TRIVIAL(error) << "Duplicate AMF constellation id " << id << "; only the first group can be referenced";
     }

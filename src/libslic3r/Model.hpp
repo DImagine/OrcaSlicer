@@ -404,6 +404,7 @@ public:
     // Instance Z offsets are shared by all instances of an object.
     bool                    auto_drop { true };
     // Single-object import keeps named bodies internally until the user reveals its parts.
+    // A stored choice: part settings or painting still show the parts, see hides_imported_parts().
     bool                    imported_parts_hidden { false };
 
     // This vector holds position of selected support points for SLA. The data are
@@ -460,6 +461,11 @@ public:
     bool                    is_mm_painted() const;
     // Checks if any of object volume is painted using the fuzzy skin painting gizmo.
     bool                    is_fuzzy_skin_painted() const;
+    // Whether a part has settings or painting of its own; a part that only repeats the object's filament has none.
+    bool                    has_individual_part_settings() const;
+    // Whether the object list shows a single-object import without its parts. Never true while
+    // a part has its own settings or painting, so effective per-part controls stay visible.
+    bool                    hides_imported_parts() const;
     // This object may have a varying layer height by painting or by a table.
     // Even if true is returned, the layer height profile may be "flat" with no difference to default layering.
     bool                    has_custom_layering() const

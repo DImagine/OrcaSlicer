@@ -3113,7 +3113,7 @@ void ObjectList::split()
         return;
 
     ModelObject* imported = (*m_objects)[obj_idx];
-    if (imported->imported_parts_hidden && imported->volumes.size() > 1) {
+    if (imported->hides_imported_parts()) {
         // Reveal the original CAD bodies, including their names and exact transforms.
         take_snapshot(_u8L("Split to parts"));
         imported->imported_parts_hidden = false;
@@ -3661,7 +3661,7 @@ bool ObjectList::is_splittable(bool to_objects)
     const int selected_object = get_selected_obj_idx();
     if (!to_objects && selected_object >= 0) {
         const ModelObject* object = (*m_objects)[size_t(selected_object)];
-        if (object->imported_parts_hidden && object->volumes.size() > 1)
+        if (object->hides_imported_parts())
             return true;
     }
 
@@ -4169,6 +4169,8 @@ void ObjectList::update_variable_layer_obj_num(ObjectDataViewModelNode* obj_node
     }
 }
 
+static bool can_add_volumes_to_object(const ModelObject *object);
+
 void ObjectList::update_info_items(size_t obj_idx, wxDataViewItemArray *selections /* = nullptr*/, bool added_object /* = false*/, bool color_mode_changed /* = false*/)
 {
     // BBS
@@ -4178,6 +4180,35 @@ void ObjectList::update_info_items(size_t obj_idx, wxDataViewItemArray *selectio
     const ModelObject* model_object = (*m_objects)[obj_idx];
     wxDataViewItem item_obj = m_objects_model->GetItemById(obj_idx);
     assert(item_obj.IsOk());
+
+    // Painting decides whether a single-object import shows its parts; the painting gizmos call this after each change.
+    if (model_object->imported_parts_hidden) {
+        wxDataViewItemArray children;
+        m_objects_model->GetChildren(item_obj, children);
+        bool shows_parts = false;
+        for (const wxDataViewItem& child : children)
+            shows_parts = shows_parts || m_objects_model->GetItemType(child) == itVolume;
+        if (shows_parts != can_add_volumes_to_object(model_object)) {
+            // A tracked selection must not keep rows of the parts that are about to go.
+            if (selections != nullptr && shows_parts) {
+                auto in_removed_parts = [this, &item_obj](const wxDataViewItem& item) {
+                    const wxDataViewItem parent = m_objects_model->GetParent(item);
+                    if (m_objects_model->GetItemType(item) == itVolume)
+                        return parent == item_obj;
+                    return parent.IsOk() && m_objects_model->GetItemType(parent) == itVolume && m_objects_model->GetParent(parent) == item_obj;
+                };
+                bool removed = false;
+                for (int index = int(selections->GetCount()) - 1; index >= 0; --index)
+                    if (in_removed_parts((*selections)[index])) {
+                        selections->RemoveAt(index);
+                        removed = true;
+                    }
+                if (removed && selections->Index(item_obj) == wxNOT_FOUND)
+                    selections->Add(item_obj);
+            }
+            add_volumes_to_object_in_list(obj_idx);
+        }
+    }
 
     // Cut connectors
     {
@@ -4409,19 +4440,11 @@ void ObjectList::add_object_to_list(size_t obj_idx, bool call_selection_changed,
 #endif //__WXMSW__
 }
 
-static bool can_add_volumes_to_object(ModelObject *object)
+static bool can_add_volumes_to_object(const ModelObject *object)
 {
     // Single-object imports retain their bodies internally until the user chooses Split to parts.
-    if (object->imported_parts_hidden) {
-        const bool plain_parts = std::all_of(object->volumes.begin(), object->volumes.end(), [](const ModelVolume* volume) {
-            return volume->is_model_part() && volume->config.empty() && volume->texture_displacement_layers.empty();
-        });
-        if (plain_parts && !object->is_fdm_support_painted() && !object->is_seam_painted() &&
-            !object->is_mm_painted() && !object->is_fuzzy_skin_painted())
-            return false;
-        // Never leave effective per-part print controls hidden after editing the object.
-        object->imported_parts_hidden = false;
-    }
+    if (object->hides_imported_parts())
+        return false;
     bool can = object->volumes.size() > 1;
 
     if (can && object->is_cut()) {
@@ -7131,6 +7154,19 @@ void sort_objects(std::vector<ModelObject*>& objects, ObjectOrder order, bool de
     });
     for (size_t i = 0; i < objects.size(); ++i)
         objects[i] = entries[i].object;
+}
+
+void set_import_volume_order(ModelObject& object, bool sort_names)
+{
+    // Capture after the final clone and before the model's required type grouping.
+    auto parts = object.volumes;
+    if (sort_names)
+        std::stable_sort(parts.begin(), parts.end(), [](const ModelVolume* a, const ModelVolume* b) {
+            return wxCmpNatural(from_u8(a->name).Lower(), from_u8(b->name).Lower()) < 0;
+        });
+    // The rank travels with the volume through cloning and Undo/Redo, without changing slicing order.
+    for (size_t i = 0; i < parts.size(); ++i)
+        parts[i]->import_display_order = static_cast<int>(i);
 }
 
 void ObjectList::order_objects(ObjectOrder order, bool all_plates)
