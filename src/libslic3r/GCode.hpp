@@ -830,6 +830,11 @@ protected:
     ExtrusionRole                       m_last_processor_extrusion_role;
     // Orca: the next extruded path starts an outer wall on an overhang; tag it for the preview.
     bool                                m_outer_overhang_tag_pending{false};
+    // Orca: an outer wall is being extruded, by wall index rather than by path role
+    bool                                m_on_outer_wall { false };
+    // Orca: the last extruded path belongs to an outer wall with retract_after_outer_wall on,
+    // so the next travel ignores the retraction threshold
+    bool                                m_retract_after_last_path { false };
     // How many times will change_layer() be called?
     // change_layer() will update the progress bar.
     unsigned int                        m_layer_count;
