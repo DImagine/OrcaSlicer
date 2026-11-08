@@ -3426,6 +3426,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     case CalibMode::Calib_Retraction_tower:
         m_calib_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
         m_calib_config.set_key_value("retract_after_outer_wall", new ConfigOptionBool(false));
+        m_calib_config.set_key_value("retract_before_outer_wall", new ConfigOptionBool(false));
         break;
     default:
         break;
@@ -10761,7 +10762,9 @@ bool GCode::needs_retraction(const Polyline &travel, ExtrusionRole role, LiftTyp
     const bool leaving_external_perimeter = is_perimeter(m_last_processor_extrusion_role) && m_last_processor_extrusion_role != erPerimeter;
     // Orca: a short travel off the outer wall drags its hot end inward; retract_after_outer_wall ignores the threshold there.
     const bool force_after_outer_wall = m_retract_after_last_path && travel.length() > SCALED_EPSILON;
-    if (!force_after_outer_wall && travel.length() < scale_(FILAMENT_CONFIG(retraction_minimum_travel))) {
+    // Orca: an outer wall reached without a retraction starts under the previous path's residual pressure and shows at the seam.
+    const bool force_before_outer_wall = m_on_outer_wall && m_config.retract_before_outer_wall.value && travel.length() > SCALED_EPSILON;
+    if (!force_after_outer_wall && !force_before_outer_wall && travel.length() < scale_(FILAMENT_CONFIG(retraction_minimum_travel))) {
         // skip retraction if the move is shorter than the configured threshold
         return false;
     }

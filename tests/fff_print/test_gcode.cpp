@@ -311,6 +311,72 @@ TEST_CASE("Retract after outer wall is on by default", "[GCode]")
     CHECK(config.opt_bool("retract_after_outer_wall"));
 }
 
+TEST_CASE("Retract before outer wall retracts on a travel shorter than the threshold", "[GCode]")
+{
+    const bool enabled = GENERATE(false, true);
+    CAPTURE(enabled);
+    // Inner-outer-inner order puts a short travel between an inner wall and the outer wall;
+    // the 5 mm threshold alone would skip its retraction.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "gcode_flavor", "marlin2" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "wall_loops", "3" },
+        { "wall_sequence", "inner-outer-inner wall" },
+        { "top_shell_layers", "0" },
+        { "bottom_shell_layers", "0" },
+        { "sparse_infill_density", "0%" },
+        { "retraction_length", "0.8" },
+        { "retraction_minimum_travel", "5" },
+        { "retract_when_changing_layer", "0" },
+        { "wipe", "0" },
+        { "z_hop", "0" },
+        { "gcode_comments", "1" },
+        { "machine_start_gcode", "" },
+        { "machine_end_gcode", "" },
+        { "retract_after_outer_wall", "0" },
+        { "retract_before_outer_wall", enabled ? "1" : "0" },
+    });
+    const std::string output = Test::slice({ make_cube(10., 10., 1.) }, config);
+
+    const std::string &role_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+    ExtrusionRole role = erNone;
+    ExtrusionRole last_extruded = erNone;
+    double retraction = 0.;
+    size_t entries = 0;
+    size_t exits = 0;
+    GCodeReader parser;
+    parser.apply_config(config);
+    parser.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.comment().find(role_tag) == 0)
+            role = ExtrusionEntity::string_to_role(line.comment().substr(role_tag.size()));
+        if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
+            if (last_extruded == erPerimeter && role == erExternalPerimeter) {
+                ++entries;
+                CHECK_THAT(retraction, Catch::Matchers::WithinAbs(enabled ? 0.8 : 0., 0.00005));
+            } else if (last_extruded == erExternalPerimeter && role == erPerimeter) {
+                // Leaving the outer wall keeps the threshold: the option covers only its start.
+                ++exits;
+                CHECK_THAT(retraction, Catch::Matchers::WithinAbs(0., 0.00005));
+            }
+            last_extruded = role;
+            retraction = 0.;
+        } else if (line.retracting(self)) {
+            retraction -= line.dist_E(self);
+        }
+    });
+    // The 1 mm cube has five 0.2 mm layers, each printing an inner wall, the outer wall and another inner wall.
+    REQUIRE(entries == 5);
+    REQUIRE(exits == 5);
+}
+
+TEST_CASE("Retract before outer wall is off by default", "[GCode]")
+{
+    const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK_FALSE(config.opt_bool("retract_before_outer_wall"));
+}
+
 // Firmwares read the compatibility header lines (Anycubic's GoKlipper heats the bed with
 // first_layer_bed_temperature), so they must describe the filament the plate prints, not filament 1.
 TEST_CASE("The G-code header names the first layer temperatures of the filament the plate prints", "[GCode]")
