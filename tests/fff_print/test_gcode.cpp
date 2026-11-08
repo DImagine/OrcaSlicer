@@ -228,10 +228,11 @@ TEST_CASE("Retract after outer wall retracts on a travel shorter than the thresh
     REQUIRE(entries == 5);
 }
 
-TEST_CASE("Retract after outer wall tells walls apart by wall index on a full overhang", "[GCode]")
+TEST_CASE("Forced outer wall retractions tell walls apart by wall index on a full overhang", "[GCode]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
-    CAPTURE(wall_generator);
+    const bool before = GENERATE(false, true);
+    CAPTURE(wall_generator, before);
     // A 10 mm plate on a 2 mm pillar: the plate's first layer prints all three walls in mid air, so every
     // path there has the overhang role. Only the outer wall may skip the 5 mm threshold.
     TriangleMesh mesh = make_cube(2., 2., 1.);
@@ -259,7 +260,8 @@ TEST_CASE("Retract after outer wall tells walls apart by wall index on a full ov
         { "gcode_comments", "1" },
         { "machine_start_gcode", "" },
         { "machine_end_gcode", "" },
-        { "retract_after_outer_wall", "1" },
+        { "retract_after_outer_wall", before ? "0" : "1" },
+        { "retract_before_outer_wall", before ? "1" : "0" },
     });
     const std::string output = Test::slice({ mesh }, config);
 
@@ -301,7 +303,8 @@ TEST_CASE("Retract after outer wall tells walls apart by wall index on a full ov
     for (size_t i = 0; i + 1 < walls.size(); ++i) {
         CAPTURE(i);
         REQUIRE(walls[i].travel < 5.);
-        CHECK_THAT(walls[i].retraction, Catch::Matchers::WithinAbs(i == 1 ? 0.8 : 0., 0.00005));
+        // Forced on the travel into the outer wall or on the one out of it, never between inner walls.
+        CHECK_THAT(walls[i].retraction, Catch::Matchers::WithinAbs((before ? i == 0 : i == 1) ? 0.8 : 0., 0.00005));
     }
 }
 
@@ -344,6 +347,7 @@ TEST_CASE("Retract before outer wall retracts on a travel shorter than the thres
     ExtrusionRole role = erNone;
     ExtrusionRole last_extruded = erNone;
     double retraction = 0.;
+    double travel = 0.;
     size_t entries = 0;
     size_t exits = 0;
     GCodeReader parser;
@@ -354,6 +358,8 @@ TEST_CASE("Retract before outer wall retracts on a travel shorter than the thres
         if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
             if (last_extruded == erPerimeter && role == erExternalPerimeter) {
                 ++entries;
+                // A longer travel would retract anyway and prove nothing.
+                REQUIRE(travel < 5.);
                 CHECK_THAT(retraction, Catch::Matchers::WithinAbs(enabled ? 0.8 : 0., 0.00005));
             } else if (last_extruded == erExternalPerimeter && role == erPerimeter) {
                 // Leaving the outer wall keeps the threshold: the option covers only its start.
@@ -362,8 +368,11 @@ TEST_CASE("Retract before outer wall retracts on a travel shorter than the thres
             }
             last_extruded = role;
             retraction = 0.;
-        } else if (line.retracting(self)) {
-            retraction -= line.dist_E(self);
+            travel = 0.;
+        } else {
+            if (line.retracting(self))
+                retraction -= line.dist_E(self);
+            travel += line.dist_XY(self);
         }
     });
     // The 1 mm cube has five 0.2 mm layers, each printing an inner wall, the outer wall and another inner wall.

@@ -6728,7 +6728,7 @@ void PrintConfigDef::init_fff_params()
                      "travel distance threshold.\n\n"
                      "Without a retraction, an outer wall reached by a very short travel, for example from the inner "
                      "wall next to it, starts under residual pressure and can leave a visible seam.\n\n"
-                     "This adds a retraction at most outer wall starts and increases the print time.");
+                     "This adds a retraction before nearly every outer wall and increases the print time.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
