@@ -3097,7 +3097,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             check_extruder(0); // TODO: check used extruder variants
 
             // check wall sequence and precise outer wall
-            if (m_default_region_config.precise_outer_wall && m_default_region_config.wall_sequence != WallSequence::InnerOuter)
+            // No warning when the option is kept for the other sequences on purpose.
+            if (m_default_region_config.precise_outer_wall && m_default_region_config.wall_sequence != WallSequence::InnerOuter &&
+                ! m_default_region_config.precise_outer_wall_any_sequence)
                 warn(L("The precise wall option will be ignored for outer-inner or inner-outer-inner wall sequences."), "precise_outer_wall");
 
             // check adaptive pressure advance model of every extruder variant column of the used filaments

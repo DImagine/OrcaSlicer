@@ -1867,6 +1867,15 @@ void PrintConfigDef::init_fff_params()
                        "will be ignored for outer-inner or inner-outer-inner wall sequences.");
     def->set_default_value(new ConfigOptionBool{true});
 
+    // Off by default: the other wall sequences keep ignoring Precise wall.
+    def = this->add("precise_outer_wall_any_sequence", coBool);
+    def->label = L("Keep Precise wall when outer first");
+    def->category = L("Quality");
+    def->tooltip  = L("Apply Precise wall to the outer-inner and inner-outer-inner wall sequences too. The walls are placed as in the "
+                      "inner-outer sequence and only their printing order changes.\n\nNote: This option needs Precise wall to be enabled.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool{false});
+
     def = this->add("only_one_wall_top", coBool);
     def->label = L("Only one wall on top surfaces");
     def->category = L("Quality");

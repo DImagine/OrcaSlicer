@@ -1171,6 +1171,62 @@ TEST_CASE("Each side of a tube wall prints its walls in the wall sequence order"
     }
 }
 
+namespace {
+
+// How far the contour's first inner wall of round_tube() lies inside its outer wall, centreline to centreline, on the
+// second layer.
+double contour_outer_to_inner_distance(const Print &print)
+{
+    const Layer *layer = print.objects().front()->layers()[1];
+    const Vec2d  axis  = get_extents(layer->lslices).center().cast<double>();
+    // Mean radius of the outermost loop of insets 0 and 1: the contour's, the hole's being nearer the axis.
+    double radius[2] = { 0., 0. };
+    for (const LayerRegion *region : layer->regions())
+        for (const ExtrusionEntity *entity : region->perimeters.flatten().entities) {
+            if (! entity->is_loop())
+                continue;
+            const ExtrusionLoop *loop = static_cast<const ExtrusionLoop*>(entity);
+            if (loop->inset_idx > 1)
+                continue;
+            const Polygon polygon = loop->polygon();
+            double        mean    = 0.;
+            for (const Point &p : polygon.points)
+                mean += unscaled<double>((p.cast<double>() - axis).norm());
+            mean /= double(polygon.points.size());
+            radius[loop->inset_idx] = std::max(radius[loop->inset_idx], mean);
+        }
+    return radius[0] - radius[1];
+}
+
+} // namespace
+
+// Precise wall spaces the first inner wall from the outer wall by their widths, not their spacings, and is ignored
+// outside Inner/Outer. Kept for the other sequences, it lays the walls where Inner/Outer does.
+TEST_CASE("Precise wall kept for the other wall sequences spaces the walls as Inner/Outer does", "[Perimeters]")
+{
+    const char       *wall_generator = GENERATE("classic", "arachne");
+    const std::string wall_sequence  = GENERATE("outer wall/inner wall", "inner-outer-inner wall");
+    CAPTURE(wall_generator, wall_sequence);
+
+    // A 3mm tube wall holds three 0.5mm walls a side.
+    auto distance = [wall_generator](const std::string &sequence, bool any_sequence) {
+        DynamicPrintConfig config = tube_config(wall_generator, 3);
+        config.set_deserialize_strict({
+            { "wall_sequence",                   sequence },
+            { "precise_outer_wall_any_sequence", any_sequence },
+        });
+        Print print;
+        Model model;
+        round_tube(print, model, config, 3.0);
+        return contour_outer_to_inner_distance(print);
+    };
+
+    const double precise = distance("inner wall/outer wall", false);
+    CHECK_THAT(distance(wall_sequence, true), Catch::Matchers::WithinAbs(precise, 0.002));
+    // Ignored, the inner wall overlaps the outer wall and lies nearer to it.
+    CHECK(distance(wall_sequence, false) < precise - 0.01);
+}
+
 // The outer wall of a thin wall hole touches the contour's with nothing between them. The hole is printed first, so
 // the contour leans on it, unless the wall sequence puts the outer walls first.
 TEST_CASE("A thin wall hole is printed before the contour unless the outer walls go first", "[Perimeters]")

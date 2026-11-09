@@ -1594,6 +1594,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 retract_before_outer_wall))
     ((ConfigOptionEnum<WallInfillOrder>, wall_infill_order))
     ((ConfigOptionBool,                 precise_outer_wall))
+    ((ConfigOptionBool,                 precise_outer_wall_any_sequence))
     ((ConfigOptionPercent,              bridge_density))
     ((ConfigOptionFloat,                 filter_out_gap_fill))
     ((ConfigOptionFloatsOrPercentsNullable, small_perimeter_speed))
