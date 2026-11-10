@@ -7608,7 +7608,7 @@ LayerResult GCode::process_layer(
         std::vector<InstanceToPrint>     &instances_to_print = filament_plan.first;
 
         // Orca: the lower passes of the split outer walls go first, everything else of this layer is printed above them.
-        gcode += this->extrude_outer_wall_lower_passes(print, layers, layer_tools, instances_to_print, extruder_id, print_z);
+        gcode += this->extrude_outer_wall_lower_passes(print, layers, layer_tools, instances_to_print, extruder_id);
         const std::vector<InstanceVisit> &instance_visits    = filament_plan.second;
 
         // We are almost ready to print. However, we must go through all the objects twice to print the overridden extrusions first (infill/perimeter wiping feature):
@@ -8563,7 +8563,9 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     if (!m_config.spiral_mode && description == "perimeter") {
         assert(m_layer != nullptr);
         // Orca: the passes of a split outer wall start at the point chosen for its lowest pass.
-        if (const auto pass_seam = m_outer_wall_pass_seams.find(&loop_ref); pass_seam != m_outer_wall_pass_seams.end())
+        // The loop is looked up by its original first point: it may be a clone of the loop stored in the layer.
+        const auto pass_seam = loop_ref.outer_wall_pass ? m_outer_wall_pass_seams.find(loop_ref.first_point()) : m_outer_wall_pass_seams.end();
+        if (pass_seam != m_outer_wall_pass_seams.end())
             loop.split_at(pass_seam->second, false);
         else
             m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang);
@@ -8948,9 +8950,10 @@ static void collect_outer_wall_top_passes(const ExtrusionEntityCollection &colle
 // Orca: Print the passes of the split outer walls lying below the layer height, the lowest first over all the
 // instances, so that the nozzle never works beside something printed higher on this layer.
 std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std::vector<LayerToPrint> &layers, const LayerTools &layer_tools,
-                                                   const std::vector<InstanceToPrint> &instances_to_print, unsigned int extruder_id,
-                                                   coordf_t print_z)
+                                                   const std::vector<InstanceToPrint> &instances_to_print, unsigned int extruder_id)
 {
+    // Height the layer is printed at, with the Z offset of the printer applied by change_layer().
+    const double layer_z = m_nominal_z;
     struct PassLevel
     {
         double                 z;
@@ -8964,7 +8967,7 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
             continue;
         const size_t count = layer->outer_wall_pass_slices->count();
         for (size_t pass = 0; pass + 1 < count; ++ pass)
-            levels.push_back({ layer->print_z - layer->height * double(count - 1 - pass) / double(count), &instance, pass });
+            levels.push_back({ layer_z - layer->height * double(count - 1 - pass) / double(count), &instance, pass });
     }
     if (levels.empty())
         return {};
@@ -9052,7 +9055,8 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
                 // Choose the start point of the outer wall once and use it for all its passes.
                 const ExtrusionLoop *top_pass = closest < top_passes.size() ? top_passes[closest] : nullptr;
                 Point                seam;
-                if (const auto known = m_outer_wall_pass_seams.find(top_pass); known != m_outer_wall_pass_seams.end()) {
+                const auto           known    = top_pass != nullptr ? m_outer_wall_pass_seams.find(top_pass->first_point()) : m_outer_wall_pass_seams.end();
+                if (known != m_outer_wall_pass_seams.end()) {
                     seam = known->second;
                 } else {
                     ExtrusionLoop placed        = loop;
@@ -9060,9 +9064,9 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
                     m_seam_placer.place_seam(m_layer, placed, this->last_pos(), seam_overhang);
                     seam = placed.first_point();
                     if (top_pass != nullptr)
-                        m_outer_wall_pass_seams.emplace(top_pass, seam);
+                        m_outer_wall_pass_seams.emplace(top_pass->first_point(), seam);
                 }
-                m_outer_wall_pass_seams.emplace(&loop, seam);
+                m_outer_wall_pass_seams.emplace(loop.first_point(), seam);
                 gcode += this->extrude_loop(loop, "perimeter", -1.);
             }
         }
@@ -9089,7 +9093,7 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
 
     // Flush a pending object end label and return to the layer height on the next travel.
     m_writer.add_object_end_labels(gcode);
-    m_nominal_z                = print_z;
+    m_nominal_z                = layer_z;
     m_need_change_layer_lift_z = true;
     return gcode;
 }

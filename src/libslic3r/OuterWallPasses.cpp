@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 #include "AABBTreeLines.hpp"
 #include "ClipperUtils.hpp"

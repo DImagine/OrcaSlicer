@@ -10,6 +10,7 @@
 #include <math.h>
 #include <cmath>
 #include <iterator>
+#include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
 #include <vector>
 #include <utility>
@@ -316,7 +317,9 @@ bool PrintObject::outer_wall_passes_enabled() const
         return false;
     // The passes are built from the loops of the classic wall generator, on layers stacked the regular way.
     if (m_config.wall_generator.value != PerimeterGeneratorType::Classic || print_config.spiral_mode.value ||
-        print_config.belt_printer.value || m_config.raft_layers.value > 0 || this->is_fuzzy_skin_painted())
+        print_config.belt_printer.value || m_config.raft_layers.value > 0 || this->is_fuzzy_skin_painted() ||
+        // A painted object is cut into regions of several filaments after the layers are planned.
+        this->is_mm_painted())
         return false;
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
         const PrintRegionConfig &region_config = this->printing_region(region_id).config();

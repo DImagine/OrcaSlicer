@@ -661,8 +661,7 @@ protected:
     std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
     // Orca: print the passes of the split outer walls lying below the layer height, see OuterWallPasses.hpp.
     std::string     extrude_outer_wall_lower_passes(const Print &print, const std::vector<LayerToPrint> &layers, const LayerTools &layer_tools,
-                                                    const std::vector<InstanceToPrint> &instances_to_print, unsigned int extruder_id,
-                                                    coordf_t print_z);
+                                                    const std::vector<InstanceToPrint> &instances_to_print, unsigned int extruder_id);
 
     // Farthest-point timelapse: find the extrusion point farthest from camera (0,0)
     void compute_farthest_point(const std::vector<LayerToPrint> &layers, int most_used_extruder,
@@ -938,9 +937,9 @@ protected:
     // reports that sub-height as the effective extrusion height. Reset to 0 afterwards.
     double   m_sub_layer_flow_ratio = 0.0;
     double   m_sub_layer_height     = 0.0;
-    // Orca: start points of the split outer walls of the current layer, by the loops of their passes,
-    // so that all the passes of an outer wall start at the same point.
-    std::unordered_map<const ExtrusionLoop*, Point> m_outer_wall_pass_seams;
+    // Orca: start points of the split outer walls of the current layer, by the first points of the loops of
+    // their passes as stored in the layer, so that all the passes of an outer wall start at the same point.
+    std::unordered_map<Point, Point, PointHash> m_outer_wall_pass_seams;
     bool m_need_change_layer_lift_z = false;
     int m_start_gcode_filament = -1;
     std::string m_filament_instances_code;
