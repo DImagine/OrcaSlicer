@@ -493,6 +493,21 @@ TEST_CASE("Settings the passes cannot be printed safely with are rejected", "[Ou
         REQUIRE_THAT(validate({ { "precise_z_height", true } }, 20.05), ContainsSubstring("end at the same heights"));
         REQUIRE(validate({ { "precise_z_height", true } }, 20.).empty());
     }
+    SECTION("thin layers another object may split its layers into count as well") {
+        // The second cube is printed at half the layer height. Its layers end at the lowest pass of the first
+        // cube or at its layer height, but the thin layers it may be split into end in between.
+        auto validate_two_heights = [](const char *fallback) {
+            DynamicPrintConfig config = passes_config(fallback);
+            config.set_deserialize_strict({ { "layer_change_gcode", "G92 E0\n" }, { "min_layer_height", "0.04" } });
+            const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides { {}, { { "layer_height", 0.1 } } };
+            Print print;
+            Model model;
+            init_print(std::vector<TriangleMesh>{ cube(20.), cube(20.) }, print, model, config, &overrides);
+            return print.validate().string;
+        };
+        REQUIRE_THAT(validate_two_heights("split_layer"), ContainsSubstring("end at the same heights"));
+        REQUIRE(validate_two_heights("regular").empty());
+    }
     SECTION("a width range that makes no printable line") {
         REQUIRE_THAT(validate({ { "split_outer_wall_min_width", "0.01" }, { "split_outer_wall_max_width", "0.01" } }),
                      ContainsSubstring("too small"));

@@ -390,6 +390,7 @@ void Layer::make_perimeters()
         layer_region->perimeters.clear();
         layer_region->fills.clear();
         layer_region->thin_fills.clear();
+        layer_region->outer_wall_lower_passes.clear();
     };
 
     // keep track of regions whose perimeters we have already generated
@@ -400,6 +401,7 @@ void Layer::make_perimeters()
  			(*layerm)->perimeters.clear();
  			(*layerm)->fills.clear();
  			(*layerm)->thin_fills.clear();
+ 			(*layerm)->outer_wall_lower_passes.clear();
     	} else {
 	        size_t region_id = layerm - m_regions.begin();
 	        if (done[region_id])
@@ -443,6 +445,7 @@ void Layer::make_perimeters()
 	        if (layerms.size() == 1 && clipped.empty()) {  // optimization
 	            (*layerm)->fill_surfaces.surfaces.clear();
                 (*layerm)->make_perimeters((*layerm)->slices, {*layerm}, &(*layerm)->fill_surfaces, &(*layerm)->fill_no_overlap_expolygons);
+                (*layerm)->split_outer_wall();
 	            (*layerm)->fill_expolygons = to_expolygons((*layerm)->fill_surfaces.surfaces);
 	        } else {
 	            // Orca: Unlike the compatible regions above, the initiating region has not
@@ -478,6 +481,7 @@ void Layer::make_perimeters()
 	                remove_extrusions_over(layerm_config->perimeters, to_polygons(clipped));
 	                remove_extrusions_over(layerm_config->thin_fills, to_polygons(clipped));
 	            }
+                layerm_config->split_outer_wall();
 
 	            // assign fill_surfaces to each layer, clearing those of a previous run first, which an empty fill would keep
 	            for (LayerRegion *l : layerms) {

@@ -2632,18 +2632,32 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     // height before the rest of the layer, so nothing printed earlier may stand higher beside them.
     {
         std::set<int> pass_wall_filaments;
-        // Heights above the bed the layers of an object end at, as planned before the layers out of the width
-        // range are split.
-        std::vector<std::vector<coordf_t>> layer_tops(m_objects.size());
-        auto object_layer_tops = [this, &layer_tops, &layer_height_profile](const size_t print_object_idx) -> const std::vector<coordf_t>& {
-            std::vector<coordf_t> &tops = layer_tops[print_object_idx];
-            if (tops.empty()) {
+        // Heights above the bed the layers of an object end at: as planned, and with the thin layers it may
+        // split any of them into where its own passes do not fit.
+        struct LayerTops
+        {
+            std::vector<coordf_t> planned;
+            std::vector<coordf_t> possible;
+        };
+        std::vector<LayerTops> layer_tops(m_objects.size());
+        auto object_layer_tops = [this, &layer_tops, &layer_height_profile](const size_t print_object_idx) -> const LayerTops& {
+            LayerTops &tops = layer_tops[print_object_idx];
+            if (tops.planned.empty()) {
                 const PrintObject          &object = *m_objects[print_object_idx];
                 const std::vector<coordf_t> layers = generate_object_layers(object.slicing_parameters(), layer_height_profile(print_object_idx),
                                                                             object.config().precise_z_height.value);
-                tops.reserve(layers.size() / 2);
-                for (size_t i = 1; i < layers.size(); i += 2)
-                    tops.emplace_back(layers[i] + object.slicing_parameters().object_print_z_min);
+                const coordf_t              zmin   = object.slicing_parameters().object_print_z_min;
+                const size_t                splits = object.outer_wall_passes_enabled() &&
+                    object.config().split_outer_wall_fallback.value == SplitOuterWallFallback::SplitLayer ?
+                    size_t(object.config().split_outer_wall_count.value) : 1;
+                tops.planned.reserve(layers.size() / 2);
+                for (size_t i = 1; i < layers.size(); i += 2) {
+                    tops.planned.emplace_back(layers[i] + zmin);
+                    // The first layer is never split.
+                    for (size_t split = 1; i > 1 && split < splits; ++ split)
+                        tops.possible.emplace_back(layers[i - 1] + (layers[i] - layers[i - 1]) * coordf_t(split) / coordf_t(splits) + zmin);
+                    tops.possible.emplace_back(layers[i] + zmin);
+                }
             }
             return tops;
         };
@@ -2688,13 +2702,17 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return { L("Split outer wall is not supported with a combined skirt higher than one layer or a draft shield. "
                            "Use a per-object skirt instead."),
                          print_object, "skirt_height" };
+            const bool with_other_objects = m_objects.size() > 1 && m_config.print_sequence.value != PrintSequence::ByObject;
+            // A support layer of a height of its own printed inside the height of an object layer would stand
+            // above the passes of that layer, be it the support of this object or of one printed along with it.
+            if (m_config.independent_support_layer_height.value &&
+                (print_object->has_support_material() ||
+                 (with_other_objects && std::any_of(m_objects.begin(), m_objects.end(),
+                                                    [](const PrintObject *object) { return object->has_support_material(); }))))
+                return { L("Split outer wall requires that the support layers have the same height as the object layers. "
+                           "Disable the independent support layer height."),
+                         print_object, "independent_support_layer_height" };
             if (print_object->has_support_material()) {
-                // A support layer of its own height printed inside the height of an object layer would stand
-                // above the passes of that layer.
-                if (m_config.independent_support_layer_height.value)
-                    return { L("Split outer wall requires that the support layers have the same height as the object layers. "
-                               "Disable the independent support layer height."),
-                             print_object, "independent_support_layer_height" };
                 // Organic supports are built of layers of one height.
                 if (split_layers && is_tree(object_config.support_type.value) &&
                     (object_config.support_style.value == smsTreeOrganic || object_config.support_style.value == smsDefault))
@@ -2702,7 +2720,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                                "supported with Organic supports."),
                              print_object, "split_outer_wall_fallback" };
             }
-            if (m_objects.size() > 1 && m_config.print_sequence.value != PrintSequence::ByObject) {
+            if (with_other_objects) {
                 // The thin layers of one object would stand above the lower passes of another one.
                 if (split_layers && object_config.split_outer_wall_count.value > 2)
                     return { L("Split outer wall in more than two passes with the layers out of the width range split "
@@ -2711,11 +2729,16 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 // A layer of another object ending above the lowest pass of a layer of this object would be printed
                 // before that pass and stand above it. The layer height alone does not tell: a layer height
                 // profile, a raft and the precise Z height shift the layers as well.
-                const std::vector<coordf_t> &tops = object_layer_tops(print_object_idx);
+                const std::vector<coordf_t> &tops = object_layer_tops(print_object_idx).planned;
                 for (size_t other_idx = 0; other_idx < m_objects.size(); ++ other_idx) {
                     if (other_idx == print_object_idx)
                         continue;
-                    for (const coordf_t other_top : object_layer_tops(other_idx)) {
+                    // The layers of a raft have heights of their own.
+                    if (m_objects[other_idx]->config().raft_layers.value > 0)
+                        return { L("Split outer wall is not supported with a raft under another object. "
+                                   "Print the objects one by one otherwise."),
+                                 m_objects[other_idx], "raft_layers" };
+                    for (const coordf_t other_top : object_layer_tops(other_idx).possible) {
                         // The layer of this object the other layer ends in. The first layer has no passes.
                         const auto layer_top = std::lower_bound(tops.begin(), tops.end(), other_top - EPSILON);
                         if (layer_top == tops.begin() || layer_top == tops.end() || *layer_top - other_top < EPSILON)

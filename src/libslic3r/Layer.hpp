@@ -121,7 +121,16 @@ public:
     bool    has_extrusions() const { return ! this->perimeters.entities.empty() || ! this->fills.entities.empty(); }
     //BBS
     void    simplify_infill_extrusion_entity() { simplify_entity_collection(&fills); }
-    void    simplify_wall_extrusion_entity() { simplify_entity_collection(&perimeters); }
+    void    simplify_wall_extrusion_entity()
+    {
+        simplify_entity_collection(&perimeters);
+        for (ExtrusionEntityCollection &pass : outer_wall_lower_passes)
+            simplify_entity_collection(&pass);
+    }
+    // Orca: split the loops of the outer wall of a layer printed in thin passes, see OuterWallPasses.hpp.
+    // Called by Layer::make_perimeters() once the walls of this region are final: a wall cut where it was
+    // handed to a neighbouring region is not a loop any more and stays as it is.
+    void    split_outer_wall();
 private:
     void    simplify_entity_collection(ExtrusionEntityCollection* entity_collection);
     void    simplify_path(ExtrusionPath* path);

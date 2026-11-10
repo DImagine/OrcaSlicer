@@ -67,7 +67,10 @@ outer wall, and the wall generator prints the outer wall before the inner walls
 whatever the wall sequence is, as the passes go first. The walls of such a layer
 are printed before its infill as well, even with the infill set to go first.
 
-`split_outer_wall_loops()` then replaces every loop of the outer wall
+`LayerRegion::split_outer_wall()` is called by `Layer::make_perimeters()` once
+the walls of a region are final, that is after the walls handed to neighbouring
+regions are cut away: a cut wall is not a loop any more and stays as it is.
+`split_outer_wall_loops()` replaces every loop of the outer wall
 (`OuterWallPasses.cpp`): the loop is sampled, the offsets `d_k` are measured at
 the samples as differences of signed distances to `S_k` and `S_mid`, and each
 pass is built as a variable width loop. The top pass takes the place of the
@@ -123,21 +126,27 @@ out, as it is with a prime tower.
 - a skirt around all the objects higher than one layer and a draft shield, which
   are printed at the layer height before the lower passes; a per-object skirt is
   printed with its object, after them,
-- support of an independent layer height when the option is set for an object only,
+- support of an independent layer height, of the object itself or of any object
+  printed along with it, when the option is set for an object only,
 - Organic supports together with layers split into thin layers, as Organic
   supports are built of layers of one height,
 - several objects whose layers do not end at the same heights (different layer
   heights, a layer height profile, a raft, the precise Z height on objects of
   different heights), and more than two passes together with layers split into
   thin layers for several objects: layers of another object printed earlier
-  would stand above the lower passes. A layer of another object may end no
-  higher than the lowest pass of the layer it ends in. Objects printed one by
-  one are not restricted,
+  would stand above the lower passes. A layer of another object, or a thin layer
+  it may split its layers into, may end no higher than the lowest pass of the
+  layer it ends in. A raft under another object is rejected, as its layers have
+  heights of their own. Objects printed one by one are not restricted,
 - outer walls of several filaments among the objects the option is on for.
 
 ## Limitations
 
 - A loop with an overhanging part is printed as one regular loop.
+- A model with shallow parts prints many of its layers by the fallback: only the
+  layers steeper than the limit all around get the passes.
+- The slicing cache of the command line (`export_cached_data`) does not store
+  the passes.
 - With `split_outer_wall_holes` off the walls of holes are printed in one pass at
   the layer height, but still with the nominal width.
 - At corners sharper than about 41° the miter of the offset is limited and the

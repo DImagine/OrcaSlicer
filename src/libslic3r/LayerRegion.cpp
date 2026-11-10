@@ -180,11 +180,15 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         g.process_arachne();
     else
         g.process_classic();
+}
 
-    if (pass_slices != nullptr)
+void LayerRegion::split_outer_wall()
+{
+    this->outer_wall_lower_passes.clear();
+    if (const OuterWallPassSlices *pass_slices = this->layer()->outer_wall_pass_slices.get(); pass_slices != nullptr)
         split_outer_wall_loops(this->perimeters, this->outer_wall_lower_passes, *pass_slices,
                                this->flow(frExternalPerimeter, this->layer()->height / double(pass_slices->count())),
-                               object_config.split_outer_wall_holes.value);
+                               this->layer()->object()->config().split_outer_wall_holes.value);
 }
 
 #if 1
