@@ -480,6 +480,17 @@ TEST_CASE("Settings the passes cannot be printed safely with are rejected", "[Ou
         return print.validate().string;
     };
 
+    // The same about two cubes with a setting of the second one changed.
+    auto validate_second_cube = [](const char *fallback, const ConfigBase::SetDeserializeItem &second_cube_setting) {
+        DynamicPrintConfig config = passes_config(fallback);
+        config.set_deserialize_strict({ { "layer_change_gcode", "G92 E0\n" }, { "min_layer_height", "0.04" } });
+        const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides { {}, { second_cube_setting } };
+        Print print;
+        Model model;
+        init_print(std::vector<TriangleMesh>{ cube(20.), cube(20.) }, print, model, config, &overrides);
+        return print.validate().string;
+    };
+
     SECTION("the settings of the other tests are accepted") {
         REQUIRE(validate({}).empty());
         REQUIRE(validate({}, 20.).empty());
@@ -496,21 +507,53 @@ TEST_CASE("Settings the passes cannot be printed safely with are rejected", "[Ou
     SECTION("thin layers another object may split its layers into count as well") {
         // The second cube is printed at half the layer height. Its layers end at the lowest pass of the first
         // cube or at its layer height, but the thin layers it may be split into end in between.
-        auto validate_two_heights = [](const char *fallback) {
-            DynamicPrintConfig config = passes_config(fallback);
-            config.set_deserialize_strict({ { "layer_change_gcode", "G92 E0\n" }, { "min_layer_height", "0.04" } });
-            const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides { {}, { { "layer_height", 0.1 } } };
-            Print print;
-            Model model;
-            init_print(std::vector<TriangleMesh>{ cube(20.), cube(20.) }, print, model, config, &overrides);
-            return print.validate().string;
-        };
-        REQUIRE_THAT(validate_two_heights("split_layer"), ContainsSubstring("end at the same heights"));
-        REQUIRE(validate_two_heights("regular").empty());
+        REQUIRE_THAT(validate_second_cube("split_layer", { "layer_height", 0.1 }), ContainsSubstring("end at the same heights"));
+        REQUIRE(validate_second_cube("regular", { "layer_height", 0.1 }).empty());
+    }
+    SECTION("a raft under another object has layers of heights of its own") {
+        REQUIRE_THAT(validate_second_cube("regular", { "raft_layers", 3 }), ContainsSubstring("raft under another object"));
     }
     SECTION("a width range that makes no printable line") {
         REQUIRE_THAT(validate({ { "split_outer_wall_min_width", "0.01" }, { "split_outer_wall_max_width", "0.01" } }),
                      ContainsSubstring("too small"));
         REQUIRE_THAT(validate({ { "split_outer_wall_max_width", "3" } }), ContainsSubstring("too large"));
     }
+}
+
+TEST_CASE("A wall cut for the bridge of a neighbouring region keeps no pass below it", "[OuterWallPasses]")
+{
+    // Two pillars 10 mm apart and a deck over the gap between them as a part with walls of its own. The deck takes
+    // a strip of the pillars to anchor its bridge on, and the walls of the pillars are cut away there.
+    TriangleMesh pillars = make_cube(10., 20., 6.);
+    TriangleMesh pillar  = make_cube(10., 20., 6.);
+    pillar.translate(20.f, 0.f, 0.f);
+    pillars.merge(pillar);
+    TriangleMesh deck = make_cube(10., 20., 1.);
+    deck.translate(10.f, 0.f, 5.f);
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "deck.stl";
+    object->add_volume(std::move(pillars));
+    object->add_volume(std::move(deck))->config.set("wall_loops", 3);
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.apply(model, passes_config("regular"));
+    print.set_status_silent();
+    print.process();
+
+    // Every pass below the layer height has its top pass, and a wall that is no loop any more has neither.
+    size_t layers_with_passes = 0;
+    for (const Layer *layer : print.objects().front()->layers())
+        for (const LayerRegion *region : layer->regions()) {
+            const size_t top_passes = count_pass_loops(region->perimeters);
+            CAPTURE(layer->print_z, top_passes);
+            for (const ExtrusionEntityCollection &pass : region->outer_wall_lower_passes) {
+                REQUIRE(pass.entities.size() == top_passes);
+                REQUIRE(count_pass_loops(pass) == top_passes);
+            }
+            if (top_passes > 0)
+                ++ layers_with_passes;
+        }
+    REQUIRE(layers_with_passes > 10);
 }
