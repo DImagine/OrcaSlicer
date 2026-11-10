@@ -310,26 +310,41 @@ static std::vector<ExPolygons> slice_object_outlines(
     return outlines;
 }
 
-bool PrintObject::outer_wall_passes_enabled() const
+bool PrintObject::outer_wall_passes_enabled(std::string *why_not) const
 {
     const PrintConfig &print_config = m_print->config();
     if (! m_config.split_outer_wall.value || m_config.split_outer_wall_count.value < 2)
         return false;
+    std::string reason;
     // The passes are built from the loops of the classic wall generator, on layers stacked the regular way.
-    if (m_config.wall_generator.value != PerimeterGeneratorType::Classic || print_config.spiral_mode.value ||
-        print_config.belt_printer.value || m_config.raft_layers.value > 0 || this->is_fuzzy_skin_painted() ||
-        // A painted object is cut into regions of several filaments after the layers are planned.
-        this->is_mm_painted())
-        return false;
-    for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
+    if (m_config.wall_generator.value != PerimeterGeneratorType::Classic)
+        reason = L("Split outer wall is not applied: it requires the classic wall generator.");
+    else if (print_config.spiral_mode.value)
+        reason = L("Split outer wall is not applied: it is not supported in the spiral vase mode.");
+    else if (print_config.belt_printer.value)
+        reason = L("Split outer wall is not applied: it is not supported on belt printers.");
+    else if (m_config.raft_layers.value > 0)
+        reason = L("Split outer wall is not applied: it is not supported with a raft.");
+    else if (this->is_fuzzy_skin_painted())
+        reason = L("Split outer wall is not applied: it is not supported with fuzzy skin.");
+    // A painted object is cut into regions of several filaments after the layers are planned.
+    else if (this->is_mm_painted())
+        reason = L("Split outer wall is not applied: it is not supported for objects painted with several filaments.");
+    for (size_t region_id = 0; reason.empty() && region_id < this->num_printing_regions(); ++ region_id) {
         const PrintRegionConfig &region_config = this->printing_region(region_id).config();
         // Z contouring moves the slicing plane and the walls, fuzzy skin displaces the outer wall.
         // None stands for fuzzy skin on the painted areas only, which are excluded above.
         const FuzzySkinType fuzzy_skin = region_config.fuzzy_skin.value;
-        if (region_config.zaa_enabled.value || (fuzzy_skin != FuzzySkinType::None && fuzzy_skin != FuzzySkinType::Disabled_fuzzy))
-            return false;
+        if (region_config.zaa_enabled.value)
+            reason = L("Split outer wall is not applied: it is not supported with Z contouring.");
+        else if (fuzzy_skin != FuzzySkinType::None && fuzzy_skin != FuzzySkinType::Disabled_fuzzy)
+            reason = L("Split outer wall is not applied: it is not supported with fuzzy skin.");
     }
-    return true;
+    if (reason.empty())
+        return true;
+    if (why_not != nullptr)
+        *why_not = std::move(reason);
+    return false;
 }
 
 bool PrintObject::outer_wall_pass_width_range(double &min_width, double &max_width) const

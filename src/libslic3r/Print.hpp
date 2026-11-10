@@ -606,7 +606,8 @@ private:
     void slice_volumes();
     // Orca: outer wall printed in several thin passes, see OuterWallPasses.hpp.
     // Whether the option is on and compatible with the other settings of this object.
-    bool outer_wall_passes_enabled() const;
+    // If the option is on, but another setting rules it out, why_not receives a message for the user.
+    bool outer_wall_passes_enabled(std::string *why_not = nullptr) const;
     // Allowed width of a pass, unscaled. Returns false if the configured range is not valid.
     bool outer_wall_pass_width_range(double &min_width, double &max_width) const;
     // Decide for each object layer (pairs of bottom / top Z), whether its outer wall is printed in passes.

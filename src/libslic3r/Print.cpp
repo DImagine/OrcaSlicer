@@ -2633,8 +2633,12 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     {
         std::set<int> pass_wall_filaments;
         for (const PrintObject *print_object : m_objects) {
-            if (! print_object->outer_wall_passes_enabled())
+            // The option switched on, but ruled out by another setting, would do nothing without a word.
+            if (std::string why_not; ! print_object->outer_wall_passes_enabled(&why_not)) {
+                if (! why_not.empty())
+                    warn(why_not, "split_outer_wall", print_object);
                 continue;
+            }
             const PrintObjectConfig &object_config = print_object->config();
             const bool               split_layers  = object_config.split_outer_wall_fallback.value == SplitOuterWallFallback::SplitLayer;
             double min_width = 0.;

@@ -10606,6 +10606,15 @@ t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int us
             }
         }
         */
+
+        // Orca: the lower passes of a split outer wall are printed below the layer height, where a support
+        // layer of a height of its own would already stand. An object switching the option on by itself
+        // is stopped by Print::validate().
+        if (const ConfigOptionBool *split_opt = this->option<ConfigOptionBool>("split_outer_wall");
+            islh_opt != nullptr && islh_opt->value && split_opt != nullptr && split_opt->value) {
+            islh_opt->value = false;
+            changed_keys.push_back("independent_support_layer_height");
+        }
     }
 
     return changed_keys;
