@@ -9,6 +9,8 @@
 #include "GCodeWriter.hpp"
 #include "GCode/BeltKinematics.hpp"
 #include "Layer.hpp"
+#include "AABBTreeLines.hpp"
+#include "Line.hpp"
 #include "Point.hpp"
 #include "PlaceholderParser.hpp"
 #include "PrintConfig.hpp"
@@ -943,6 +945,8 @@ protected:
     // Orca: start points of the split outer walls of the current layer, by the first points of the loops of
     // their passes as stored in the layer, so that all the passes of an outer wall start at the same point.
     std::unordered_map<Point, Point, PointHash> m_outer_wall_pass_seams;
+    // Orca: set while the passes of the split outer walls below the layer height are being printed.
+    bool m_printing_outer_wall_lower_passes = false;
     // Orca: outlines the passes of the split outer walls of the current layer lean on, by layer and pass.
     std::map<std::pair<const Layer*, size_t>, std::shared_ptr<const AABBTreeLines::LinesDistancer<Linef3>>> m_outer_wall_pass_supports;
     bool m_need_change_layer_lift_z = false;

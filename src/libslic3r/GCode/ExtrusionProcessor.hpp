@@ -520,7 +520,6 @@ public:
     // Orca: measure the extrusions that follow against this outline instead of the layer below, until reset
     // with nullptr. For the thin passes of a split outer wall, which lean on the pass below them.
     void set_custom_boundaries(std::shared_ptr<const AABBTreeLines::LinesDistancer<Linef3>> boundaries) { custom_boundaries = std::move(boundaries); }
-    bool has_custom_boundaries() const { return custom_boundaries != nullptr; }
 
     // Takes the data computed ahead for the layer about to be generated, replacing the previous layer's.
     void set_precomputed_layers(std::vector<PrecomputedOverhangLayer> &&layers) { precomputed_layers = std::move(layers); }

@@ -8547,7 +8547,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     // Orca: the top pass of a split outer wall leans on the pass below it. The lower passes get their support
     // set by extrude_outer_wall_lower_passes().
     const bool is_top_pass = loop_ref.outer_wall_pass && m_layer != nullptr && m_layer->outer_wall_pass_slices &&
-                             ! m_extrusion_quality_estimator.has_custom_boundaries();
+                             ! m_printing_outer_wall_lower_passes;
     if (is_top_pass)
         m_extrusion_quality_estimator.set_custom_boundaries(
             this->outer_wall_pass_support(*m_layer, m_layer->outer_wall_pass_slices->count() - 1));
@@ -9001,6 +9001,7 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
         return {};
     std::stable_sort(levels.begin(), levels.end(), [](const PassLevel &lhs, const PassLevel &rhs) { return lhs.z < rhs.z; });
 
+    m_printing_outer_wall_lower_passes = true;
     std::string gcode;
     for (const PassLevel &level : levels) {
         const InstanceToPrint &instance_to_print = *level.instance;
@@ -9122,6 +9123,7 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
         }
     }
 
+    m_printing_outer_wall_lower_passes = false;
     // Flush a pending object end label and return to the layer height on the next travel.
     m_writer.add_object_end_labels(gcode);
     m_nominal_z                = layer_z;

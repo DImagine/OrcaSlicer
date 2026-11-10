@@ -1156,7 +1156,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     toggle_line("ironing_speed", has_ironing || has_support_ironing, -1, _L("Enable ironing or support ironing to edit ironing speed."));
 
     // Orca: settings of the outer wall printed in thin passes
-    const bool has_split_outer_wall = config->opt_bool("split_outer_wall");
+    const bool has_split_outer_wall = config->opt_bool("split_outer_wall") &&
+        config->opt_enum<PerimeterGeneratorType>("wall_generator") != PerimeterGeneratorType::Arachne;
     for (auto el : {"split_outer_wall_count", "split_outer_wall_min_width", "split_outer_wall_max_width", "split_outer_wall_fallback",
                     "split_outer_wall_holes"})
         toggle_line(el, has_split_outer_wall, -1, _L("Enable Split outer wall to use this setting."));

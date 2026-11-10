@@ -330,8 +330,12 @@ TEST_CASE("The filament of the split outer wall is printed first on a layer", "[
         { "brim_type",                        "no_brim" },
     });
     const std::string gcode = Slic3r::Test::slice({ mesh }, config);
-    // The interface is printed with the second filament.
-    REQUIRE(gcode.find("\nT1") != std::string::npos);
+    // The interface is printed with the second filament on several layers: the second of them is the first
+    // one the tool order would start with the interface.
+    size_t interface_changes = 0;
+    for (size_t pos = gcode.find("\nT1"); pos != std::string::npos; pos = gcode.find("\nT1", pos + 1))
+        ++ interface_changes;
+    REQUIRE(interface_changes >= 2);
     const ExtrusionLevels levels = extrusion_levels(gcode);
     REQUIRE(levels.has(5100));
     REQUIRE_FALSE(levels.went_below);

@@ -521,6 +521,7 @@ void ToolOrdering::sort_and_build_data(const PrintObject& object , unsigned int 
         // Orca reorders a second time here (BBS has no such path); re-enforce so the
         // mixed sub-layer component order survives the extra pass.
         this->enforce_mixed_component_order();
+        this->enforce_outer_wall_passes_order();
         this->fill_wipe_tower_partitions(object.print()->config(), object.layers().front()->print_z - object.layers().front()->height, max_layer_height);
     }
 
