@@ -32,6 +32,7 @@
 #include "I18N.hpp"
 #include "IMEXHelpers.hpp"
 #include "GCode.hpp"
+#include "OuterWallPasses.hpp"
 #include <cstdio>
 #include "Exception.hpp"
 #include "LifecycleEvents.hpp"
@@ -6642,6 +6643,7 @@ LayerResult GCode::process_layer(
         layer_ptr = support_layer;
     const Layer& layer = *layer_ptr;
     m_cur_layer_idx = layer.id();
+    m_outer_wall_pass_seams.clear();
     // A per-layer nozzle grouping can move the active filament to another variant column on a
     // layer boundary without a toolchange, so re-resolve the writer's config column here.
     if (Extruder *cur_filament = m_writer.filament())
@@ -7604,6 +7606,9 @@ LayerResult GCode::process_layer(
 
         auto &filament_plan = filament_to_print_instances[extruder_id];
         std::vector<InstanceToPrint>     &instances_to_print = filament_plan.first;
+
+        // Orca: the lower passes of the split outer walls go first, everything else of this layer is printed above them.
+        gcode += this->extrude_outer_wall_lower_passes(print, layers, layer_tools, instances_to_print, extruder_id, print_z);
         const std::vector<InstanceVisit> &instance_visits    = filament_plan.second;
 
         // We are almost ready to print. However, we must go through all the objects twice to print the overridden extrusions first (infill/perimeter wiping feature):
@@ -8557,7 +8562,11 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     float seam_overhang = std::numeric_limits<float>::lowest();
     if (!m_config.spiral_mode && description == "perimeter") {
         assert(m_layer != nullptr);
-        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang);
+        // Orca: the passes of a split outer wall start at the point chosen for its lowest pass.
+        if (const auto pass_seam = m_outer_wall_pass_seams.find(&loop_ref); pass_seam != m_outer_wall_pass_seams.end())
+            loop.split_at(pass_seam->second, false);
+        else
+            m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang);
     } else
         loop.split_at(last_pos, false);
 
@@ -8570,7 +8579,9 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     bool enable_seam_slope = ((seam_scarf_type == SeamScarfType::External && !is_hole) || seam_scarf_type == SeamScarfType::All) &&
         !m_config.spiral_mode && !m_config.belt_printer.value &&
         (loop.role() == erExternalPerimeter || (loop.role() == erPerimeter && m_config.seam_slope_inner_walls)) &&
-        layer_id() > 0;
+        layer_id() > 0 &&
+        // Orca: a scarf joint of a pass of a split outer wall would start inside the pass below it.
+        !loop.outer_wall_pass;
     const auto nozzle_diameter = EXTRUDER_CONFIG(nozzle_diameter);
     if (enable_seam_slope && m_config.seam_slope_conditional.value) {
         enable_seam_slope = loop.is_smooth(m_config.scarf_angle_threshold.value * M_PI / 180., nozzle_diameter);
@@ -8921,6 +8932,165 @@ std::string GCode::extrude_path(const ExtrusionPath& path, const std::string& de
             m_wipe.path.reverse();
     }
 
+    return gcode;
+}
+
+// Orca: the top passes of the split outer walls, in the order of their lower passes in LayerRegion::outer_wall_lower_passes.
+static void collect_outer_wall_top_passes(const ExtrusionEntityCollection &collection, std::vector<const ExtrusionLoop*> &top_passes)
+{
+    for (const ExtrusionEntity *entity : collection.entities)
+        if (entity->is_collection())
+            collect_outer_wall_top_passes(*static_cast<const ExtrusionEntityCollection*>(entity), top_passes);
+        else if (entity->is_loop() && static_cast<const ExtrusionLoop*>(entity)->outer_wall_pass)
+            top_passes.emplace_back(static_cast<const ExtrusionLoop*>(entity));
+}
+
+// Orca: Print the passes of the split outer walls lying below the layer height, the lowest first over all the
+// instances, so that the nozzle never works beside something printed higher on this layer.
+std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std::vector<LayerToPrint> &layers, const LayerTools &layer_tools,
+                                                   const std::vector<InstanceToPrint> &instances_to_print, unsigned int extruder_id,
+                                                   coordf_t print_z)
+{
+    struct PassLevel
+    {
+        double                 z;
+        const InstanceToPrint *instance;
+        size_t                 pass;
+    };
+    std::vector<PassLevel> levels;
+    for (const InstanceToPrint &instance : instances_to_print) {
+        const Layer *layer = layers[instance.layer_id].object_layer;
+        if (layer == nullptr || ! layer->outer_wall_pass_slices)
+            continue;
+        const size_t count = layer->outer_wall_pass_slices->count();
+        for (size_t pass = 0; pass + 1 < count; ++ pass)
+            levels.push_back({ layer->print_z - layer->height * double(count - 1 - pass) / double(count), &instance, pass });
+    }
+    if (levels.empty())
+        return {};
+    std::stable_sort(levels.begin(), levels.end(), [](const PassLevel &lhs, const PassLevel &rhs) { return lhs.z < rhs.z; });
+
+    std::string gcode;
+    for (const PassLevel &level : levels) {
+        const InstanceToPrint &instance_to_print = *level.instance;
+        const PrintObject     &print_object      = instance_to_print.print_object;
+        const PrintInstance   &inst              = print_object.instances()[instance_to_print.instance_id];
+        const Layer           &layer             = *layers[instance_to_print.layer_id].object_layer;
+
+        // Regions whose outer wall is printed by this extruder.
+        std::vector<const LayerRegion*> layerms;
+        for (const LayerRegion *layerm : layer.regions()) {
+            if (layerm == nullptr || level.pass >= layerm->outer_wall_lower_passes.size() ||
+                layerm->outer_wall_lower_passes[level.pass].entities.empty())
+                continue;
+            unsigned int wall_extruder = layer_tools.wall_extruder_id(print.get_print_region(layerm->region().print_region_id()));
+            if (! layer_tools.has_extruder(wall_extruder))
+                wall_extruder = layer_tools.extruders.back();
+            if (wall_extruder == extruder_id)
+                layerms.emplace_back(layerm);
+        }
+        if (layerms.empty())
+            continue;
+
+        // The same setup of an instance as for its regular extrusions in process_layer().
+        m_config.apply(print.default_region_config());
+        m_config.apply(print_object.config(), true);
+        m_layer = &layer;
+        m_object_layer_over_raft = false;
+        if (m_config.reduce_crossing_wall)
+            m_avoid_crossing_perimeters.init_layer(*m_layer);
+        if (this->config().gcode_label_objects)
+            gcode += std::string("; printing object ") + print_object.model_object()->name + " id:" + std::to_string(print_object.get_id()) +
+                     " copy " + std::to_string(inst.id) + "\n";
+        if (m_enable_exclude_object) {
+            if (is_BBL_Printer()) {
+                m_writer.set_object_start_str(std::string("; start printing object, unique label id: ") +
+                                              std::to_string(instance_to_print.label_object_id) + "\n" + "M624 " +
+                                              _encode_label_ids_to_base64({instance_to_print.label_object_id}) + "\n");
+            } else {
+                const auto gflavor = print.config().gcode_flavor.value;
+                if (gflavor == gcfKlipper)
+                    m_writer.set_object_start_str(std::string("EXCLUDE_OBJECT_START NAME=") + instance_name(inst) + "\n");
+                else if (gflavor == gcfMarlinLegacy || gflavor == gcfMarlinFirmware || gflavor == gcfRepRapFirmware)
+                    m_writer.set_object_start_str(std::string("M486 S") + std::to_string(inst.unique_id) + "\n");
+            }
+        }
+        m_extrusion_quality_estimator.set_current_object(&print_object);
+        const Point &offset = inst.shift;
+        const std::pair<const PrintObject*, Point> this_object_copy(&print_object, offset);
+        if (m_last_obj_copy != this_object_copy)
+            m_avoid_crossing_perimeters.use_external_mp_once();
+        m_last_obj_copy = this_object_copy;
+        this->set_origin(unscale(offset));
+        this->on_set_origin(&print_object, offset);
+
+        // The nozzle descends to the pass on the travel to it, as at a layer change.
+        m_nominal_z                = level.z;
+        m_need_change_layer_lift_z = true;
+
+        for (const LayerRegion *layerm : layerms) {
+            m_config.apply(print.get_print_region(layerm->region().print_region_id()).config());
+            std::vector<const ExtrusionLoop*> top_passes;
+            collect_outer_wall_top_passes(layerm->perimeters, top_passes);
+            const ExtrusionEntitiesPtr &loops = layerm->outer_wall_lower_passes[level.pass].entities;
+            std::vector<bool>           printed(loops.size(), false);
+            for (size_t num_printed = 0; num_printed < loops.size(); ++ num_printed) {
+                // Continue with the closest loop.
+                size_t closest      = 0;
+                double closest_dist = std::numeric_limits<double>::max();
+                for (size_t loop_idx = 0; loop_idx < loops.size(); ++ loop_idx)
+                    if (! printed[loop_idx]) {
+                        const double dist = this->last_pos_defined() ?
+                            (loops[loop_idx]->first_point() - this->last_pos()).cast<double>().squaredNorm() : double(loop_idx);
+                        if (dist < closest_dist) {
+                            closest_dist = dist;
+                            closest      = loop_idx;
+                        }
+                    }
+                printed[closest] = true;
+                const ExtrusionLoop &loop = *static_cast<const ExtrusionLoop*>(loops[closest]);
+                // Choose the start point of the outer wall once and use it for all its passes.
+                const ExtrusionLoop *top_pass = closest < top_passes.size() ? top_passes[closest] : nullptr;
+                Point                seam;
+                if (const auto known = m_outer_wall_pass_seams.find(top_pass); known != m_outer_wall_pass_seams.end()) {
+                    seam = known->second;
+                } else {
+                    ExtrusionLoop placed        = loop;
+                    float         seam_overhang = std::numeric_limits<float>::lowest();
+                    m_seam_placer.place_seam(m_layer, placed, this->last_pos(), seam_overhang);
+                    seam = placed.first_point();
+                    if (top_pass != nullptr)
+                        m_outer_wall_pass_seams.emplace(top_pass, seam);
+                }
+                m_outer_wall_pass_seams.emplace(&loop, seam);
+                gcode += this->extrude_loop(loop, "perimeter", -1.);
+            }
+        }
+
+        if (this->config().gcode_label_objects)
+            gcode += std::string("; stop printing object ") + print_object.model_object()->name + " id:" + std::to_string(print_object.get_id()) +
+                     " copy " + std::to_string(inst.id) + "\n";
+        // Don't set the end label if the start label was not written.
+        if (! m_writer.is_object_start_str_empty()) {
+            m_writer.set_object_start_str("");
+        } else if (m_enable_exclude_object) {
+            if (is_BBL_Printer()) {
+                m_writer.set_object_end_str(std::string("; stop printing object, unique label id: ") +
+                                            std::to_string(instance_to_print.label_object_id) + "\n" + "M625\n");
+            } else {
+                const auto gflavor = print.config().gcode_flavor.value;
+                if (gflavor == gcfKlipper)
+                    m_writer.set_object_end_str(std::string("EXCLUDE_OBJECT_END NAME=") + instance_name(inst) + "\n");
+                else if (gflavor == gcfMarlinLegacy || gflavor == gcfMarlinFirmware || gflavor == gcfRepRapFirmware)
+                    m_writer.set_object_end_str(std::string("M486 S-1\n"));
+            }
+        }
+    }
+
+    // Flush a pending object end label and return to the layer height on the next travel.
+    m_writer.add_object_end_labels(gcode);
+    m_nominal_z                = print_z;
+    m_need_change_layer_lift_z = true;
     return gcode;
 }
 

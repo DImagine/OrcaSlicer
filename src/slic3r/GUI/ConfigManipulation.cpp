@@ -1155,6 +1155,12 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     
     toggle_line("ironing_speed", has_ironing || has_support_ironing, -1, _L("Enable ironing or support ironing to edit ironing speed."));
 
+    // Orca: settings of the outer wall printed in thin passes
+    const bool has_split_outer_wall = config->opt_bool("split_outer_wall");
+    for (auto el : {"split_outer_wall_count", "split_outer_wall_min_width", "split_outer_wall_max_width", "split_outer_wall_fallback",
+                    "split_outer_wall_holes"})
+        toggle_line(el, has_split_outer_wall);
+
     bool has_zaa = config->opt_bool("zaa_enabled");
     for (auto el : {"zaa_minimize_perimeter_height", "zaa_min_z", "zaa_dont_alternate_fill_direction", "ironing_expansion"})
         toggle_line(el, has_zaa, -1, _L("Enable Z contouring to use this setting."));

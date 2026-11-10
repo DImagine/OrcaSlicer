@@ -8,6 +8,7 @@
 #include "ClipperUtils.hpp"
 #include "Geometry.hpp"
 #include "Line.hpp"
+#include "OuterWallPasses.hpp"
 #include "PerimeterGenerator.hpp"
 #include "Point.hpp"
 #include "Polygon.hpp"
@@ -52,7 +53,11 @@ Flow LayerRegion::flow(FlowRole role) const
 
 Flow LayerRegion::flow(FlowRole role, double layer_height) const
 {
-    return m_region->flow(*m_layer->object(), role, layer_height, m_layer->id() == 0);
+    Flow flow = m_region->flow(*m_layer->object(), role, layer_height, m_layer->id() == 0);
+    // Orca: the passes of a split outer wall share the inner edge of an outer wall of the nominal width.
+    if (role == frExternalPerimeter && m_layer->outer_wall_pass_slices)
+        flow = flow.with_width(float(m_layer->outer_wall_pass_slices->nominal_width()));
+    return flow;
 }
 
 Flow LayerRegion::bridging_flow(FlowRole role, bool thick_bridge) const
@@ -111,6 +116,7 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
 {
     this->perimeters.clear();
     this->thin_fills.clear();
+    this->outer_wall_lower_passes.clear();
 
     const PrintConfig       &print_config  = this->layer()->object()->print()->config();
     const PrintRegionConfig &region_config = this->region().config();
@@ -159,6 +165,9 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.ext_perimeter_flow    = this->flow(frExternalPerimeter);
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill);
+    // Orca: the passes of a split outer wall are printed below the layer height, thus before the inner walls.
+    const OuterWallPassSlices *pass_slices = this->layer()->outer_wall_pass_slices.get();
+    g.force_outer_wall_first = pass_slices != nullptr;
 
     // Cumulative sum of polygons over all the regions, less what the lower layer could not print.
     ExPolygons lower_slices;
@@ -171,6 +180,11 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         g.process_arachne();
     else
         g.process_classic();
+
+    if (pass_slices != nullptr)
+        split_outer_wall_loops(this->perimeters, this->outer_wall_lower_passes, *pass_slices,
+                               this->flow(frExternalPerimeter, this->layer()->height / double(pass_slices->count())),
+                               object_config.split_outer_wall_holes.value);
 }
 
 #if 1

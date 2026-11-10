@@ -427,6 +427,12 @@ enum GapFillTarget {
      gftEverywhere, gftTopBottom, gftNowhere
  };
 
+// Orca: what to do with a layer whose outer wall passes do not fit the allowed line width range.
+enum class SplitOuterWallFallback {
+    SplitLayer, // slice the layer as several thin layers
+    Regular,    // print the layer the regular way
+};
+
 
 enum LiftType {
     NormalLift,
@@ -1429,6 +1435,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatsNullable,     initial_layer_jerk))
     ((ConfigOptionFloatsNullable,     travel_jerk))
     ((ConfigOptionBool,               precise_z_height))
+    // Orca: outer wall printed in several thin passes.
+    ((ConfigOptionBool,               split_outer_wall))
+    ((ConfigOptionInt,                split_outer_wall_count))
+    ((ConfigOptionFloatOrPercent,     split_outer_wall_min_width))
+    ((ConfigOptionFloatOrPercent,     split_outer_wall_max_width))
+    ((ConfigOptionEnum<SplitOuterWallFallback>, split_outer_wall_fallback))
+    ((ConfigOptionBool,               split_outer_wall_holes))
     ((ConfigOptionFloatsNullable,     default_junction_deviation))
 
     ((ConfigOptionBool, interlocking_beam))

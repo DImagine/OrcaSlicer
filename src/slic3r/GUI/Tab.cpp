@@ -3065,6 +3065,12 @@ void TabPrint::build()
         optgroup->append_single_option_line("elefant_foot_compensation_layers", "quality_settings_precision#elephant-foot-compensation");
         optgroup->append_single_option_line("precise_outer_wall", "quality_settings_precision#precise-wall");
         optgroup->append_single_option_line("precise_z_height", "quality_settings_precision#precise-z-height");
+        optgroup->append_single_option_line("split_outer_wall");
+        optgroup->append_single_option_line("split_outer_wall_count");
+        optgroup->append_single_option_line("split_outer_wall_min_width");
+        optgroup->append_single_option_line("split_outer_wall_max_width");
+        optgroup->append_single_option_line("split_outer_wall_fallback");
+        optgroup->append_single_option_line("split_outer_wall_holes");
         optgroup->append_single_option_line("hole_to_polyhole", "quality_settings_precision#polyholes");
         optgroup->append_single_option_line("hole_to_polyhole_threshold", "quality_settings_precision#polyhole-detection-margin");
         optgroup->append_single_option_line("hole_to_polyhole_twisted", "quality_settings_precision#polyhole-twist");

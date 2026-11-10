@@ -1855,7 +1855,7 @@ void PerimeterGenerator::process_classic()
 
             // if brim will be printed, reverse the order of perimeters so that
             // we continue inwards after having finished the brim
-            bool is_outer_wall_first = this->config->wall_sequence == WallSequence::OuterInner;
+            bool is_outer_wall_first = this->force_outer_wall_first || this->config->wall_sequence == WallSequence::OuterInner;
             // Orca: a contour with only a narrow wall hole beside it has nothing to sandwich, and prints the hole first,
             // then the contour, then the gap fill between them, as Arachne does.
             const PerimeterGeneratorLoops &island_loops = contours.front();

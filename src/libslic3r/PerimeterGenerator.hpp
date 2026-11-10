@@ -96,6 +96,8 @@ public:
     Flow                         ext_perimeter_flow;
     Flow                         overhang_flow;
     Flow                         solid_infill_flow;
+    // Orca: print the outer wall before the inner walls whatever the configured wall sequence is.
+    bool                         force_outer_wall_first = false;
     const PrintRegionConfig     *config;
     const PrintObjectConfig     *object_config;
     const PrintConfig           *print_config;

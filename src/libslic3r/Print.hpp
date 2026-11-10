@@ -63,6 +63,7 @@ class ModelObject;
 class Print;
 class PrintObject;
 class SupportLayer;
+struct OuterWallPassSlices;
 // BBS
 class TreeSupportData;
 class TreeSupport;
@@ -603,6 +604,14 @@ private:
     std::vector<std::set<int>> detect_extruder_geometric_unprintables() const;
 
     void slice_volumes();
+    // Orca: outer wall printed in several thin passes, see OuterWallPasses.hpp.
+    // Whether the option is on and compatible with the other settings of this object.
+    bool outer_wall_passes_enabled() const;
+    // Decide for each object layer (pairs of bottom / top Z), whether its outer wall is printed in passes.
+    // Returns the object layers with the layers that do not fit the pass width range split into thin layers if
+    // configured so, and for each returned layer the slices of its passes, or nullptr for a layer printed without them.
+    std::vector<coordf_t> plan_outer_wall_passes(std::vector<coordf_t>                                     object_layers,
+                                                 std::vector<std::shared_ptr<const OuterWallPassSlices>> &pass_slices) const;
     // Belt mode: shift the sliced layer grid (layer print_z and the belt floor
     // clipping shift) by delta, used by Print::_align_belt_purge_layers() to
     // snap the purge prism's layers onto the printed objects' layer grid.

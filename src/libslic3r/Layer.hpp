@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <string>
 #include <functional>
+#include <memory>
 #include "ExPolygon.hpp"
 
 namespace Slic3r { class ExtrusionLoop; }
@@ -31,6 +32,7 @@ class PrintRegion;
 class PrintRegionConfig;
 class PrintObject;
 class Print;
+struct OuterWallPassSlices;
 
 namespace FillAdaptive {
     struct RegionOctrees;
@@ -84,6 +86,10 @@ public:
     // ordered collection of extrusion paths/loops to build all perimeters
     // (this collection contains only ExtrusionEntityCollection objects)
     ExtrusionEntityCollection   perimeters;
+
+    // Orca: thin passes of the split outer walls printed below the layer height, one collection of loops per pass,
+    // bottom pass first. The top pass is a part of perimeters. See OuterWallPasses.hpp.
+    std::vector<ExtrusionEntityCollection> outer_wall_lower_passes;
 
     // ordered collection of extrusion paths to fill surfaces
     // (this collection contains only ExtrusionEntityCollection objects)
@@ -146,6 +152,8 @@ public:
     Layer              *upper_layer;
     Layer              *lower_layer;
     bool                slicing_errors;
+    // Orca: set on a layer whose outer wall is printed in several thin passes, see OuterWallPasses.hpp.
+    std::shared_ptr<const OuterWallPassSlices> outer_wall_pass_slices;
     coordf_t            slice_z;       // Z used for slicing in unscaled coordinates
     coordf_t            print_z;       // Z used for printing in unscaled coordinates
     coordf_t            height;        // layer height in unscaled coordinates

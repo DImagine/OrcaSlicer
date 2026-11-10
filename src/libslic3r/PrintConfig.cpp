@@ -535,6 +535,12 @@ static t_config_enum_values s_keys_map_GapFillTarget {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(GapFillTarget)
 
+static t_config_enum_values s_keys_map_SplitOuterWallFallback {
+    { "split_layer", int(SplitOuterWallFallback::SplitLayer) },
+    { "regular",     int(SplitOuterWallFallback::Regular) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SplitOuterWallFallback)
+
 static const t_config_enum_values s_keys_map_SLADisplayOrientation = {
     { "landscape",      sladoLandscape},
     { "portrait",       sladoPortrait}
@@ -4421,6 +4427,73 @@ void PrintConfigDef::init_fff_params()
                      "Note that this is an experimental parameter.");
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionBool(0));
+
+    def           = this->add("split_outer_wall", coBool);
+    def->label    = L("Split outer wall");
+    def->category = L("Quality");
+    def->tooltip  = L("Print the outer wall of every layer in several thin passes, so the outer surface looks like a print "
+                      "with a thinner layer height. Inner walls and infill are printed after the outer wall at the full "
+                      "layer height. The outer edge of every pass follows the model at the height of that pass.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def           = this->add("split_outer_wall_count", coInt);
+    def->label    = L("Outer wall passes");
+    def->category = L("Quality");
+    def->tooltip  = L("Number of thin passes the outer wall of a layer is split into.");
+    def->min      = 2;
+    def->max      = 8;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(2));
+
+    def             = this->add("split_outer_wall_min_width", coFloatOrPercent);
+    def->label      = L("Minimum pass width");
+    def->category   = L("Quality");
+    def->tooltip    = L("Narrowest line an outer wall pass may be printed with. Together with the maximum pass width it "
+                        "replaces the outer wall line width on layers printed with outer wall passes. "
+                        "If expressed as a %, it will be computed over the nozzle diameter.");
+    def->sidetext   = L("mm or %");
+    def->ratio_over = "nozzle_diameter";
+    def->min        = 0;
+    def->max        = 1000;
+    def->max_literal = 10;
+    def->mode       = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatOrPercent(85., true));
+
+    def             = this->add("split_outer_wall_max_width", coFloatOrPercent);
+    def->label      = L("Maximum pass width");
+    def->category   = L("Quality");
+    def->tooltip    = L("Widest line an outer wall pass may be printed with. "
+                        "If expressed as a %, it will be computed over the nozzle diameter.");
+    def->sidetext   = L("mm or %");
+    def->ratio_over = "nozzle_diameter";
+    def->min        = 0;
+    def->max        = 1000;
+    def->max_literal = 10;
+    def->mode       = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatOrPercent(150., true));
+
+    def           = this->add("split_outer_wall_fallback", coEnum);
+    def->label    = L("Layers out of width range");
+    def->category = L("Quality");
+    def->tooltip  = L("What to do with a layer where the slope of the model needs passes narrower or wider than allowed.\n\n"
+                      "Split layer: the whole layer is sliced as thin layers.\n"
+                      "Regular: the layer is printed the regular way.");
+    def->enum_keys_map = &ConfigOptionEnum<SplitOuterWallFallback>::get_enum_values();
+    def->enum_values.push_back("split_layer");
+    def->enum_values.push_back("regular");
+    def->enum_labels.push_back(L("Split layer"));
+    def->enum_labels.push_back(L("Regular"));
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<SplitOuterWallFallback>(SplitOuterWallFallback::SplitLayer));
+
+    def           = this->add("split_outer_wall_holes", coBool);
+    def->label    = L("Split outer wall of holes");
+    def->category = L("Quality");
+    def->tooltip  = L("Print the outer wall of holes in thin passes as well. Disable to print the walls of holes the regular "
+                      "way and save time.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
 
     // BBS
     def = this->add("enable_arc_fitting", coEnum);

@@ -1371,6 +1371,8 @@ static std::vector<std::string> s_Preset_print_options{
     "gcode_add_line_number",
     "enable_arc_fitting",
     "precise_z_height",
+    "split_outer_wall", "split_outer_wall_count", "split_outer_wall_min_width", "split_outer_wall_max_width",
+    "split_outer_wall_fallback", "split_outer_wall_holes",
     "infill_combination",
     "infill_combination_max_layer_height", /*"adaptive_layer_height",*/
     "support_bottom_interface_spacing",

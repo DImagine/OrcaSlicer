@@ -25,6 +25,7 @@
 #include "Model.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "ObjectID.hpp"
+#include "OuterWallPasses.hpp"
 #include "Point.hpp"
 #include "Polygon.hpp"
 #include "Print.hpp"
@@ -267,6 +268,155 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                 out.pop_back();
         }
 
+    return out;
+}
+
+// Orca: outlines of the object at the given heights: the model parts less the negative volumes, without the size
+// compensations. Used to plan the passes of a split outer wall, see OuterWallPasses.hpp.
+static std::vector<ExPolygons> slice_object_outlines(
+    const PrintObject                                        &print_object,
+    const std::vector<PrintObjectRegions::LayerRangeRegions> &layer_ranges,
+    const std::vector<float>                                 &zs,
+    const std::function<void()>                              &throw_on_cancel_callback)
+{
+    const ModelVolumePtrs          &model_volumes = print_object.model_object()->volumes;
+    const std::vector<VolumeSlices> volume_slices = slice_volumes_inner(
+        print_object.print()->config(), print_object.config(), print_object.trafo_centered(),
+        model_volumes, layer_ranges, zs, throw_on_cancel_callback);
+
+    std::vector<ExPolygons> outlines(zs.size());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, zs.size()),
+        [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t z_idx = range.begin(); z_idx < range.end(); ++ z_idx) {
+                throw_on_cancel_callback();
+                ExPolygons parts;
+                ExPolygons negatives;
+                for (const VolumeSlices &slices : volume_slices) {
+                    if (z_idx >= slices.slices.size() || slices.slices[z_idx].empty())
+                        continue;
+                    const auto volume = std::find_if(model_volumes.begin(), model_volumes.end(),
+                        [&slices](const ModelVolume *model_volume) { return model_volume->id() == slices.volume_id; });
+                    if (volume == model_volumes.end())
+                        continue;
+                    if ((*volume)->is_model_part())
+                        append(parts, slices.slices[z_idx]);
+                    else if ((*volume)->is_negative_volume())
+                        append(negatives, slices.slices[z_idx]);
+                }
+                outlines[z_idx] = negatives.empty() ? union_ex(parts) : diff_ex(parts, negatives);
+            }
+        });
+    return outlines;
+}
+
+bool PrintObject::outer_wall_passes_enabled() const
+{
+    const PrintConfig &print_config = m_print->config();
+    if (! m_config.split_outer_wall.value || m_config.split_outer_wall_count.value < 2)
+        return false;
+    // The passes are built from the loops of the classic wall generator, on layers stacked the regular way.
+    if (m_config.wall_generator.value != PerimeterGeneratorType::Classic || print_config.spiral_mode.value ||
+        print_config.belt_printer.value || m_config.raft_layers.value > 0 || this->is_fuzzy_skin_painted())
+        return false;
+    for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
+        const PrintRegionConfig &region_config = this->printing_region(region_id).config();
+        // Z contouring moves the slicing plane and the walls, fuzzy skin displaces the outer wall.
+        if (region_config.zaa_enabled.value || region_config.fuzzy_skin.value != FuzzySkinType::None)
+            return false;
+    }
+    return true;
+}
+
+std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t>                                     object_layers,
+                                                          std::vector<std::shared_ptr<const OuterWallPassSlices>> &pass_slices) const
+{
+    pass_slices.clear();
+    if (! this->outer_wall_passes_enabled())
+        return object_layers;
+
+    const PrintConfig &print_config = m_print->config();
+    const double nozzle_diameter = nozzle_diameter_for_filament(print_config, this->printing_region(0).extruder(frExternalPerimeter),
+                                                                m_print->is_BBL_printer());
+    const double min_width  = m_config.split_outer_wall_min_width.get_abs_value(nozzle_diameter);
+    const double max_width  = m_config.split_outer_wall_max_width.get_abs_value(nozzle_diameter);
+    const size_t num_passes = size_t(m_config.split_outer_wall_count.value);
+    const bool   with_holes = m_config.split_outer_wall_holes.value;
+    if (min_width <= 0. || max_width < min_width)
+        return object_layers;
+
+    // The first layer and the layers shrunk by the elephant foot compensation are printed the regular way.
+    size_t first_candidate = 1;
+    if (m_config.elefant_foot_compensation.value > 0.)
+        first_candidate = std::max(first_candidate, size_t(std::max(0, m_config.elefant_foot_compensation_layers.value)));
+
+    // Slice the outline of each candidate layer at the middle of each pass and at the middle of the layer.
+    // With an odd number of passes the middle pass is sliced at the middle of the layer.
+    const size_t        num_layers       = object_layers.size() / 2;
+    const bool          separate_mid     = num_passes % 2 == 0;
+    const size_t        zs_per_candidate = num_passes + (separate_mid ? 1 : 0);
+    std::vector<size_t> candidates;
+    std::vector<float>  zs;
+    for (size_t layer_idx = first_candidate; layer_idx < num_layers; ++ layer_idx) {
+        const coordf_t lo          = object_layers[2 * layer_idx];
+        const coordf_t hi          = object_layers[2 * layer_idx + 1];
+        const coordf_t pass_height = (hi - lo) / coordf_t(num_passes);
+        if (pass_height < m_slicing_params.min_layer_height - EPSILON)
+            continue;
+        candidates.emplace_back(layer_idx);
+        for (size_t pass = 0; pass < num_passes; ++ pass) {
+            if (separate_mid && pass == num_passes / 2)
+                zs.emplace_back(float(0.5 * (lo + hi)));
+            zs.emplace_back(float(lo + (coordf_t(pass) + 0.5) * pass_height));
+        }
+    }
+    if (candidates.empty())
+        return object_layers;
+    const auto throw_on_cancel_callback = std::function<void()>([this]() { m_print->throw_if_canceled(); });
+    std::vector<ExPolygons> outlines = slice_object_outlines(*this, m_shared_regions->layer_ranges, zs, throw_on_cancel_callback);
+
+    // Keep the slices of the layers whose passes fit the width range.
+    std::vector<std::shared_ptr<const OuterWallPassSlices>> fitting(candidates.size());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, candidates.size()),
+        [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t candidate_idx = range.begin(); candidate_idx < range.end(); ++ candidate_idx) {
+                m_print->throw_if_canceled();
+                const size_t        first = candidate_idx * zs_per_candidate;
+                OuterWallPassSlices slices;
+                slices.min_width = min_width;
+                slices.max_width = max_width;
+                slices.passes.reserve(num_passes);
+                for (size_t pass = 0; pass < num_passes; ++ pass)
+                    slices.passes.emplace_back(std::move(outlines[first + pass + (separate_mid && pass >= num_passes / 2 ? 1 : 0)]));
+                slices.mid = separate_mid ? std::move(outlines[first + num_passes / 2]) : slices.passes[num_passes / 2];
+                // A layer with nothing at its middle has no outer wall to split.
+                if (! slices.mid.empty() && outer_wall_passes_fit(slices.mid, slices.passes, min_width, max_width, with_holes))
+                    fitting[candidate_idx] = std::make_shared<const OuterWallPassSlices>(std::move(slices));
+            }
+        });
+
+    const bool split_layers = m_config.split_outer_wall_fallback.value == SplitOuterWallFallback::SplitLayer;
+    std::vector<coordf_t> out;
+    out.reserve(object_layers.size());
+    pass_slices.reserve(num_layers);
+    for (size_t layer_idx = 0, candidate_idx = 0; layer_idx < num_layers; ++ layer_idx) {
+        const coordf_t lo           = object_layers[2 * layer_idx];
+        const coordf_t hi           = object_layers[2 * layer_idx + 1];
+        const bool     is_candidate = candidate_idx < candidates.size() && candidates[candidate_idx] == layer_idx;
+        if (is_candidate && ! fitting[candidate_idx] && split_layers) {
+            // Print the whole layer as thin layers of the pass height.
+            for (size_t pass = 0; pass < num_passes; ++ pass) {
+                out.emplace_back(pass == 0 ? lo : out.back());
+                out.emplace_back(pass + 1 == num_passes ? hi : lo + (hi - lo) * coordf_t(pass + 1) / coordf_t(num_passes));
+                pass_slices.emplace_back(nullptr);
+            }
+        } else {
+            out.emplace_back(lo);
+            out.emplace_back(hi);
+            pass_slices.emplace_back(is_candidate ? std::move(fitting[candidate_idx]) : nullptr);
+        }
+        if (is_candidate)
+            ++ candidate_idx;
+    }
     return out;
 }
 
@@ -908,7 +1058,13 @@ void PrintObject::slice()
     m_belt_min_z              = 0.;
     m_belt_global_z_offset    = 0.;
     this->clear_layers();
-    m_layers = new_layers(this, generate_object_layers(m_slicing_params, layer_height_profile, m_config.precise_z_height.value));
+    // Orca: layers printed with the outer wall split into thin passes are marked before slicing the volumes,
+    // as the width of their outer wall differs.
+    std::vector<std::shared_ptr<const OuterWallPassSlices>> pass_slices;
+    m_layers = new_layers(this, this->plan_outer_wall_passes(
+        generate_object_layers(m_slicing_params, layer_height_profile, m_config.precise_z_height.value), pass_slices));
+    for (size_t layer_idx = 0; layer_idx < pass_slices.size(); ++ layer_idx)
+        m_layers[layer_idx]->outer_wall_pass_slices = std::move(pass_slices[layer_idx]);
     this->slice_volumes();
     m_print->throw_if_canceled();
 
