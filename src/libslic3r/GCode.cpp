@@ -6644,6 +6644,7 @@ LayerResult GCode::process_layer(
     const Layer& layer = *layer_ptr;
     m_cur_layer_idx = layer.id();
     m_outer_wall_pass_seams.clear();
+    m_outer_wall_pass_supports.clear();
     // A per-layer nozzle grouping can move the active filament to another variant column on a
     // layer boundary without a toolchange, so re-resolve the writer's config column here.
     if (Extruder *cur_filament = m_writer.filament())
@@ -8543,6 +8544,18 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     // next copies (if any) would not detect the correct orientation
     ExtrusionLoop loop = loop_ref;
 
+    // Orca: the top pass of a split outer wall leans on the pass below it. The lower passes get their support
+    // set by extrude_outer_wall_lower_passes().
+    const bool is_top_pass = loop_ref.outer_wall_pass && m_layer != nullptr && m_layer->outer_wall_pass_slices &&
+                             ! m_extrusion_quality_estimator.has_custom_boundaries();
+    if (is_top_pass)
+        m_extrusion_quality_estimator.set_custom_boundaries(
+            this->outer_wall_pass_support(*m_layer, m_layer->outer_wall_pass_slices->count() - 1));
+    ScopeGuard pass_support_guard([this, is_top_pass]() {
+        if (is_top_pass)
+            m_extrusion_quality_estimator.set_custom_boundaries(nullptr);
+    });
+
     bool is_hole = (loop.loop_role() & elrHole) == elrHole;
 
     if (m_config.spiral_mode && !is_hole) {
@@ -8947,6 +8960,21 @@ static void collect_outer_wall_top_passes(const ExtrusionEntityCollection &colle
             top_passes.emplace_back(static_cast<const ExtrusionLoop*>(entity));
 }
 
+std::shared_ptr<const AABBTreeLines::LinesDistancer<Linef3>> GCode::outer_wall_pass_support(const Layer &layer, size_t pass)
+{
+    const ExPolygons *outline = nullptr;
+    if (pass > 0)
+        outline = &layer.outer_wall_pass_slices->passes[pass - 1];
+    else if (layer.lower_layer != nullptr && layer.lower_layer->outer_wall_pass_slices)
+        outline = &layer.lower_layer->outer_wall_pass_slices->passes.back();
+    if (outline == nullptr)
+        return nullptr;
+    auto &support = m_outer_wall_pass_supports[{ &layer, pass }];
+    if (! support)
+        support = std::make_shared<const AABBTreeLines::LinesDistancer<Linef3>>(to_unscaled_linesf3(*outline));
+    return support;
+}
+
 // Orca: Print the passes of the split outer walls lying below the layer height, the lowest first over all the
 // instances, so that the nozzle never works beside something printed higher on this layer.
 std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std::vector<LayerToPrint> &layers, const LayerTools &layer_tools,
@@ -9031,6 +9059,8 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
         m_nominal_z                = level.z;
         m_need_change_layer_lift_z = true;
 
+        // Overhangs of the pass are measured against what it leans on.
+        m_extrusion_quality_estimator.set_custom_boundaries(this->outer_wall_pass_support(layer, level.pass));
         for (const LayerRegion *layerm : layerms) {
             m_config.apply(print.get_print_region(layerm->region().print_region_id()).config());
             std::vector<const ExtrusionLoop*> top_passes;
@@ -9070,6 +9100,7 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
                 gcode += this->extrude_loop(loop, "perimeter", -1.);
             }
         }
+        m_extrusion_quality_estimator.set_custom_boundaries(nullptr);
 
         if (this->config().gcode_label_objects)
             gcode += std::string("; stop printing object ") + print_object.model_object()->name + " id:" + std::to_string(print_object.get_id()) +

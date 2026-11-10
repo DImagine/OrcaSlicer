@@ -607,6 +607,8 @@ private:
     // Orca: outer wall printed in several thin passes, see OuterWallPasses.hpp.
     // Whether the option is on and compatible with the other settings of this object.
     bool outer_wall_passes_enabled() const;
+    // Allowed width of a pass, unscaled. Returns false if the configured range is not valid.
+    bool outer_wall_pass_width_range(double &min_width, double &max_width) const;
     // Decide for each object layer (pairs of bottom / top Z), whether its outer wall is printed in passes.
     // Returns the object layers with the layers that do not fit the pass width range split into thin layers if
     // configured so, and for each returned layer the slices of its passes, or nullptr for a layer printed without them.

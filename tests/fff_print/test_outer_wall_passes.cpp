@@ -100,13 +100,11 @@ struct ExtrusionLevels
     bool has(int z_microns) const { return this->first_start.count(z_microns) == 1; }
 };
 
-ExtrusionLevels extrusion_levels(Print &print)
+ExtrusionLevels extrusion_levels(const std::string &gcode)
 {
-    const std::string gcode = Slic3r::Test::gcode(print);
     ExtrusionLevels   out;
     double            highest_z = 0.;
     GCodeReader       reader;
-    reader.apply_config(print.config());
     reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
         if (line.extruding(self) && line.dist_XY(self) > 0.) {
             const double z = line.new_Z(self);
@@ -119,6 +117,11 @@ ExtrusionLevels extrusion_levels(Print &print)
         }
     });
     return out;
+}
+
+ExtrusionLevels extrusion_levels(Print &print)
+{
+    return extrusion_levels(Slic3r::Test::gcode(print));
 }
 
 std::vector<PassPaths> passes_of(const Layer &layer)
@@ -280,7 +283,8 @@ TEST_CASE("Odd number of passes takes the middle pass for the middle of the laye
 
 TEST_CASE("All the passes of an outer wall start at the same point", "[OuterWallPasses]")
 {
-    // A random seam would differ between the passes if each of them chose its own.
+    // The seam placer decides a random seam per wall ahead of the G-code, so this guards the property itself,
+    // whichever way the passes come to share the point.
     DynamicPrintConfig config = passes_config("split_layer");
     config.set_deserialize_strict({ { "seam_position", "random" } });
     Print print;
@@ -294,6 +298,43 @@ TEST_CASE("All the passes of an outer wall start at the same point", "[OuterWall
         const double distance = (levels.first_start.at(layer_z) - levels.first_start.at(layer_z - 100)).norm();
         REQUIRE(distance < 0.1);
     }
+}
+
+TEST_CASE("The filament of the split outer wall is printed first on a layer", "[OuterWallPasses]")
+{
+    // A 30 mm cap on a 10 mm stem, the support of the cap printed with filament 1 and its interface with filament 2.
+    // The tool order would start every other layer with the filament the layer below ended with, that is with
+    // the interface, and the low passes of the stem would then be printed below it.
+    TriangleMesh mesh = make_cube(10, 10, 10);
+    mesh.translate(10, 10, 0);
+    TriangleMesh cap = make_cube(30, 30, 2);
+    cap.translate(0, 0, 10);
+    mesh.merge(cap);
+    const DynamicPrintConfig config = multifilament_config(2, {
+        { "split_outer_wall",                 true },
+        { "split_outer_wall_count",           2 },
+        { "split_outer_wall_min_width",       "0.4" },
+        { "split_outer_wall_max_width",       "0.6" },
+        { "split_outer_wall_fallback",        "regular" },
+        { "wall_generator",                   "classic" },
+        { "layer_height",                     layer_height },
+        { "initial_layer_print_height",       layer_height },
+        { "elefant_foot_compensation",        0. },
+        { "enable_prime_tower",               false },
+        { "enable_support",                   true },
+        { "support_type",                     "normal(auto)" },
+        { "independent_support_layer_height", false },
+        { "support_filament",                 1 },
+        { "support_interface_filament",       2 },
+        { "skirt_loops",                      0 },
+        { "brim_type",                        "no_brim" },
+    });
+    const std::string gcode = Slic3r::Test::slice({ mesh }, config);
+    // The interface is printed with the second filament.
+    REQUIRE(gcode.find("\nT1") != std::string::npos);
+    const ExtrusionLevels levels = extrusion_levels(gcode);
+    REQUIRE(levels.has(5100));
+    REQUIRE_FALSE(levels.went_below);
 }
 
 TEST_CASE("Walls of holes are split only if enabled", "[OuterWallPasses]")

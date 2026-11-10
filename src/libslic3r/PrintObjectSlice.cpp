@@ -330,6 +330,17 @@ bool PrintObject::outer_wall_passes_enabled() const
     return true;
 }
 
+bool PrintObject::outer_wall_pass_width_range(double &min_width, double &max_width) const
+{
+    if (this->num_printing_regions() == 0)
+        return false;
+    const double nozzle_diameter = nozzle_diameter_for_filament(m_print->config(), this->printing_region(0).extruder(frExternalPerimeter),
+                                                                m_print->is_BBL_printer());
+    min_width = m_config.split_outer_wall_min_width.get_abs_value(nozzle_diameter);
+    max_width = m_config.split_outer_wall_max_width.get_abs_value(nozzle_diameter);
+    return min_width > 0. && max_width >= min_width;
+}
+
 std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t>                                     object_layers,
                                                           std::vector<std::shared_ptr<const OuterWallPassSlices>> &pass_slices) const
 {
@@ -337,15 +348,12 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
     if (! this->outer_wall_passes_enabled())
         return object_layers;
 
-    const PrintConfig &print_config = m_print->config();
-    const double nozzle_diameter = nozzle_diameter_for_filament(print_config, this->printing_region(0).extruder(frExternalPerimeter),
-                                                                m_print->is_BBL_printer());
-    const double min_width  = m_config.split_outer_wall_min_width.get_abs_value(nozzle_diameter);
-    const double max_width  = m_config.split_outer_wall_max_width.get_abs_value(nozzle_diameter);
+    double min_width = 0.;
+    double max_width = 0.;
+    if (! this->outer_wall_pass_width_range(min_width, max_width))
+        return object_layers;
     const size_t num_passes = size_t(m_config.split_outer_wall_count.value);
     const bool   with_holes = m_config.split_outer_wall_holes.value;
-    if (min_width <= 0. || max_width < min_width)
-        return object_layers;
 
     // The first layer and the layers shrunk by the elephant foot compensation are printed the regular way.
     size_t first_candidate = 1;

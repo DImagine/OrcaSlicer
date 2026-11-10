@@ -1159,7 +1159,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     const bool has_split_outer_wall = config->opt_bool("split_outer_wall");
     for (auto el : {"split_outer_wall_count", "split_outer_wall_min_width", "split_outer_wall_max_width", "split_outer_wall_fallback",
                     "split_outer_wall_holes"})
-        toggle_line(el, has_split_outer_wall);
+        toggle_line(el, has_split_outer_wall, -1, _L("Enable Split outer wall to use this setting."));
 
     bool has_zaa = config->opt_bool("zaa_enabled");
     for (auto el : {"zaa_minimize_perimeter_height", "zaa_min_z", "zaa_dont_alternate_fill_direction", "ironing_expansion"})
@@ -1274,6 +1274,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
         "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width", "wall_maximum_resolution", "wall_maximum_deviation"})
         toggle_line(el, have_arachne, -1, _L("Select the Arachne wall generator to use this setting."));
     toggle_field("detect_thin_wall", !have_arachne, -1, _L("Thin wall detection is unavailable with the Arachne wall generator."));
+    toggle_field("split_outer_wall", !have_arachne, -1, _L("Split outer wall is unavailable with the Arachne wall generator."));
 
     // Orca
     auto is_role_based_wipe_speed = config->opt_bool("role_based_wipe_speed");

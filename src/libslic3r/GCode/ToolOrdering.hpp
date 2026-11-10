@@ -168,8 +168,16 @@ public:
 	// Returns a zero based extruder this eec should be printed with, according to PrintRegion config or extruder_override if overriden.
 	unsigned int extruder(const ExtrusionEntityCollection &extrusions, const PrintRegion &region) const;
 
+    // Orca: Move the filament of the outer walls split into thin passes to the front of a filament sequence.
+    // Returns false if this layer has no such wall or the sequence does not contain its filament.
+    bool outer_wall_passes_first(std::vector<unsigned int> &filaments) const;
+
     coordf_t 					print_z	= 0.;
     bool 						has_object = false;
+    // Orca: a region printed on this layer with the outer wall split into thin passes (see OuterWallPasses.hpp),
+    // or nullptr. The filament of its outer wall goes first on such a layer: the lower passes lie below the layer
+    // height, where nothing else of the layer may stand yet.
+    const PrintRegion          *outer_wall_passes_region = nullptr;
     bool						has_support = false;
     // Zero based extruder IDs, ordered to minimize tool switches.
     std::vector<unsigned int> 	extruders;
@@ -389,6 +397,8 @@ private:
     void                reorder_extruders_for_minimum_flush_volume(bool reorder_first_layer);
     void                resolve_mixed_filaments(const PrintConfig &config);
     void                enforce_mixed_component_order();
+    // Orca: keep the filament of the outer walls split into thin passes first on their layers.
+    void                enforce_outer_wall_passes_order();
 
     // BBS
     std::vector<unsigned int> generate_first_layer_tool_order(const Print& print);

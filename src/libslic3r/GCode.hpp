@@ -659,6 +659,9 @@ protected:
     std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first, bool unsupported_loops_only = false);
     std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing);
     std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
+    // Orca: outline the given pass of a split outer wall of a layer leans on, to estimate its overhangs with:
+    // the pass below it, for the lowest pass the top pass of the layer below. nullptr stands for the layer below.
+    std::shared_ptr<const AABBTreeLines::LinesDistancer<Linef3>> outer_wall_pass_support(const Layer &layer, size_t pass);
     // Orca: print the passes of the split outer walls lying below the layer height, see OuterWallPasses.hpp.
     std::string     extrude_outer_wall_lower_passes(const Print &print, const std::vector<LayerToPrint> &layers, const LayerTools &layer_tools,
                                                     const std::vector<InstanceToPrint> &instances_to_print, unsigned int extruder_id);
@@ -940,6 +943,8 @@ protected:
     // Orca: start points of the split outer walls of the current layer, by the first points of the loops of
     // their passes as stored in the layer, so that all the passes of an outer wall start at the same point.
     std::unordered_map<Point, Point, PointHash> m_outer_wall_pass_seams;
+    // Orca: outlines the passes of the split outer walls of the current layer lean on, by layer and pass.
+    std::map<std::pair<const Layer*, size_t>, std::shared_ptr<const AABBTreeLines::LinesDistancer<Linef3>>> m_outer_wall_pass_supports;
     bool m_need_change_layer_lift_z = false;
     int m_start_gcode_filament = -1;
     std::string m_filament_instances_code;

@@ -2628,6 +2628,57 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     return {_u8L("Variable layer height is not supported with Organic supports.") };
         }
 
+    // Orca: outer wall printed in thin passes, see OuterWallPasses.hpp. The passes are printed below the layer
+    // height before the rest of the layer, so nothing printed earlier may stand higher beside them.
+    {
+        std::set<int> pass_wall_filaments;
+        for (const PrintObject *print_object : m_objects) {
+            if (! print_object->outer_wall_passes_enabled())
+                continue;
+            const PrintObjectConfig &object_config = print_object->config();
+            const bool               split_layers  = object_config.split_outer_wall_fallback.value == SplitOuterWallFallback::SplitLayer;
+            double min_width = 0.;
+            double max_width = 0.;
+            if (! print_object->outer_wall_pass_width_range(min_width, max_width))
+                return { L("Split outer wall: the minimum pass width must be positive and not larger than the maximum pass width."),
+                         print_object, "split_outer_wall_min_width" };
+            if (object_config.layer_height.value / double(object_config.split_outer_wall_count.value) <
+                print_object->slicing_parameters().min_layer_height - EPSILON)
+                return { L("Split outer wall: the height of a pass (the layer height divided by the number of passes) "
+                           "is below the minimum layer height of the printer."),
+                         print_object, "split_outer_wall_count" };
+            if (print_object->has_support_material()) {
+                // A support layer of its own height printed inside the height of an object layer would stand
+                // above the passes of that layer.
+                if (m_config.independent_support_layer_height.value)
+                    return { L("Split outer wall requires that support has the same layer height as the object."),
+                             print_object, "independent_support_layer_height" };
+                // Organic supports are built of layers of one height.
+                if (split_layers && is_tree(object_config.support_type.value) &&
+                    (object_config.support_style.value == smsTreeOrganic || object_config.support_style.value == smsDefault))
+                    return { L("Split outer wall with the layers out of the width range split into thin layers is not "
+                               "supported with Organic supports."),
+                             print_object, "split_outer_wall_fallback" };
+            }
+            if (m_objects.size() > 1 && m_config.print_sequence.value != PrintSequence::ByObject) {
+                // The thin layers of one object would stand above the lower passes of another one.
+                if (split_layers && object_config.split_outer_wall_count.value > 2)
+                    return { L("Split outer wall in more than two passes with the layers out of the width range split "
+                               "into thin layers is supported for a single object only."),
+                             print_object, "split_outer_wall_count" };
+                for (const PrintObject *other : m_objects)
+                    if (std::abs(other->config().layer_height.value - object_config.layer_height.value) > EPSILON ||
+                        other->model_object()->has_custom_layering())
+                        return { L("Split outer wall requires that all objects have the same layer height."), other, "layer_height" };
+            }
+            for (size_t region_id = 0; region_id < print_object->num_printing_regions(); ++ region_id)
+                pass_wall_filaments.insert(print_object->printing_region(region_id).config().outer_wall_filament_id.value);
+        }
+        // The filament of the split outer walls is printed first on a layer.
+        if (pass_wall_filaments.size() > 1)
+            return { L("Split outer wall requires that the outer walls of all the objects it is enabled for are printed with the same filament.") };
+    }
+
     if ((this->has_wipe_tower() || this->has_belt_purge_tower()) && ! m_objects.empty()) {
         // Orca: wipe_tower_filament (issue #10971) is inserted into the tool order after
         // resolve_mixed_filaments has expanded every mixed (virtual) slot, so a mixed slot here

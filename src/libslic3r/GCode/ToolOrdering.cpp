@@ -21,6 +21,8 @@
 #include "../BeltBrim.hpp"
 
 #include <boost/log/trivial.hpp>
+#include <algorithm>
+#include <iterator>
 #include <vector>
 #include <string>
 #include <utility>
@@ -124,6 +126,18 @@ unsigned int LayerTools::wall_extruder_id(const PrintRegion &region) const
 	assert(region.config().outer_wall_filament_id.value > 0);
 	unsigned int result = ((this->extruder_override == 0) ? region.config().outer_wall_filament_id.value : this->extruder_override) - 1;
 	return resolve_mixed(result);
+}
+
+bool LayerTools::outer_wall_passes_first(std::vector<unsigned int> &filaments) const
+{
+    if (this->outer_wall_passes_region == nullptr)
+        return false;
+    const auto wall_filament = std::find(filaments.begin(), filaments.end(), this->wall_extruder_id(*this->outer_wall_passes_region));
+    if (wall_filament == filaments.end())
+        return false;
+    // The other filaments keep their order.
+    std::rotate(filaments.begin(), wall_filament, wall_filament + 1);
+    return true;
 }
 
 unsigned int LayerTools::sparse_infill_filament_id(const PrintRegion &region) const
@@ -458,6 +472,7 @@ void ToolOrdering::sort_and_build_data(const Print& print, unsigned int first_ex
     this->resolve_mixed_filaments(print.config());
     reorder_extruders_for_minimum_flush_volume(reorder_first_layer);
     this->enforce_mixed_component_order();
+    this->enforce_outer_wall_passes_order();
     m_sorted = true;
 
     double max_layer_height = 0.;
@@ -480,6 +495,7 @@ void ToolOrdering::sort_and_build_data(const Print& print, unsigned int first_ex
         // Orca reorders a second time here (BBS has no such path); re-enforce so the
         // mixed sub-layer component order survives the extra pass.
         this->enforce_mixed_component_order();
+        this->enforce_outer_wall_passes_order();
         this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height);
     }
 
@@ -494,6 +510,7 @@ void ToolOrdering::sort_and_build_data(const PrintObject& object , unsigned int 
     this->resolve_mixed_filaments(object.print()->config());
     reorder_extruders_for_minimum_flush_volume(reorder_first_layer);
     this->enforce_mixed_component_order();
+    this->enforce_outer_wall_passes_order();
     m_sorted = true;
 
     double max_layer_height = calc_max_layer_height(object.print()->config(), object.config().layer_height);
@@ -845,6 +862,16 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 
         // Store the current extruder override (set to zero if no overriden), so that layer_tools.wiping_extrusions().is_overridable_and_mark() will use it.
         layer_tools.extruder_override = extruder_override;
+
+        // Orca: remember a region whose outer wall is split into thin passes on this layer, before its walls are
+        // offered for wiping below.
+        if (layer->outer_wall_pass_slices && layer_tools.outer_wall_passes_region == nullptr)
+            for (const LayerRegion *layerm : layer->regions())
+                if (std::any_of(layerm->outer_wall_lower_passes.begin(), layerm->outer_wall_lower_passes.end(),
+                                [](const ExtrusionEntityCollection &pass) { return ! pass.entities.empty(); })) {
+                    layer_tools.outer_wall_passes_region = &layerm->region();
+                    break;
+                }
 
         // Snapshot extruders before this object's regions to track new additions.
         const size_t ext_snapshot = layer_tools.extruders.size();
@@ -2792,6 +2819,12 @@ void ToolOrdering::resolve_mixed_filaments(const PrintConfig &config)
     }
 }
 
+void ToolOrdering::enforce_outer_wall_passes_order()
+{
+    for (LayerTools &lt : m_layer_tools)
+        lt.outer_wall_passes_first(lt.extruders);
+}
+
 void ToolOrdering::enforce_mixed_component_order()
 {
     for (LayerTools &lt : m_layer_tools) {
@@ -3023,7 +3056,7 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume(bool reorder_first
     };
 
     // other_layers_seq: the layer_idx and extruder_idx are base on 1
-    auto get_custom_seq = [&other_layers_seqs, &reorder_first_layer, &first_layer_filaments, &layer_filaments, use_cyclic_ordering, cyclic_first_layer, &apply_cyclic_order](int layer_idx, std::vector<int>& out_seq) -> bool {
+    auto get_user_seq = [&other_layers_seqs, &reorder_first_layer, &first_layer_filaments, &layer_filaments, use_cyclic_ordering, cyclic_first_layer, &apply_cyclic_order](int layer_idx, std::vector<int>& out_seq) -> bool {
         if (!reorder_first_layer && layer_idx == 0) {
             // The first layer tool order is already decided (adhesion-optimized, plus any custom first
             // layer sequence). Only override it with the cyclic sequence when the user opted in.
@@ -3055,6 +3088,24 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume(bool reorder_first
 
         return false;
         };
+
+    // Orca: on a layer with the outer wall split into thin passes the filament of that wall goes first, whatever
+    // sequence was chosen above, so that the flush optimization of the layers around it counts with that.
+    auto get_custom_seq = [this, &get_user_seq, &layer_filaments](int layer_idx, std::vector<int>& out_seq) -> bool {
+        const bool custom = get_user_seq(layer_idx, out_seq);
+        if (layer_idx <= 0 || size_t(layer_idx) >= m_layer_tools.size() || size_t(layer_idx) >= layer_filaments.size())
+            return custom;
+        std::vector<unsigned int> ordered;
+        if (custom)
+            std::transform(out_seq.begin(), out_seq.end(), std::back_inserter(ordered), [](int item) { return (unsigned int)(item - 1); });
+        else
+            ordered = layer_filaments[size_t(layer_idx)];
+        if (! m_layer_tools[size_t(layer_idx)].outer_wall_passes_first(ordered))
+            return custom;
+        out_seq.resize(ordered.size());
+        std::transform(ordered.begin(), ordered.end(), out_seq.begin(), [](unsigned int item) { return int(item) + 1; });
+        return true;
+    };
 
     // Dynamic (per-layer filament-selector) regroup. is_dynamic_group_reorder()
     // gates on enable_filament_dynamic_map (unset on every current profile), so this is closed for the
@@ -3438,6 +3489,10 @@ int WipingExtrusions::last_nonsoluble_extruder_on_layer(const PrintConfig& print
 // Decides whether this entity could be overridden
 bool WipingExtrusions::is_overriddable(const ExtrusionEntityCollection& eec, const PrintConfig& print_config, const PrintObject& object, const PrintRegion& region) const
 {
+    // Orca: the walls of a layer with the outer wall split into thin passes keep their filament, as it is printed first.
+    if (m_layer_tools->outer_wall_passes_region != nullptr && eec.has_perimeters())
+        return false;
+
     if (print_config.filament_soluble.get_at(m_layer_tools->extruder(eec, region)))
         return false;
 
