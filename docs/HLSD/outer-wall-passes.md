@@ -83,7 +83,7 @@ the criterion, but its loop hangs in the air and must not be thinned.
 `GCode::extrude_outer_wall_lower_passes()` prints the lower passes right after
 the tool change of the filament of the outer wall, before anything else of the
 layer. The passes of all the instances are printed lowest first, so the nozzle
-never works beside something printed higher on the same layer. The nozzle
+never works beside a part of an object printed higher on the same layer. The nozzle
 descends on the travel to a pass the way it does at a layer change and returns
 to the layer height afterwards. The Z offset of the printer is kept.
 
@@ -92,7 +92,8 @@ and looked up by the first point of the stored loop. A scarf joint is not used o
 the passes, as it would start inside the pass below.
 
 The overhang speed and cooling of a pass are measured against what it leans on:
-the pass below it, and for the lowest pass the top pass of the layer below
+the pass below it, and for the lowest pass the top pass of the layer below, or
+that layer as usual if it has no passes
 (`ExtrusionQualityEstimator::set_custom_boundaries()`).
 
 ## Tool order, supports and the prime tower
@@ -104,9 +105,10 @@ On a layer with passes the filament of the split outer walls is printed first
 would otherwise stand at the full layer height beside the passes. The walls of
 such a layer are not offered for wiping into the object.
 
-The prime tower is printed at the layer height before the passes and needs no
-change. Support layers follow the object layers: the independent support layer
-height is switched off with the option on, as it is with a prime tower.
+The prime tower is printed at the layer height, before the passes or after the
+objects. It stands apart from the objects, so it needs no change. Support layers
+follow the object layers: the independent support layer height is switched off
+with the option on for the whole print, as it is with a prime tower.
 
 ## Restrictions
 
@@ -128,6 +130,9 @@ height is switched off with the option on, as it is with a prime tower.
 - At corners sharper than about 41° the miter of the offset is limited and the
   outer edge of a pass deviates from the outline by up to half the offset.
 - The passes are measured against outlines without the XY size compensations.
+- The criterion offsets the middle outline with a miter limit, so a sloped layer
+  with a convex corner sharper than about 30° to 40° may be taken for not
+  fitting. This only sends the layer to the fallback.
 
 ## Tests
 
