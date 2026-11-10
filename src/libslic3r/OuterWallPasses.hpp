@@ -10,7 +10,7 @@ namespace Slic3r {
 class ExtrusionEntityCollection;
 class Flow;
 
-// Outer wall printed in several thin passes (option split_outer_wall).
+// Outer wall printed in several thin passes (option split_outer_wall). Design: docs/HLSD/outer-wall-passes.md
 //
 // The outer wall of a layer is printed as a stack of thin loops, the passes, before anything else of that layer.
 // The inner edge of the stack is vertical and stays where a regular outer wall of the nominal width would end, so the
