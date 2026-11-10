@@ -4,6 +4,8 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
+#include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCodeReader.hpp"
@@ -17,6 +19,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <initializer_list>
 #include <map>
 #include <string>
 #include <utility>
@@ -26,6 +29,7 @@
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
+using Catch::Matchers::ContainsSubstring;
 using Catch::Matchers::WithinAbs;
 
 namespace {
@@ -398,4 +402,100 @@ TEST_CASE("Passes keep the Z offset of the printer", "[OuterWallPasses]")
     REQUIRE(levels.has(450));
     REQUIRE_FALSE(levels.has(300));
     REQUIRE_FALSE(levels.has(400));
+}
+
+TEST_CASE("The top pass is printed before the infill even with the infill first", "[OuterWallPasses]")
+{
+    DynamicPrintConfig config = passes_config("split_layer");
+    config.set_deserialize_strict({ { "is_infill_first", true } });
+    Print print;
+    init_and_process_print({ cube(20.) }, print, config);
+    const ExtrusionLevels levels = extrusion_levels(print);
+    for (int layer_z : { 2000, 10400 }) {
+        CAPTURE(layer_z);
+        REQUIRE(levels.has(layer_z - 100));
+        REQUIRE(levels.has(layer_z));
+        // The first thing printed at the layer height starts where the low pass did: it is the top pass, not the infill.
+        const double distance = (levels.first_start.at(layer_z) - levels.first_start.at(layer_z - 100)).norm();
+        REQUIRE(distance < 0.1);
+    }
+}
+
+TEST_CASE("Changing fuzzy skin plans the layers again", "[OuterWallPasses]")
+{
+    DynamicPrintConfig config = passes_config("split_layer");
+    Print print;
+    Model model;
+    init_print({ cube(20.) }, print, model, config);
+    print.process();
+    REQUIRE(print.objects().front()->layers()[1]->outer_wall_pass_slices);
+
+    // Fuzzy skin rules the passes out.
+    config.set_deserialize_strict({ { "fuzzy_skin", "external" } });
+    print.apply(model, config);
+    print.process();
+    REQUIRE_FALSE(print.objects().front()->layers()[1]->outer_wall_pass_slices);
+    for (const PassPaths &pass : passes_of(*print.objects().front()->layers()[1]))
+        REQUIRE(pass.widths.empty());
+
+    config.set_deserialize_strict({ { "fuzzy_skin", "disabled_fuzzy" } });
+    print.apply(model, config);
+    print.process();
+    REQUIRE(print.objects().front()->layers()[1]->outer_wall_pass_slices);
+}
+
+TEST_CASE("The support layers are synchronized only where the passes apply", "[OuterWallPasses]")
+{
+    auto independent_support_layers = [](const char *wall_generator) {
+        DynamicPrintConfig config = passes_config("split_layer");
+        config.set_deserialize_strict({
+            { "wall_generator",                   wall_generator },
+            { "enable_support",                   true },
+            { "independent_support_layer_height", true },
+        });
+        Print print;
+        Model model;
+        init_print({ cube(20.) }, print, model, config);
+        return print.config().independent_support_layer_height.value;
+    };
+    REQUIRE_FALSE(independent_support_layers("classic"));
+    // The passes are not generated with Arachne, so the setting is left alone.
+    REQUIRE(independent_support_layers("arachne"));
+}
+
+TEST_CASE("Settings the passes cannot be printed safely with are rejected", "[OuterWallPasses]")
+{
+    // What validate() says about one or two cubes with the given changes of the settings.
+    auto validate = [](std::initializer_list<ConfigBase::SetDeserializeItem> items, double second_cube_height = 0.) {
+        DynamicPrintConfig config = passes_config("split_layer");
+        // Relative extrusion needs the extruder reset at every layer to pass the validation at all.
+        config.set_deserialize_strict({ { "layer_change_gcode", "G92 E0\n" } });
+        config.set_deserialize_strict(items);
+        Print print;
+        Model model;
+        if (second_cube_height > 0.)
+            init_print({ cube(20.), make_cube(20., 20., second_cube_height) }, print, model, config);
+        else
+            init_print({ cube(20.) }, print, model, config);
+        return print.validate().string;
+    };
+
+    SECTION("the settings of the other tests are accepted") {
+        REQUIRE(validate({}).empty());
+        REQUIRE(validate({}, 20.).empty());
+    }
+    SECTION("a skirt around all the objects higher than one layer stands above the low passes") {
+        REQUIRE_THAT(validate({ { "skirt_loops", 2 }, { "skirt_height", 3 } }), ContainsSubstring("skirt"));
+        // One layer of a skirt is below every pass.
+        REQUIRE(validate({ { "skirt_loops", 2 }, { "skirt_height", 1 } }).empty());
+    }
+    SECTION("precise Z height shifts the last layers of objects of different heights") {
+        REQUIRE_THAT(validate({ { "precise_z_height", true } }, 20.05), ContainsSubstring("end at the same heights"));
+        REQUIRE(validate({ { "precise_z_height", true } }, 20.).empty());
+    }
+    SECTION("a width range that makes no printable line") {
+        REQUIRE_THAT(validate({ { "split_outer_wall_min_width", "0.01" }, { "split_outer_wall_max_width", "0.01" } }),
+                     ContainsSubstring("too small"));
+        REQUIRE_THAT(validate({ { "split_outer_wall_max_width", "3" } }), ContainsSubstring("too large"));
+    }
 }

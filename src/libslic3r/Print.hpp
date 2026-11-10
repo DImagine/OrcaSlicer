@@ -608,8 +608,9 @@ private:
     // Whether the option is on and compatible with the other settings of this object.
     // If the option is on, but another setting rules it out, why_not receives a message for the user.
     bool outer_wall_passes_enabled(std::string *why_not = nullptr) const;
-    // Allowed width of a pass, unscaled. Returns false if the configured range is not valid.
-    bool outer_wall_pass_width_range(double &min_width, double &max_width) const;
+    // Allowed width of a pass, unscaled, and the diameter of the nozzle the widths are derived from.
+    // Returns false if the configured range is not valid.
+    bool outer_wall_pass_width_range(double &min_width, double &max_width, double *nozzle_diameter = nullptr) const;
     // Decide for each object layer (pairs of bottom / top Z), whether its outer wall is printed in passes.
     // Returns the object layers with the layers that do not fit the pass width range split into thin layers if
     // configured so, and for each returned layer the slices of its passes, or nullptr for a layer printed without them.

@@ -2632,7 +2632,23 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     // height before the rest of the layer, so nothing printed earlier may stand higher beside them.
     {
         std::set<int> pass_wall_filaments;
-        for (const PrintObject *print_object : m_objects) {
+        // Heights above the bed the layers of an object end at, as planned before the layers out of the width
+        // range are split.
+        std::vector<std::vector<coordf_t>> layer_tops(m_objects.size());
+        auto object_layer_tops = [this, &layer_tops, &layer_height_profile](const size_t print_object_idx) -> const std::vector<coordf_t>& {
+            std::vector<coordf_t> &tops = layer_tops[print_object_idx];
+            if (tops.empty()) {
+                const PrintObject          &object = *m_objects[print_object_idx];
+                const std::vector<coordf_t> layers = generate_object_layers(object.slicing_parameters(), layer_height_profile(print_object_idx),
+                                                                            object.config().precise_z_height.value);
+                tops.reserve(layers.size() / 2);
+                for (size_t i = 1; i < layers.size(); i += 2)
+                    tops.emplace_back(layers[i] + object.slicing_parameters().object_print_z_min);
+            }
+            return tops;
+        };
+        for (size_t print_object_idx = 0; print_object_idx < m_objects.size(); ++ print_object_idx) {
+            const PrintObject *print_object = m_objects[print_object_idx];
             // The option switched on, but ruled out by another setting, would do nothing without a word.
             if (std::string why_not; ! print_object->outer_wall_passes_enabled(&why_not)) {
                 if (! why_not.empty())
@@ -2641,16 +2657,37 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             }
             const PrintObjectConfig &object_config = print_object->config();
             const bool               split_layers  = object_config.split_outer_wall_fallback.value == SplitOuterWallFallback::SplitLayer;
+            const size_t             num_passes    = size_t(object_config.split_outer_wall_count.value);
+            const double             pass_height   = object_config.layer_height.value / double(num_passes);
             double min_width = 0.;
             double max_width = 0.;
-            if (! print_object->outer_wall_pass_width_range(min_width, max_width))
+            double nozzle    = 0.;
+            if (! print_object->outer_wall_pass_width_range(min_width, max_width, &nozzle))
                 return { L("Split outer wall: the minimum pass width must be positive and not larger than the maximum pass width."),
                          print_object, "split_outer_wall_min_width" };
-            if (object_config.layer_height.value / double(object_config.split_outer_wall_count.value) <
-                print_object->slicing_parameters().min_layer_height - EPSILON)
+            // The same limits as for the other line widths: the narrowest pass is printed at the pass height,
+            // the outer wall of the middle width is what the wall generator works with at the layer height.
+            if (min_width <= pass_height || 0.5 * (min_width + max_width) <= object_config.layer_height.value)
+                return { L("Split outer wall: the pass widths are too small. The minimum pass width must be larger than the "
+                           "height of a pass and the middle of the width range larger than the layer height."),
+                         print_object, "split_outer_wall_min_width" };
+            if (max_width > nozzle * MAX_LINE_WIDTH_MULTIPLIER)
+                return { L("Split outer wall: the maximum pass width is too large."), print_object, "split_outer_wall_max_width" };
+            if (pass_height < print_object->slicing_parameters().min_layer_height - EPSILON)
                 return { L("Split outer wall: the height of a pass (the layer height divided by the number of passes) "
                            "is below the minimum layer height of the printer."),
                          print_object, "split_outer_wall_count" };
+            // A mixed filament is printed in sub layers by a path of its own, which knows nothing of the passes.
+            for (const unsigned int filament : print_object->object_extruders())
+                if (const auto &is_mixed = m_config.filament_is_mixed.values; filament < is_mixed.size() && is_mixed[filament])
+                    return { L("Split outer wall is not supported with mixed filaments."), print_object, "split_outer_wall" };
+            // A skirt around all the objects is printed at the layer height before the lower passes of that layer.
+            // A skirt of a single object is printed with that object, after the passes.
+            if (m_config.skirt_type.value == stCombined && m_config.skirt_loops.value > 0 &&
+                (m_config.skirt_height.value > 1 || m_config.draft_shield.value == dsEnabled))
+                return { L("Split outer wall is not supported with a combined skirt higher than one layer or a draft shield. "
+                           "Use a per-object skirt instead."),
+                         print_object, "skirt_height" };
             if (print_object->has_support_material()) {
                 // A support layer of its own height printed inside the height of an object layer would stand
                 // above the passes of that layer.
@@ -2671,10 +2708,26 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     return { L("Split outer wall in more than two passes with the layers out of the width range split "
                                "into thin layers is supported for a single object only, or when printing by object."),
                              print_object, "split_outer_wall_count" };
-                for (const PrintObject *other : m_objects)
-                    if (std::abs(other->config().layer_height.value - object_config.layer_height.value) > EPSILON ||
-                        other->model_object()->has_custom_layering())
-                        return { L("Split outer wall requires that all objects have the same layer height."), other, "layer_height" };
+                // A layer of another object ending above the lowest pass of a layer of this object would be printed
+                // before that pass and stand above it. The layer height alone does not tell: a layer height
+                // profile, a raft and the precise Z height shift the layers as well.
+                const std::vector<coordf_t> &tops = object_layer_tops(print_object_idx);
+                for (size_t other_idx = 0; other_idx < m_objects.size(); ++ other_idx) {
+                    if (other_idx == print_object_idx)
+                        continue;
+                    for (const coordf_t other_top : object_layer_tops(other_idx)) {
+                        // The layer of this object the other layer ends in. The first layer has no passes.
+                        const auto layer_top = std::lower_bound(tops.begin(), tops.end(), other_top - EPSILON);
+                        if (layer_top == tops.begin() || layer_top == tops.end() || *layer_top - other_top < EPSILON)
+                            continue;
+                        const coordf_t lowest_pass = *std::prev(layer_top) + (*layer_top - *std::prev(layer_top)) / coordf_t(num_passes);
+                        if (other_top > lowest_pass + EPSILON)
+                            return { L("Split outer wall requires that the layers of all objects end at the same heights. "
+                                       "Different layer heights, a raft or the precise Z height shift them. "
+                                       "Print the objects one by one otherwise."),
+                                     m_objects[other_idx], "layer_height" };
+                    }
+                }
             }
             for (size_t region_id = 0; region_id < print_object->num_printing_regions(); ++ region_id)
                 pass_wall_filaments.insert(print_object->printing_region(region_id).config().outer_wall_filament_id.value);

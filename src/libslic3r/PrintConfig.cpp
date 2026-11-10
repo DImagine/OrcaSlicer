@@ -4490,8 +4490,9 @@ void PrintConfigDef::init_fff_params()
     def           = this->add("split_outer_wall_holes", coBool);
     def->label    = L("Split outer wall of holes");
     def->category = L("Quality");
-    def->tooltip  = L("Print the outer wall of holes in thin passes as well. Disable to print the walls of holes the regular "
-                      "way and save time.");
+    def->tooltip  = L("Print the outer wall of holes in thin passes as well. Disable to print the walls of holes in one "
+                      "pass at the layer height and save time. They are still printed with the middle of the pass width "
+                      "range.");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
@@ -10609,9 +10610,22 @@ t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int us
 
         // Orca: the lower passes of a split outer wall are printed below the layer height, where a support
         // layer of a height of its own would already stand. An object switching the option on by itself
-        // is stopped by Print::validate().
-        if (const ConfigOptionBool *split_opt = this->option<ConfigOptionBool>("split_outer_wall");
-            islh_opt != nullptr && islh_opt->value && split_opt != nullptr && split_opt->value) {
+        // is stopped by Print::validate(). Nothing changes if another setting rules the passes out.
+        auto split_outer_wall_applies = [this]() {
+            const auto *split  = this->option<ConfigOptionBool>("split_outer_wall");
+            const auto *walls  = this->option<ConfigOptionEnum<PerimeterGeneratorType>>("wall_generator");
+            const auto *spiral = this->option<ConfigOptionBool>("spiral_mode");
+            const auto *belt   = this->option<ConfigOptionBool>("belt_printer");
+            const auto *raft   = this->option<ConfigOptionInt>("raft_layers");
+            const auto *zaa    = this->option<ConfigOptionBool>("zaa_enabled");
+            const auto *fuzzy  = this->option<ConfigOptionEnum<FuzzySkinType>>("fuzzy_skin");
+            return split != nullptr && split->value &&
+                   walls != nullptr && walls->value == PerimeterGeneratorType::Classic &&
+                   ! (spiral != nullptr && spiral->value) && ! (belt != nullptr && belt->value) &&
+                   ! (raft != nullptr && raft->value > 0) && ! (zaa != nullptr && zaa->value) &&
+                   ! (fuzzy != nullptr && fuzzy->value != FuzzySkinType::None && fuzzy->value != FuzzySkinType::Disabled_fuzzy);
+        };
+        if (islh_opt != nullptr && islh_opt->value && split_outer_wall_applies()) {
             islh_opt->value = false;
             changed_keys.push_back("independent_support_layer_height");
         }

@@ -1782,6 +1782,9 @@ bool PrintObject::invalidate_state_by_config_options(
             // This value is used for calculating perimeter - infill overlap, thus perimeters need to be recalculated.
             steps.emplace_back(posPerimeters);
             steps.emplace_back(posPrepareInfill);
+        } else if (opt_key == "fuzzy_skin" && m_config.split_outer_wall.value) {
+            // Orca: fuzzy skin rules out the outer wall printed in thin passes, which is planned with the layers.
+            steps.emplace_back(posSlice);
         } else if (
                opt_key == "outer_wall_line_width"
             || opt_key == "outer_wall_filament_id"

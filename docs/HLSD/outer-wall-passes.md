@@ -64,7 +64,8 @@ wall is generated from that slice.
 
 On a layer with passes `LayerRegion::flow()` returns the nominal width for the
 outer wall, and the wall generator prints the outer wall before the inner walls
-whatever the wall sequence is, as the passes go first.
+whatever the wall sequence is, as the passes go first. The walls of such a layer
+are printed before its infill as well, even with the infill set to go first.
 
 `split_outer_wall_loops()` then replaces every loop of the outer wall
 (`OuterWallPasses.cpp`): the loop is sampled, the offsets `d_k` are measured at
@@ -108,25 +109,37 @@ such a layer are not offered for wiping into the object.
 The prime tower is printed at the layer height, before the passes or after the
 objects. It stands apart from the objects, so it needs no change. Support layers
 follow the object layers: the independent support layer height is switched off
-with the option on for the whole print, as it is with a prime tower.
+with the option on for the whole print and no global setting ruling the passes
+out, as it is with a prime tower.
 
 ## Restrictions
 
 `Print::validate()` stops with an error for
 
 - a pass thinner than the minimum layer height of the printer,
-- an invalid width range,
+- a width range that is empty, makes a pass narrower than it is high, or reaches
+  beyond the widest line allowed for the nozzle,
+- mixed filaments, which are printed in sub layers by a path of their own,
+- a skirt around all the objects higher than one layer and a draft shield, which
+  are printed at the layer height before the lower passes; a per-object skirt is
+  printed with its object, after them,
 - support of an independent layer height when the option is set for an object only,
 - Organic supports together with layers split into thin layers, as Organic
   supports are built of layers of one height,
-- several objects of different layer heights, and more than two passes together
-  with layers split into thin layers for several objects: layers of another
-  object printed earlier would stand above the lower passes,
+- several objects whose layers do not end at the same heights (different layer
+  heights, a layer height profile, a raft, the precise Z height on objects of
+  different heights), and more than two passes together with layers split into
+  thin layers for several objects: layers of another object printed earlier
+  would stand above the lower passes. A layer of another object may end no
+  higher than the lowest pass of the layer it ends in. Objects printed one by
+  one are not restricted,
 - outer walls of several filaments among the objects the option is on for.
 
 ## Limitations
 
 - A loop with an overhanging part is printed as one regular loop.
+- With `split_outer_wall_holes` off the walls of holes are printed in one pass at
+  the layer height, but still with the nominal width.
 - At corners sharper than about 41° the miter of the offset is limited and the
   outer edge of a pass deviates from the outline by up to half the offset.
 - The passes are measured against outlines without the XY size compensations.

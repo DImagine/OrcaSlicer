@@ -9140,7 +9140,10 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
             m_config.apply(print.get_print_region(&region - &by_region.front()).config());
             // BBS: for first layer, we always print wall firstly to get better bed adhesive force
             // This behaviour is same with cura
-            const bool should_print = is_first_layer ? !is_infill_first
+            // Orca: a layer with the outer wall split into thin passes prints the walls before the infill as well,
+            // as the top pass is one of them.
+            const bool walls_first  = is_first_layer || (m_layer != nullptr && m_layer->outer_wall_pass_slices);
+            const bool should_print = walls_first ? !is_infill_first
                 : (m_config.is_infill_first == is_infill_first);
             if (!should_print) continue;
 

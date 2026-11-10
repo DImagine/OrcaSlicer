@@ -348,14 +348,16 @@ bool PrintObject::outer_wall_passes_enabled(std::string *why_not) const
     return false;
 }
 
-bool PrintObject::outer_wall_pass_width_range(double &min_width, double &max_width) const
+bool PrintObject::outer_wall_pass_width_range(double &min_width, double &max_width, double *nozzle_diameter) const
 {
     if (this->num_printing_regions() == 0)
         return false;
-    const double nozzle_diameter = nozzle_diameter_for_filament(m_print->config(), this->printing_region(0).extruder(frExternalPerimeter),
-                                                                m_print->is_BBL_printer());
-    min_width = m_config.split_outer_wall_min_width.get_abs_value(nozzle_diameter);
-    max_width = m_config.split_outer_wall_max_width.get_abs_value(nozzle_diameter);
+    const double nozzle = nozzle_diameter_for_filament(m_print->config(), this->printing_region(0).extruder(frExternalPerimeter),
+                                                       m_print->is_BBL_printer());
+    min_width = m_config.split_outer_wall_min_width.get_abs_value(nozzle);
+    max_width = m_config.split_outer_wall_max_width.get_abs_value(nozzle);
+    if (nozzle_diameter != nullptr)
+        *nozzle_diameter = nozzle;
     return min_width > 0. && max_width >= min_width;
 }
 
@@ -390,6 +392,10 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
         const coordf_t hi          = object_layers[2 * layer_idx + 1];
         const coordf_t pass_height = (hi - lo) / coordf_t(num_passes);
         if (pass_height < m_slicing_params.min_layer_height - EPSILON)
+            continue;
+        // A line has to be wider than it is high: the narrowest pass at the pass height, and the outer wall
+        // of the nominal width the wall generator works with at the layer height.
+        if (min_width <= pass_height || 0.5 * (min_width + max_width) <= hi - lo)
             continue;
         candidates.emplace_back(layer_idx);
         for (size_t pass = 0; pass < num_passes; ++ pass) {
