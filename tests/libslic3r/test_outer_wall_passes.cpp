@@ -51,6 +51,17 @@ TEST_CASE("A pass wider or narrower than allowed does not fit", "[OuterWallPasse
     REQUIRE_FALSE(outer_wall_passes_fit(mid, { { square(20.) }, { square(19.7) } }, min_width, max_width, true));
 }
 
+TEST_CASE("The width range is checked with a tolerance of a few microns", "[OuterWallPasses]")
+{
+    const ExPolygons mid { square(20.) };
+    // Exactly at the limit and 2 microns beyond it.
+    REQUIRE(outer_wall_passes_fit(mid, { { square(20.2) }, { square(19.8) } }, min_width, max_width, true));
+    REQUIRE(outer_wall_passes_fit(mid, { { square(20.204) }, { square(19.796) } }, min_width, max_width, true));
+    // 7 microns beyond the limit.
+    REQUIRE_FALSE(outer_wall_passes_fit(mid, { { square(20.214) }, { square(20.) } }, min_width, max_width, true));
+    REQUIRE_FALSE(outer_wall_passes_fit(mid, { { square(20.) }, { square(19.786) } }, min_width, max_width, true));
+}
+
 TEST_CASE("A part appearing or vanishing between the passes does not fit", "[OuterWallPasses]")
 {
     const ExPolygons mid { square(20.) };

@@ -235,14 +235,17 @@ bool outer_wall_passes_fit(const ExPolygons              &mid,
     const double nominal_width = 0.5 * (min_width + max_width);
     // Slices taken at different heights never match exactly: the contours are simplified with this precision.
     const float  tolerance     = scaled<float>(0.003);
+    // Slivers the polygon clipping leaves along edges that coincide. Kept far below the tolerance, as whatever
+    // the opening removes adds to it.
+    const float  sliver        = scaled<float>(0.0005);
     const ExPolygons mid_outline = comparable_outline(mid, with_holes);
     // The widest pass may reach this far out and the narrowest pass has to reach at least this far.
     const Polygons   outer_limit = offset(mid_outline, scaled<float>(max_width - nominal_width) + tolerance);
     const ExPolygons inner_limit = offset_ex(mid_outline, - scaled<float>(nominal_width - min_width) - tolerance);
     for (const ExPolygons &pass : passes) {
         const ExPolygons pass_outline = comparable_outline(pass, with_holes);
-        if (! opening_ex(diff_ex(pass_outline, outer_limit), tolerance).empty() ||
-            ! opening_ex(diff_ex(inner_limit, pass_outline), tolerance).empty())
+        if (! opening_ex(diff_ex(pass_outline, outer_limit), sliver).empty() ||
+            ! opening_ex(diff_ex(inner_limit, pass_outline), sliver).empty())
             return false;
     }
     return true;
