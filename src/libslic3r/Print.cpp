@@ -613,6 +613,12 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             //FIXME Killing supports on any change of "filament_soluble" is rough. We should check for each object whether that is necessary.
             osteps.emplace_back(posSupportMaterial);
             osteps.emplace_back(posSimplifySupportPath);
+        } else if (opt_key == "min_layer_height" &&
+                   std::any_of(m_objects.begin(), m_objects.end(),
+                               [](const PrintObject *object) { return object->config().split_outer_wall.value; })) {
+            // Orca: the layers of an outer wall printed in thin passes are planned by the minimum layer height.
+            osteps.emplace_back(posSlice);
+            steps.emplace_back(psSkirtBrim);
         } else if (
                opt_key == "initial_layer_line_width"
             || opt_key == "min_layer_height"
@@ -2686,15 +2692,24 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                            "height of a pass and the middle of the width range larger than the layer height."),
                          print_object, "split_outer_wall_min_width" };
             if (max_width > nozzle * MAX_LINE_WIDTH_MULTIPLIER)
-                return { L("Split outer wall: the maximum pass width is too large."), print_object, "split_outer_wall_max_width" };
+                return { Slic3r::format(_u8L("Split outer wall: the maximum pass width is too large. It must not exceed %1% nozzle diameters."),
+                                        int(MAX_LINE_WIDTH_MULTIPLIER)),
+                         print_object, "split_outer_wall_max_width" };
             if (pass_height < print_object->slicing_parameters().min_layer_height - EPSILON)
                 return { L("Split outer wall: the height of a pass (the layer height divided by the number of passes) "
                            "is below the minimum layer height of the printer."),
                          print_object, "split_outer_wall_count" };
+            const bool with_other_objects = m_objects.size() > 1 && m_config.print_sequence.value != PrintSequence::ByObject;
             // A mixed filament is printed in sub layers by a path of its own, which knows nothing of the passes.
-            for (const unsigned int filament : print_object->object_extruders())
-                if (const auto &is_mixed = m_config.filament_is_mixed.values; filament < is_mixed.size() && is_mixed[filament])
-                    return { L("Split outer wall is not supported with mixed filaments."), print_object, "split_outer_wall" };
+            // The sub layers of another object printed along need their filaments in an order of their own,
+            // which the filament of the split outer wall going first would break.
+            for (const PrintObject *other : m_objects)
+                if (other == print_object || with_other_objects)
+                    for (const unsigned int filament : other->object_extruders())
+                        if (const auto &is_mixed = m_config.filament_is_mixed.values; filament < is_mixed.size() && is_mixed[filament])
+                            return { L("Split outer wall is not supported with mixed filaments, neither of the object itself "
+                                       "nor of another object printed along with it."),
+                                     other, "split_outer_wall" };
             // A skirt around all the objects is printed at the layer height before the lower passes of that layer.
             // A skirt of a single object is printed with that object, after the passes.
             if (m_config.skirt_type.value == stCombined && m_config.skirt_loops.value > 0 &&
@@ -2702,7 +2717,6 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return { L("Split outer wall is not supported with a combined skirt higher than one layer or a draft shield. "
                            "Use a per-object skirt instead."),
                          print_object, "skirt_height" };
-            const bool with_other_objects = m_objects.size() > 1 && m_config.print_sequence.value != PrintSequence::ByObject;
             // A support layer of a height of its own printed inside the height of an object layer would stand
             // above the passes of that layer, be it the support of this object or of one printed along with it.
             if (m_config.independent_support_layer_height.value &&
@@ -2745,10 +2759,12 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                             continue;
                         const coordf_t lowest_pass = *std::prev(layer_top) + (*layer_top - *std::prev(layer_top)) / coordf_t(num_passes);
                         if (other_top > lowest_pass + EPSILON)
-                            return { L("Split outer wall requires that the layers of all objects end at the same heights. "
-                                       "Different layer heights, a raft or the precise Z height shift them. "
-                                       "Print the objects one by one otherwise."),
-                                     m_objects[other_idx], "layer_height" };
+                            return { L("Split outer wall: a layer of another object must not end above the lowest pass of a "
+                                       "layer printed in passes. Different layer heights, a layer height profile or the "
+                                       "precise Z height shift the layers. Print the objects one by one otherwise."),
+                                     m_objects[other_idx],
+                                     m_objects[other_idx]->config().precise_z_height.value || object_config.precise_z_height.value ?
+                                         "precise_z_height" : "layer_height" };
                     }
                 }
             }

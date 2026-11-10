@@ -497,17 +497,18 @@ TEST_CASE("Settings the passes cannot be printed safely with are rejected", "[Ou
     }
     SECTION("a skirt around all the objects higher than one layer stands above the low passes") {
         REQUIRE_THAT(validate({ { "skirt_loops", 2 }, { "skirt_height", 3 } }), ContainsSubstring("skirt"));
+        REQUIRE_THAT(validate({ { "skirt_loops", 2 }, { "draft_shield", "enabled" } }), ContainsSubstring("draft shield"));
         // One layer of a skirt is below every pass.
         REQUIRE(validate({ { "skirt_loops", 2 }, { "skirt_height", 1 } }).empty());
     }
     SECTION("precise Z height shifts the last layers of objects of different heights") {
-        REQUIRE_THAT(validate({ { "precise_z_height", true } }, 20.05), ContainsSubstring("end at the same heights"));
+        REQUIRE_THAT(validate({ { "precise_z_height", true } }, 20.05), ContainsSubstring("above the lowest pass"));
         REQUIRE(validate({ { "precise_z_height", true } }, 20.).empty());
     }
     SECTION("thin layers another object may split its layers into count as well") {
         // The second cube is printed at half the layer height. Its layers end at the lowest pass of the first
         // cube or at its layer height, but the thin layers it may be split into end in between.
-        REQUIRE_THAT(validate_second_cube("split_layer", { "layer_height", 0.1 }), ContainsSubstring("end at the same heights"));
+        REQUIRE_THAT(validate_second_cube("split_layer", { "layer_height", 0.1 }), ContainsSubstring("above the lowest pass"));
         REQUIRE(validate_second_cube("regular", { "layer_height", 0.1 }).empty());
     }
     SECTION("a raft under another object has layers of heights of its own") {

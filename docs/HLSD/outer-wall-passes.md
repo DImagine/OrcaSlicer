@@ -55,7 +55,8 @@ passes keeps its slices in `Layer::outer_wall_pass_slices`.
 
 The first layer, the layers shrunk by the elephant foot compensation and the
 layers whose pass would be thinner than the minimum layer height of the printer
-are not candidates.
+are not candidates. Neither is a layer whose narrowest pass would not be wider
+than the pass is high, or whose nominal width would not exceed the layer height.
 
 The layer itself is sliced as usual, at its middle. Everything but the outer
 wall is generated from that slice.
@@ -122,7 +123,9 @@ out, as it is with a prime tower.
 - a pass thinner than the minimum layer height of the printer,
 - a width range that is empty, makes a pass narrower than it is high, or reaches
   beyond the widest line allowed for the nozzle,
-- mixed filaments, which are printed in sub layers by a path of their own,
+- mixed filaments of the object, which are printed in sub layers by a path of
+  their own, and of any object printed along with it, whose sub layers need
+  their filaments in an order the filament of the split outer wall would break,
 - a skirt around all the objects higher than one layer and a draft shield, which
   are printed at the layer height before the lower passes; a per-object skirt is
   printed with its object, after them,

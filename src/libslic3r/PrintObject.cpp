@@ -1596,6 +1596,13 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "hole_to_polyhole_max_edges"
             ) {
             steps.emplace_back(posSlice);
+        } else if (m_config.split_outer_wall.value &&
+                   (opt_key == "fuzzy_skin" || opt_key == "outer_wall_filament_id" || opt_key == "enable_support" ||
+                    opt_key == "support_filament" || opt_key == "support_interface_filament")) {
+            // Orca: the outer wall printed in thin passes is planned with the layers. Fuzzy skin rules it out,
+            // the nozzle of the outer wall gives its widths in percent, and the nozzles of the object and of its
+            // supports the minimum layer height. Checked ahead of the branches of these keys below.
+            steps.emplace_back(posSlice);
         } else if (opt_key == "enable_support") {
             steps.emplace_back(posSupportMaterial);
             if (m_config.support_top_z_distance == 0.) {
@@ -1782,9 +1789,6 @@ bool PrintObject::invalidate_state_by_config_options(
             // This value is used for calculating perimeter - infill overlap, thus perimeters need to be recalculated.
             steps.emplace_back(posPerimeters);
             steps.emplace_back(posPrepareInfill);
-        } else if (opt_key == "fuzzy_skin" && m_config.split_outer_wall.value) {
-            // Orca: fuzzy skin rules out the outer wall printed in thin passes, which is planned with the layers.
-            steps.emplace_back(posSlice);
         } else if (
                opt_key == "outer_wall_line_width"
             || opt_key == "outer_wall_filament_id"
