@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include "AABBTreeLines.hpp"
 #include "ClipperUtils.hpp"
+#include "ExPolygon.hpp"
 #include "ExtrusionEntity.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"

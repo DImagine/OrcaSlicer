@@ -324,7 +324,9 @@ bool PrintObject::outer_wall_passes_enabled() const
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
         const PrintRegionConfig &region_config = this->printing_region(region_id).config();
         // Z contouring moves the slicing plane and the walls, fuzzy skin displaces the outer wall.
-        if (region_config.zaa_enabled.value || region_config.fuzzy_skin.value != FuzzySkinType::None)
+        // None stands for fuzzy skin on the painted areas only, which are excluded above.
+        const FuzzySkinType fuzzy_skin = region_config.fuzzy_skin.value;
+        if (region_config.zaa_enabled.value || (fuzzy_skin != FuzzySkinType::None && fuzzy_skin != FuzzySkinType::Disabled_fuzzy))
             return false;
     }
     return true;
