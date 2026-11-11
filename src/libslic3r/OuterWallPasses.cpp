@@ -65,17 +65,23 @@ std::vector<size_t> rings_of_lines(const ExPolygons &outline)
 // between the given two. Finds the edge a loop follows where another edge of the same ring is nearer to the point:
 // the material has to end there once only, on the given ring. Returns false otherwise.
 bool edge_on_way_out(const OutlineDistancer &outline, const std::vector<size_t> &rings, size_t ring, const Vec2d &point,
-                     const Vec2d &outward, double lowest, double highest, double &at)
+                     const Vec2d &outward, double lowest, double highest, double &at, const char **why = nullptr)
 {
+    // TEMP diagnostics: why there is no such edge.
+    auto refuse = [why](const char *reason) {
+        if (why != nullptr)
+            *why = reason;
+        return false;
+    };
     const Line way(Point((point + lowest * outward).cast<coord_t>()), Point((point + highest * outward).cast<coord_t>()));
     // Crossings of the way with the outline.
     struct Crossing
     {
         size_t ring;
         double at;
-        // Whether the material ends there, and whether the way goes through an end of the edge.
+        // Whether the material ends there, and whether the way goes through a vertex along its other edge.
         bool   out;
-        bool   vertex;
+        bool   along;
         bool operator<(const Crossing &rhs) const { return this->ring < rhs.ring || (this->ring == rhs.ring && this->at < rhs.at); }
     };
     const double          same_point = scaled<double>(0.0001);
@@ -88,8 +94,29 @@ bool edge_on_way_out(const OutlineDistancer &outline, const std::vector<size_t> 
         if (turn == 0.)
             continue;
         const Vec2d where = crossing.cast<double>();
-        crossings.push_back({ rings[line_idx], (where - point).dot(outward) / outward.squaredNorm(), turn < 0.,
-                              (where - edge.a.cast<double>()).norm() <= same_point || (where - edge.b.cast<double>()).norm() <= same_point });
+        // At an end of the edge: does the edge of the ring next to it there run along the way?
+        bool        along = false;
+        const bool  at_a  = (where - edge.a.cast<double>()).norm() <= same_point;
+        if (at_a || (where - edge.b.cast<double>()).norm() <= same_point) {
+            size_t next = line_idx;
+            if (at_a) {
+                if (line_idx > 0 && rings[line_idx - 1] == rings[line_idx])
+                    next = line_idx - 1;
+                else
+                    while (next + 1 < rings.size() && rings[next + 1] == rings[line_idx])
+                        ++ next;
+            } else {
+                if (line_idx + 1 < rings.size() && rings[line_idx + 1] == rings[line_idx])
+                    next = line_idx + 1;
+                else
+                    while (next > 0 && rings[next - 1] == rings[line_idx])
+                        -- next;
+            }
+            const Line  &next_edge = outline.get_line(next);
+            const Vec2d  next_dir  = (next_edge.b - next_edge.a).cast<double>();
+            along = std::abs(next_dir.x() * outward.y() - next_dir.y() * outward.x()) <= 1e-6 * next_dir.norm() * outward.norm();
+        }
+        crossings.push_back({ rings[line_idx], (where - point).dot(outward) / outward.squaredNorm(), turn < 0., along });
     }
     std::sort(crossings.begin(), crossings.end());
     size_t ways_out = 0;
@@ -99,21 +126,24 @@ bool edge_on_way_out(const OutlineDistancer &outline, const std::vector<size_t> 
         size_t end  = begin;
         int    ends = 0;
         for (; end < crossings.size() && crossings[end].ring == crossings[begin].ring &&
-               (crossings[end].at - crossings[begin].at) * outward.norm() <= same_point; ++ end)
+               (crossings[end].at - crossings[begin].at) * outward.norm() <= same_point; ++ end) {
             ends += crossings[end].out ? 1 : -1;
-        // A vertex crossed along one of its edges only: the other one runs along the way, which tells nothing.
-        if (end == begin + 1 && crossings[begin].vertex)
-            return false;
+            // An edge running along the way tells nothing of the material beside it.
+            if (crossings[end].along)
+                return refuse("along");
+        }
         if (ends > 0) {
             // A hole, a notch or another part beside the wall gives the way more than one end of the material, or
             // one on another ring: which of them the loop follows is not known.
-            if (++ ways_out > 1 || crossings[begin].ring != ring)
-                return false;
+            if (++ ways_out > 1)
+                return refuse("several");
+            if (crossings[begin].ring != ring)
+                return refuse("ring");
             at = crossings[begin].at;
         }
         begin = end;
     }
-    return ways_out == 1;
+    return ways_out == 1 || refuse("none");
 }
 
 // Point of a wall loop the passes are derived from.
@@ -356,11 +386,13 @@ bool sample_loop(WallLoop                            &wall_loop,
                 const std::vector<size_t> &rings   = pass_rings[&pass_outline - pass_outlines.data()];
                 double                     mid_at  = 0.;
                 double                     pass_at = 0.;
+                const char                *why     = "";
                 if (! edge_on_way_out(mid_outline, mid_rings, mid_rings[std::get<1>(mid_outline.distance_from_lines_extra<false>(from))],
-                                      measured_at, way_out, 0., 4. * mid_distance + edge_tolerance, mid_at) ||
-                    ! edge_on_way_out(pass_outline, rings, rings[std::get<1>(pass_outline.distance_from_lines_extra<false>(from))],
-                                      measured_at, way_out, mid_at - most_inwards, mid_at + most_outwards, pass_at))
-                    return refuse("pass_side");
+                                      measured_at, way_out, 0., 4. * mid_distance + edge_tolerance, mid_at, &why))
+                    return refuse(std::string("pass_side_mid_") + why);
+                if (! edge_on_way_out(pass_outline, rings, rings[std::get<1>(pass_outline.distance_from_lines_extra<false>(from))],
+                                      measured_at, way_out, mid_at - most_inwards, mid_at + most_outwards, pass_at, &why))
+                    return refuse(std::string("pass_side_pass_") + why);
                 sample.offsets.emplace_back(pass_at - mid_at);
                 continue;
             }
