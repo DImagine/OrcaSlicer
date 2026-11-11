@@ -92,11 +92,13 @@ of the outlines, which has to be the edge the loop follows: the distance to
 `S_mid` and to every `S_k` is probed on both sides of the loop. A loop whose
 outer side a probe of `S_mid` contradicts or none confirms is left as it is.
 Where only a probe of some `S_k` contradicts it, another edge is nearest in the
-outline of that pass, as the far side of a part tapering off or a notch. The
-edge the loop follows is then looked up along the way out of the material: where
-the material of `S_k` ends, nearest to where that of `S_mid` does, no further
-than all the walls may move the edge. The offset is the difference of the two;
-a loop with no such edge at some point is left as it is. So is a loop the XY compensations moved
+outline of that pass. If that is the far side of a part tapering off, the same
+ring of the outline coming round, the edge the loop follows is looked up along
+the way out of the material: where the material ends on that ring, nearest to
+where that of `S_mid` does, no further than all the walls may move the edge.
+The offset is the difference of the two. A loop beside an edge of another ring,
+a hole or another part of the model, or with no edge on the way out, is left as
+it is: which edge it follows there is not known. So is a loop the XY compensations moved
 beside another edge of the outlines, such as the hole of a thin wall they
 thickened. Where the outline of the layer does not lie half the wall width off
 the loop on its outer side, at a corner along the miter, the loop is taken to

@@ -50,25 +50,51 @@ bool signed_distance(const OutlineDistancer &outline, const Point &point, double
     return true;
 }
 
+// Whether two lines of an outline belong to one ring of it, a contour or a hole: the lines of a ring follow one
+// another.
+bool same_ring(const OutlineDistancer &outline, size_t line_a, size_t line_b)
+{
+    if (line_a > line_b)
+        std::swap(line_a, line_b);
+    for (size_t line = line_a; line < line_b; ++ line)
+        if (outline.get_line(line).b != outline.get_line(line + 1).a)
+            return false;
+    return true;
+}
+
 // Where the material of an outline ends on the way out of it from a point, in the units of the outward vector:
-// the crossing nearest to the expected one between the given two. Finds the edge a loop follows where another edge
-// of the outline is nearer to the point. Returns false if the material does not end there.
-bool edge_on_way_out(const OutlineDistancer &outline, const Vec2d &point, const Vec2d &outward, double expected, double lowest,
-                     double highest, double &at)
+// the crossing nearest to the expected one between the given two, on the ring of the given line only. Finds the
+// edge a loop follows where another edge of the same ring is nearer to the point. Returns false if the material
+// does not end there.
+bool edge_on_way_out(const OutlineDistancer &outline, size_t ring_line, const Vec2d &point, const Vec2d &outward, double expected,
+                     double lowest, double highest, double &at)
 {
     const Line way(Point((point + lowest * outward).cast<coord_t>()), Point((point + highest * outward).cast<coord_t>()));
-    bool       found = false;
+    // Where the way crosses the ring and whether the material ends there.
+    std::vector<std::pair<double, bool>> crossings;
     for (const auto &[crossing, line_idx] : outline.intersections_with_line<false>(way)) {
         // The material lies to the left of an edge of the outlines: it ends where the way out leaves to the right.
         const Line  &edge = outline.get_line(line_idx);
         const Vec2d  dir  = (edge.b - edge.a).cast<double>();
-        if (dir.x() * outward.y() - dir.y() * outward.x() >= 0.)
-            continue;
-        const double crossed_at = (crossing.cast<double>() - point).dot(outward) / outward.squaredNorm();
-        if (! found || std::abs(crossed_at - expected) < std::abs(at - expected)) {
-            at    = crossed_at;
+        const double turn = dir.x() * outward.y() - dir.y() * outward.x();
+        if (turn != 0. && same_ring(outline, line_idx, ring_line))
+            crossings.emplace_back((crossing.cast<double>() - point).dot(outward) / outward.squaredNorm(), turn < 0.);
+    }
+    std::sort(crossings.begin(), crossings.end());
+    const double same_point = scaled<double>(0.0001) / outward.norm();
+    bool         found      = false;
+    for (size_t begin = 0; begin < crossings.size();) {
+        // Through a vertex the way crosses both its edges at one point. Where it only touches the vertex, it leaves
+        // the material and enters it at once: that is no way out.
+        size_t end  = begin;
+        int    ends = 0;
+        for (; end < crossings.size() && crossings[end].first - crossings[begin].first <= same_point; ++ end)
+            ends += crossings[end].second ? 1 : -1;
+        if (ends > 0 && (! found || std::abs(crossings[begin].first - expected) < std::abs(at - expected))) {
+            at    = crossings[begin].first;
             found = true;
         }
+        begin = end;
     }
     return found;
 }
@@ -299,15 +325,22 @@ bool sample_loop(WallLoop                            &wall_loop,
             Vec2d  pass_nearest;
             if (! signed_distance(pass_outline, wall == 0 ? sample.point : measured, pass_distance, pass_nearest))
                 return refuse("no_pass_distance");
-            // The nearest edge may be another one in the outline of a pass only: the far side of a part tapering
-            // off, a notch. The edge the loop follows is then looked up on the way out of the material, in the
-            // middle outline as well, as far as the walls may move it. A loop with no such edge is left as it is.
+            // The nearest edge may be another one in the outline of a pass only. Where it is the far side of a part
+            // tapering off, the same ring of the outline coming round, the edge the loop follows is looked up on
+            // the way out of the material, in the middle outline as well, as far as the walls may move it. A loop
+            // beside an edge of another ring, a hole or another part, or with no edge on the way out is left as it
+            // is: which edge it follows there is not known.
             if (outline_side(pass_outline, measured_at, sample.outward) < 0) {
-                const Vec2d way_out = side * sample.outward;
-                double      mid_at  = 0.;
-                double      pass_at = 0.;
-                if (! edge_on_way_out(mid_outline, measured_at, way_out, mid_distance, 0., 4. * mid_distance + edge_tolerance, mid_at) ||
-                    ! edge_on_way_out(pass_outline, measured_at, way_out, mid_at, mid_at - most_inwards, mid_at + most_outwards, pass_at))
+                const Vec2d  way_out   = side * sample.outward;
+                const Point  from(measured_at.cast<coord_t>());
+                const size_t mid_line  = std::get<1>(mid_outline.distance_from_lines_extra<false>(from));
+                const size_t pass_line = std::get<1>(pass_outline.distance_from_lines_extra<false>(from));
+                double       mid_at    = 0.;
+                double       pass_at   = 0.;
+                if (! edge_on_way_out(mid_outline, mid_line, measured_at, way_out, mid_distance, 0., 4. * mid_distance + edge_tolerance,
+                                      mid_at) ||
+                    ! edge_on_way_out(pass_outline, pass_line, measured_at, way_out, mid_at, mid_at - most_inwards, mid_at + most_outwards,
+                                      pass_at))
                     return refuse("pass_side");
                 sample.offsets.emplace_back(pass_at - mid_at);
                 continue;
