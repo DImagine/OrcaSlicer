@@ -100,11 +100,7 @@ the edge within that, so the material has to end there once only, and on that
 ring. The offset is the difference of the two. A loop beside an edge of another
 ring, a hole or another part of the model, or with none or several ends of the
 material on the way out, as beside a notch, is left as it is: which edge it
-follows there is not known. The edge is looked up the same way where the nearest
-edge of `S_k` faces another way than the loop does, the material lying on its
-outer side as seen from the loop, even if the probes do not contradict the
-side; there the nearest edge is still taken if the edge on the way out is not
-found. So is a loop the XY compensations moved
+follows there is not known. So is a loop the XY compensations moved
 beside another edge of the outlines, such as the hole of a thin wall they
 thickened. Where the outline of the layer does not lie half the wall width off
 the loop on its outer side, at a corner along the miter, the loop is taken to
