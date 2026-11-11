@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <initializer_list>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -419,6 +420,77 @@ TEST_CASE("The top pass is printed before the infill even with the infill first"
         const double distance = (levels.first_start.at(layer_z) - levels.first_start.at(layer_z - 100)).norm();
         REQUIRE(distance < 0.1);
     }
+}
+
+TEST_CASE("Nothing is purged into a layer printed in passes", "[OuterWallPasses]")
+{
+    // The cap on a stem again, its support interface printed with the second filament. The change back to the first
+    // filament is purged at a prime tower and, as far as allowed, into the infill, which is set to go first.
+    TriangleMesh mesh = make_cube(10, 10, 10);
+    mesh.translate(10, 10, 0);
+    TriangleMesh cap = make_cube(30, 30, 2);
+    cap.translate(0, 0, 10);
+    mesh.merge(cap);
+    auto slice_cap = [&mesh](bool split) {
+        return Slic3r::Test::slice({ mesh }, multifilament_config(2, {
+            { "split_outer_wall",                 split },
+            { "split_outer_wall_count",           2 },
+            { "split_outer_wall_min_width",       "0.4" },
+            { "split_outer_wall_max_width",       "0.6" },
+            { "split_outer_wall_fallback",        "regular" },
+            { "wall_generator",                   "classic" },
+            { "layer_height",                     layer_height },
+            { "initial_layer_print_height",       layer_height },
+            { "elefant_foot_compensation",        0. },
+            { "sparse_infill_density",            "15%" },
+            { "is_infill_first",                  true },
+            { "enable_prime_tower",               true },
+            { "flush_into_infill",                true },
+            { "enable_support",                   true },
+            { "support_type",                     "normal(auto)" },
+            { "independent_support_layer_height", false },
+            { "support_filament",                 1 },
+            { "support_interface_filament",       2 },
+            { "skirt_loops",                      0 },
+            { "brim_type",                        "no_brim" },
+        }));
+    };
+    // Without the passes the infill is purged into: the settings do reach the wiping.
+    REQUIRE(slice_cap(false).find("; PURGING FINISHED") != std::string::npos);
+
+    const std::string gcode = slice_cap(true);
+    // Heights the outer wall was printed at, in microns, and whether an infill was printed at the height of a layer
+    // between the low pass and the top pass of its outer wall.
+    std::set<int> wall_heights;
+    bool          infill_before_top_pass = false;
+    // Whether a low pass was the first wall printed after a change to the first filament.
+    bool          changed_to_wall_filament = false;
+    bool          passes_after_change = false;
+    std::string   role;
+    GCodeReader   reader;
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        // The role is tagged either way, by the printer.
+        for (const std::string tag : { "; FEATURE: ", ";TYPE:" })
+            if (line.raw().rfind(tag, 0) == 0)
+                role = line.raw().substr(tag.size());
+        if (line.raw().rfind("T0", 0) == 0)
+            changed_to_wall_filament = true;
+        if (! line.extruding(self) || line.dist_XY(self) <= 0.)
+            return;
+        const int z = int(std::lround(line.new_Z(self) * 1000.));
+        if (role.rfind("Outer wall", 0) == 0) {
+            // The low pass of a layer lies half a layer below its height.
+            if (changed_to_wall_filament && z % 200 == 100)
+                passes_after_change = true;
+            changed_to_wall_filament = false;
+            wall_heights.insert(z);
+        } else if (role.find("infill") != std::string::npos && wall_heights.count(z - 100) == 1 && wall_heights.count(z) == 0)
+            infill_before_top_pass = true;
+    });
+    // The stem is printed in passes, a layer started by the change back from the interface included.
+    REQUIRE(wall_heights.count(5100) == 1);
+    REQUIRE(passes_after_change);
+    REQUIRE_FALSE(infill_before_top_pass);
 }
 
 TEST_CASE("Changing fuzzy skin plans the layers again", "[OuterWallPasses]")

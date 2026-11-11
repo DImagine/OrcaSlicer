@@ -557,6 +557,7 @@ ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extrude
         this->initialize_layers(zs);
     }
 
+    this->collect_outer_wall_passes(object);
     // Collect extruders reuqired to print the layers. Add dontcare extruders
     this->collect_extruders(object, std::vector<std::pair<double, unsigned int>>());
 
@@ -623,6 +624,8 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
         per_layer_extruder_switches = custom_tool_changes(print.model().get_curr_plate_custom_gcodes(), num_filaments);
 	}
 
+    for (auto object : print.objects())
+        this->collect_outer_wall_passes(*object);
     // Collect extruders reuqired to print the layers.
     for (auto object : print.objects())
         this->collect_extruders(*object, per_layer_extruder_switches);
@@ -805,6 +808,25 @@ void ToolOrdering::initialize_layers(std::vector<coordf_t> &zs)
     }
 }
 
+// Orca: remember a region whose outer wall is split into thin passes on each layer of the object. Called for all the
+// objects before anything of a layer is offered for wiping, so that the offer does not depend on their order.
+void ToolOrdering::collect_outer_wall_passes(const PrintObject &object)
+{
+    for (const Layer *layer : object.layers()) {
+        if (! layer->outer_wall_pass_slices)
+            continue;
+        LayerTools &layer_tools = this->tools_for_layer(layer->print_z);
+        if (layer_tools.outer_wall_passes_region != nullptr)
+            continue;
+        for (const LayerRegion *layerm : layer->regions())
+            if (std::any_of(layerm->outer_wall_lower_passes.begin(), layerm->outer_wall_lower_passes.end(),
+                            [](const ExtrusionEntityCollection &pass) { return ! pass.entities.empty(); })) {
+                layer_tools.outer_wall_passes_region = &layerm->region();
+                break;
+            }
+    }
+}
+
 // Collect extruders reuqired to print layers.
 void ToolOrdering::collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches)
 {
@@ -863,16 +885,6 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 
         // Store the current extruder override (set to zero if no overriden), so that layer_tools.wiping_extrusions().is_overridable_and_mark() will use it.
         layer_tools.extruder_override = extruder_override;
-
-        // Orca: remember a region whose outer wall is split into thin passes on this layer, before its walls are
-        // offered for wiping below.
-        if (layer->outer_wall_pass_slices && layer_tools.outer_wall_passes_region == nullptr)
-            for (const LayerRegion *layerm : layer->regions())
-                if (std::any_of(layerm->outer_wall_lower_passes.begin(), layerm->outer_wall_lower_passes.end(),
-                                [](const ExtrusionEntityCollection &pass) { return ! pass.entities.empty(); })) {
-                    layer_tools.outer_wall_passes_region = &layerm->region();
-                    break;
-                }
 
         // Snapshot extruders before this object's regions to track new additions.
         const size_t ext_snapshot = layer_tools.extruders.size();
@@ -3490,8 +3502,9 @@ int WipingExtrusions::last_nonsoluble_extruder_on_layer(const PrintConfig& print
 // Decides whether this entity could be overridden
 bool WipingExtrusions::is_overriddable(const ExtrusionEntityCollection& eec, const PrintConfig& print_config, const PrintObject& object, const PrintRegion& region) const
 {
-    // Orca: the walls of a layer with the outer wall split into thin passes keep their filament, as it is printed first.
-    if (m_layer_tools->outer_wall_passes_region != nullptr && eec.has_perimeters())
+    // Orca: nothing of a layer with an outer wall split into thin passes is offered for wiping. Its walls keep their
+    // filament, which is printed first, and an infill purged into would be printed before the top passes.
+    if (m_layer_tools->outer_wall_passes_region != nullptr)
         return false;
 
     if (print_config.filament_soluble.get_at(m_layer_tools->extruder(eec, region)))
@@ -3531,6 +3544,11 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
 {
     const LayerTools& lt = *m_layer_tools;
     const float min_infill_volume = 0.f; // ignore infill with smaller volume than this
+
+    // Orca: the lower passes of a split outer wall are printed right after the change to their filament, before
+    // anything the purge could go into, a support included. All of it is left to the wipe tower.
+    if (lt.outer_wall_passes_region != nullptr && new_extruder == lt.wall_extruder_id(*lt.outer_wall_passes_region))
+        return std::max(0.f, volume_to_wipe);
 
     if (! this->something_overridable || volume_to_wipe <= 0. || print.config().filament_soluble.get_at(old_extruder) || print.config().filament_soluble.get_at(new_extruder))
         return std::max(0.f, volume_to_wipe); // Soluble filament cannot be wiped in a random infill, neither the filament after it

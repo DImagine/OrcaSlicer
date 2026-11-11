@@ -389,6 +389,8 @@ public:
 
 private:
     void				initialize_layers(std::vector<coordf_t> &zs);
+    // Orca: mark the layers of the object with an outer wall split into thin passes.
+    void                collect_outer_wall_passes(const PrintObject &object);
     void 				collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches);
     void 				fill_wipe_tower_partitions(const PrintConfig &config, coordf_t object_bottom_z, coordf_t max_layer_height);
     bool                insert_wipe_tower_extruder();

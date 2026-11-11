@@ -107,8 +107,17 @@ On a layer with passes the filament of the split outer walls is printed first
 (`LayerTools::outer_wall_passes_region`, the wrapper of `get_custom_seq` in
 `ToolOrdering::reorder_extruders_for_minimum_flush_volume()` and
 `enforce_outer_wall_passes_order()`). A support interface of another filament
-would otherwise stand at the full layer height beside the passes. The walls of
-such a layer are not offered for wiping into the object.
+would otherwise stand at the full layer height beside the passes.
+
+Nothing of such a layer is offered for wiping into the object
+(`WipingExtrusions::is_overriddable()`): the walls keep their filament, and an
+infill purged into would be printed before the top passes. The change to the
+filament of the split outer walls is purged at the prime tower only, into no
+support either (`WipingExtrusions::mark_wiping_extrusions()`), as the lower
+passes are printed right after it. The layers with passes are marked for all the
+objects before their filaments are collected
+(`ToolOrdering::collect_outer_wall_passes()`), so that the offer does not depend
+on the order of the objects.
 
 The prime tower is printed at the layer height, before the passes or after the
 objects. It stands apart from the objects, so it needs no change. Support layers

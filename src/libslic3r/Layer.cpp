@@ -401,7 +401,7 @@ void Layer::make_perimeters()
  			(*layerm)->perimeters.clear();
  			(*layerm)->fills.clear();
  			(*layerm)->thin_fills.clear();
- 			(*layerm)->outer_wall_lower_passes.clear();
+            (*layerm)->outer_wall_lower_passes.clear();
     	} else {
 	        size_t region_id = layerm - m_regions.begin();
 	        if (done[region_id])
