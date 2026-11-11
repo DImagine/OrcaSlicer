@@ -113,7 +113,7 @@ struct WallLoop
     std::vector<ExtrusionLoop>  passes;
     bool                        valid { false };
     // TEMP diagnostics: why the loop is left as it is.
-    const char                 *reject { nullptr };
+    std::string                 reject;
 
     const ExtrusionLoop& loop() const { return *static_cast<const ExtrusionLoop*>(*this->slot); }
 };
@@ -130,7 +130,7 @@ bool sample_loop(WallLoop                            &wall_loop,
 {
     const ExtrusionLoop &loop          = wall_loop.loop();
     const size_t         wall          = wall_loop.wall;
-    auto                 refuse        = [&wall_loop](const char *why) { wall_loop.reject = why; return false; };
+    auto                 refuse        = [&wall_loop](const std::string &why) { wall_loop.reject = why; return false; };
     const double         regular_width = walls.widths[wall];
     const ExtrusionRole  role          = wall == 0 ? erExternalPerimeter : erPerimeter;
     // Only a wall of its regular width is split, and a wall held back until the infill is printed must not be
@@ -212,6 +212,9 @@ bool sample_loop(WallLoop                            &wall_loop,
     // of the outlines, such as the hole of a thin wall they thickened, is left as it is.
     const double side_probe     = scaled<double>(0.05);
     bool         side_confirmed = false;
+    // TEMP diagnostics.
+    size_t       side_fails     = 0;
+    std::string  side_details;
     // Whether the distance from an outline falls towards the outer side of the loop at a point: 1 if it does,
     // -1 if it rises, 0 if the probes on both sides of the point do not tell.
     auto outline_side = [side, side_probe](const OutlineDistancer &outline, const Vec2d &point, const Vec2d &outward) {
@@ -262,17 +265,35 @@ bool sample_loop(WallLoop                            &wall_loop,
         side_confirmed |= mid_side > 0;
         sample.on_surface = true;
         sample.offsets.reserve(num_passes);
+        size_t pass_idx = 0;
         for (const OutlineDistancer &pass_outline : pass_outlines) {
             double pass_distance;
             Vec2d  pass_nearest;
             if (! signed_distance(pass_outline, wall == 0 ? sample.point : measured, pass_distance, pass_nearest))
                 return refuse("no_pass_distance");
             // The nearest edge may be another one in the outline of a pass only.
-            if (outline_side(pass_outline, measured_at, sample.outward) < 0)
-                return refuse("pass_side");
+            if (outline_side(pass_outline, measured_at, sample.outward) < 0) {
+                // TEMP diagnostics: count the points the check refuses and tell of the first one.
+                if (side_fails ++ == 0) {
+                    const Vec2d right = side_probe * sample.outward.normalized();
+                    double      outer = 0.;
+                    double      inner = 0.;
+                    Vec2d       nearest;
+                    signed_distance(pass_outline, Point((measured_at + right).cast<coord_t>()), outer, nearest);
+                    signed_distance(pass_outline, Point((measured_at - right).cast<coord_t>()), inner, nearest);
+                    side_details = " pass " + std::to_string(pass_idx) + " first_at " + std::to_string(unscaled<double>(sample.point.x())) +
+                        " " + std::to_string(unscaled<double>(sample.point.y())) + " vertex " + std::to_string(int(sample.vertex)) +
+                        " outward " + std::to_string(sample.outward.x()) + " " + std::to_string(sample.outward.y()) +
+                        " mid_dist " + std::to_string(unscaled<double>(mid_distance)) + " pass_dist " + std::to_string(unscaled<double>(pass_distance)) +
+                        " probe_outer " + std::to_string(unscaled<double>(outer)) + " probe_inner " + std::to_string(unscaled<double>(inner));
+                }
+            }
             sample.offsets.emplace_back(pass_distance - mid_distance);
+            ++ pass_idx;
         }
     }
+    if (side_fails > 0)
+        return refuse("pass_side fails " + std::to_string(side_fails) + " of_samples " + std::to_string(samples.size()) + side_details);
     return side_confirmed || refuse("side_unconfirmed");
 }
 
@@ -573,7 +594,7 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
         if (! wall_loop.valid) {
             if (rejections != nullptr && wall_loop.wall == 0) {
                 const Point at = wall_loop.loop().first_point();
-                rejections->emplace_back(std::string(wall_loop.reject != nullptr ? wall_loop.reject : "unknown") +
+                rejections->emplace_back((wall_loop.reject.empty() ? std::string("unknown") : wall_loop.reject) +
                     " len " + std::to_string(unscaled<double>(wall_loop.loop().length())) +
                     " at " + std::to_string(unscaled<double>(at.x())) + " " + std::to_string(unscaled<double>(at.y())));
             }
