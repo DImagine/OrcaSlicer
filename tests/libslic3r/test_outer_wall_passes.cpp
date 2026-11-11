@@ -162,14 +162,12 @@ TEST_CASE("A loop is split only along the edge of the outlines it follows", "[Ou
     // of the low pass is found on the way out of the material.
     REQUIRE(outer_wall_passes_fit({ square(20., 18.9) }, { { square(20.2, 19.1) }, { square(19.8, 18.7) } }, min_width, max_width, true));
     REQUIRE(low_passes(square(20., 16.9), square(20., 18.9), square(20.2, 19.1), square(19.8, 18.7)) == 1);
-    // A slit 0.4 mm wide in the outline of the high pass ends 0.4 mm off the bottom side of the square: its end
+    // A slot 0.4 mm wide in the outline of the high pass ends 0.4 mm off the bottom side of the square: its end
     // is the nearest edge at two points of the loop, where the bottom side is found on the way out.
-    ExPolygon slit = square(20.);
-    slit.contour = Polygon({ Point(scaled<coord_t>(-10.), scaled<coord_t>(-10.)), Point(scaled<coord_t>(10.), scaled<coord_t>(-10.)),
-                             Point(scaled<coord_t>(10.), scaled<coord_t>(10.)), Point(scaled<coord_t>(0.2), scaled<coord_t>(10.)),
-                             Point(scaled<coord_t>(0.2), scaled<coord_t>(-9.6)), Point(scaled<coord_t>(-0.2), scaled<coord_t>(-9.6)),
-                             Point(scaled<coord_t>(-0.2), scaled<coord_t>(10.)), Point(scaled<coord_t>(-10.), scaled<coord_t>(10.)) });
-    REQUIRE(low_passes(square(20.), square(20.), square(20.05), slit) == 1);
+    ExPolygon slot = square(20.);
+    slot.holes.emplace_back(Polygon({ Point(scaled<coord_t>(-0.2), scaled<coord_t>(-9.6)), Point(scaled<coord_t>(-0.2), scaled<coord_t>(5.)),
+                                      Point(scaled<coord_t>(0.2), scaled<coord_t>(5.)), Point(scaled<coord_t>(0.2), scaled<coord_t>(-9.6)) }));
+    REQUIRE(low_passes(square(20.), square(20.), square(20.05), slot) == 1);
 }
 
 TEST_CASE("A wall follows its edge past a hole of the model nearer to it in a pass", "[OuterWallPasses]")
