@@ -85,7 +85,8 @@ bool outer_wall_pass_steps_fit(const std::vector<ExPolygons> &passes, const ExPo
 // the role of an overhanging wall where the loop has it, for its speed and cooling, with the flow of a pass.
 // With slices.walls above one the loops of the inner walls behind the outer wall are split as well, which takes
 // inner_walls.
-// Returns false if a loop of the outer wall was left as it is for another reason than the holes being off.
+// Returns false if a loop of the outer wall was left as it is for another reason than the holes being off or
+// its running all along the border of another region, or if a loop of the outer wall was cut into runs.
 bool split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
                             std::vector<ExtrusionEntityCollection> &lower_passes,
                             const OuterWallPassSlices              &slices,

@@ -82,7 +82,8 @@ are printed before its infill as well, even with the infill set to go first.
 
 `LayerRegion::split_outer_wall()` is called by `Layer::make_perimeters()` once
 the walls of a region are final, that is after the walls handed to neighbouring
-regions are cut away: a cut wall is not a loop any more and stays as it is.
+regions are cut away: a cut wall is not a loop any more and stays as it is, and
+a layer with a cut outer wall goes to the fallback, see below.
 `split_outer_wall_loops()` replaces every loop of the outer wall
 (`OuterWallPasses.cpp`): the loop is sampled, the offsets `d_k` are measured at
 the samples as differences of signed distances to `S_k` and `S_mid`, and each

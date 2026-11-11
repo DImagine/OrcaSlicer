@@ -544,13 +544,16 @@ bool build_passes(WallLoop &wall_loop, const WallSet &walls, size_t num_passes)
     return true;
 }
 
-// The loops of the walls which may be printed in passes, in the order they are stored in.
-void collect_wall_loops(ExtrusionEntityCollection &collection, size_t num_walls, std::vector<WallLoop> &wall_loops)
+// The loops of the walls which may be printed in passes, in the order they are stored in. cut_outer_wall is set
+// if a loop of the outer wall was cut into runs, which are no loops any more.
+void collect_wall_loops(ExtrusionEntityCollection &collection, size_t num_walls, std::vector<WallLoop> &wall_loops, bool &cut_outer_wall)
 {
     for (ExtrusionEntity *&entity : collection.entities) {
         if (entity->is_collection()) {
-            collect_wall_loops(*static_cast<ExtrusionEntityCollection*>(entity), num_walls, wall_loops);
-        } else if (entity->is_loop() && entity->inset_idx >= 0 && size_t(entity->inset_idx) < num_walls) {
+            collect_wall_loops(*static_cast<ExtrusionEntityCollection*>(entity), num_walls, wall_loops, cut_outer_wall);
+        } else if (! entity->is_loop()) {
+            cut_outer_wall |= entity->inset_idx == 0;
+        } else if (entity->inset_idx >= 0 && size_t(entity->inset_idx) < num_walls) {
             WallLoop wall_loop;
             wall_loop.slot = &entity;
             wall_loop.wall = size_t(entity->inset_idx);
@@ -657,7 +660,9 @@ bool split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
     }
 
     std::vector<WallLoop> wall_loops;
-    collect_wall_loops(perimeters, num_walls, wall_loops);
+    // A run of an outer wall cut for a neighbouring region stays at the layer height.
+    bool                  cut_outer_wall = false;
+    collect_wall_loops(perimeters, num_walls, wall_loops, cut_outer_wall);
     for (WallLoop &wall_loop : wall_loops)
         wall_loop.valid = sample_loop(wall_loop, walls, slices, layer_outline_lines, mid_outline, pass_outlines, mid_rings, pass_rings,
                                       with_holes);
@@ -700,7 +705,7 @@ bool split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
             }
     }
 
-    bool all_split = true;
+    bool all_split = ! cut_outer_wall;
     for (WallLoop &wall_loop : wall_loops) {
         if (! wall_loop.valid) {
             if (wall_loop.wall == 0 && ! wall_loop.on_purpose)

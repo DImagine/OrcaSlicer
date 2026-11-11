@@ -912,10 +912,19 @@ TEST_CASE("A wall cut for the bridge of a neighbouring region keeps no pass belo
     print.set_status_silent();
     print.process();
 
-    // Every pass below the layer height has its top pass, and a wall that is no loop any more has neither.
+    // Every pass below the layer height has its top pass, and a wall that is no loop any more has neither: the
+    // layers with a cut outer wall are left to the fallback.
     size_t layers_with_passes = 0;
+    size_t layers_cut         = 0;
     for (const Layer *layer : print.objects().front()->layers())
         for (const LayerRegion *region : layer->regions()) {
+            const ExtrusionEntityCollection walls = region->perimeters.flatten();
+            const bool cut = std::any_of(walls.entities.begin(), walls.entities.end(),
+                                         [](const ExtrusionEntity *entity) { return ! entity->is_loop() && entity->inset_idx == 0; });
+            if (cut) {
+                ++ layers_cut;
+                REQUIRE_FALSE(layer->outer_wall_pass_slices);
+            }
             const size_t top_passes = count_pass_loops(region->perimeters);
             CAPTURE(layer->print_z, top_passes);
             for (const ExtrusionEntityCollection &pass : region->outer_wall_lower_passes) {
@@ -926,6 +935,7 @@ TEST_CASE("A wall cut for the bridge of a neighbouring region keeps no pass belo
                 ++ layers_with_passes;
         }
     REQUIRE(layers_with_passes > 10);
+    REQUIRE(layers_cut > 0);
 }
 
 TEST_CASE("A slope too shallow for the outer wall alone takes the inner wall into the passes", "[OuterWallPasses]")
