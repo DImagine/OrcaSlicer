@@ -4479,8 +4479,8 @@ void PrintConfigDef::init_fff_params()
     def->label      = L("Pass width lower limit");
     def->category   = L("Quality");
     def->tooltip    = L("Narrowest line a pass may be printed with on a layer where all the walls printed in passes "
-                        "have reached the minimum pass width. A value not below the minimum pass width keeps the "
-                        "passes within the range above. "
+                        "have reached the minimum pass width. 0, or a value not below the minimum pass width, keeps "
+                        "the passes within the range above. "
                         "If expressed as a %, it will be computed over the nozzle diameter.");
     def->sidetext   = L("mm or %");
     def->ratio_over = "nozzle_diameter";
@@ -4488,14 +4488,14 @@ void PrintConfigDef::init_fff_params()
     def->max        = 1000;
     def->max_literal = 10;
     def->mode       = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(85., true));
+    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
 
     def             = this->add("split_outer_wall_limit_max_width", coFloatOrPercent);
     def->label      = L("Pass width upper limit");
     def->category   = L("Quality");
     def->tooltip    = L("Widest line a pass may be printed with on a layer where all the walls printed in passes "
-                        "have reached the maximum pass width. A value not above the maximum pass width keeps the "
-                        "passes within the range above. "
+                        "have reached the maximum pass width. 0, or a value not above the maximum pass width, keeps "
+                        "the passes within the range above. "
                         "If expressed as a %, it will be computed over the nozzle diameter.");
     def->sidetext   = L("mm or %");
     def->ratio_over = "nozzle_diameter";
@@ -4503,7 +4503,7 @@ void PrintConfigDef::init_fff_params()
     def->max        = 1000;
     def->max_literal = 10;
     def->mode       = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(150., true));
+    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
 
     def           = this->add("split_outer_wall_walls", coInt);
     def->label    = L("Walls in passes");
@@ -4512,8 +4512,8 @@ void PrintConfigDef::init_fff_params()
                       "wall alone cannot follow the slope of the model within the pass width range, the inner walls "
                       "behind it are printed in passes as well and share the offset with it. A layer takes as few "
                       "walls as it needs.\n\n"
-                      "With Only one wall on top surfaces the joint of two walls of a pass is not uncovered further "
-                      "than One wall threshold allows.\n\n"
+                      "With Only one wall on top surfaces a layer with a top surface left with a single wall is printed "
+                      "with the outer wall alone in passes.\n\n"
                       "0 allows all the walls.");
     def->min      = 0;
     def->max      = 10;

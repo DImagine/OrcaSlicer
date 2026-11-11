@@ -472,7 +472,7 @@ public:
     // nothing to lean on until this layer is bridged, so the G-code writer holds it back until the
     // infill is down. See defer_unsupported_loops() in PerimeterGenerator.cpp.
     bool print_after_infill = false;
-    // ORCA: One of the thin passes an outer wall is split into, see OuterWallPasses.hpp.
+    // ORCA: One of the thin passes an outer wall, or an inner wall behind it, is split into, see OuterWallPasses.hpp.
     bool outer_wall_pass = false;
 
     ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : m_loop_role(role) {}

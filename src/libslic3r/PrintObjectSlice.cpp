@@ -405,6 +405,11 @@ struct InnerPassWalls
     // How far a pass may step back from the pass below it without uncovering the joint of its walls further than
     // a single wall on top surfaces lets the regular walls. Negative if the walls are not limited.
     double max_step { -1. };
+    // How far the layer above is grown to find the top surfaces left with a single wall, as the classic wall
+    // generator does. Negative without a single wall on top surfaces.
+    double top_reach { -1. };
+    // Whether the walls hanging in the air are detected and printed in a way of their own.
+    bool   overhangs { false };
 };
 
 InnerPassWalls inner_pass_walls(const PrintObject &object, double nominal_width)
@@ -427,9 +432,13 @@ InnerPassWalls inner_pass_walls(const PrintObject &object, double nominal_width)
         any = true;
         // As in the classic wall generator, a single wall on top surfaces takes top shell layers.
         if (config.only_one_wall_top.value && config.top_shell_layers.value > 0) {
-            const double step = nominal_width + config.min_width_top_surface.get_abs_value(width);
-            out.max_step = out.max_step < 0. ? step : std::min(out.max_step, step);
+            const double threshold = config.min_width_top_surface.get_abs_value(width);
+            const double step      = nominal_width + threshold;
+            const double reach     = std::max(threshold, 0.5 * nominal_width);
+            out.max_step  = out.max_step < 0. ? step : std::min(out.max_step, step);
+            out.top_reach = out.top_reach < 0. ? reach : std::min(out.top_reach, reach);
         }
+        out.overhangs |= config.detect_overhang_wall.value;
     }
     if (any)
         out.max_walls = std::max<size_t>(1, walls);
@@ -452,9 +461,10 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
         return object_layers;
     const size_t num_passes = size_t(m_config.split_outer_wall_count.value);
     const bool   with_holes = m_config.split_outer_wall_holes.value;
-    // The limits of the pass width contain the range the walls keep to as long as they can.
+    // The limits of the pass width contain the range the walls keep to as long as they can. Zero stands for the range.
     const double         nominal_width   = 0.5 * (min_width + max_width);
-    const double         limit_min_width = std::min(min_width, m_config.split_outer_wall_limit_min_width.get_abs_value(nozzle));
+    const double         limit_min       = m_config.split_outer_wall_limit_min_width.get_abs_value(nozzle);
+    const double         limit_min_width = limit_min > 0. ? std::min(min_width, limit_min) : min_width;
     const double         limit_max_width = std::max(max_width, m_config.split_outer_wall_limit_max_width.get_abs_value(nozzle));
     const InnerPassWalls inner_walls     = inner_pass_walls(*this, nominal_width);
 
@@ -516,9 +526,36 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
                 auto fits = [&](size_t walls, double lowest, double highest) {
                     return outer_wall_passes_fit(slices.mid, slices.passes, reach(walls, lowest, highest), with_holes);
                 };
+                // The middle line of the outer wall of the layer, as the wall generator sees it against the layers
+                // below and above. How those end up printed is not known yet: a neighbour is taken both as printed
+                // at its middle and as split into thin layers.
+                const ExPolygons wall_line   = offset_ex(slices.mid, - scaled<float>(0.5 * nominal_width));
+                const bool       below_known = candidate_idx > 0 && candidates[candidate_idx - 1] + 1 == layer_idx;
+                const bool       above_known = candidate_idx + 1 < candidates.size() && candidates[candidate_idx + 1] == layer_idx + 1;
+                // An outer wall hanging in the air is printed with a flow of its own, and a pass below it would hang
+                // lower still: such a layer follows the fallback, unless the stretches are short.
+                bool             overhangs   = false;
+                if (inner_walls.overhangs && below_known)
+                    for (const size_t below : { first - zs_per_candidate + num_passes / 2, first - 1 })
+                        for (const Polyline &hanging : diff_pl(to_polylines(wall_line), offset(outlines[below], scaled<float>(0.5 * nozzle))))
+                            overhangs |= hanging.length() > scaled<double>(outer_wall_pass_short_overhang);
+                if (overhangs)
+                    continue;
+                // Where the wall generator leaves a single wall on a top surface, there are no inner walls to share
+                // the offset with: such a layer takes the outer wall alone.
+                bool single_wall = false;
+                if (inner_walls.top_reach >= 0.) {
+                    if (above_known) {
+                        for (const size_t above : { first + zs_per_candidate + num_passes / 2, first + zs_per_candidate })
+                            single_wall |= ! opening_ex(diff_ex(wall_line, offset(outlines[above], scaled<float>(inner_walls.top_reach))),
+                                                        float(scale_(0.01))).empty();
+                    } else
+                        // Nothing lies over the last layer. A layer above that is no candidate is not known here.
+                        single_wall = layer_idx + 1 == num_layers;
+                }
                 // As few walls as the layer needs within the range they keep to. All of them go up to the limits
                 // only where that range does not suffice.
-                const size_t max_walls = inner_walls.max_walls;
+                const size_t max_walls = single_wall ? 1 : inner_walls.max_walls;
                 const bool   wider     = max_walls > 1 || slices.limit_min_width < min_width || slices.limit_max_width > max_width;
                 size_t       walls     = 0;
                 if (fits(1, min_width, max_width))
@@ -531,7 +568,7 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
                             break;
                         }
                 }
-                // The passes of the layer among themselves. What lies over the top pass is checked below.
+                // The joint of two walls of a pass must not show under the pass above it either.
                 if (walls > 1 && inner_walls.max_step >= 0. &&
                     ! outer_wall_pass_steps_fit(slices.passes, nullptr, inner_walls.max_step, with_holes))
                     walls = 0;
@@ -543,27 +580,6 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
         });
 
     const bool split_layers = m_config.split_outer_wall_fallback.value == SplitOuterWallFallback::SplitLayer;
-    if (inner_walls.max_step >= 0.) {
-        // The top pass of a layer with several walls in passes against what lies over it, from the top down, as
-        // that depends on how the layer above ends up: its lowest pass, or its lowest thin layer if it is split,
-        // has the outline of the first pass; printed the regular way it has the outline of its middle. Nothing
-        // lies over the last layer. A layer above that is no candidate is not known here.
-        const ExPolygons nothing_above;
-        for (size_t candidate_idx = candidates.size(); candidate_idx -- > 0;) {
-            const std::shared_ptr<const OuterWallPassSlices> &slices = fitting[candidate_idx];
-            if (! slices || slices->walls < 2)
-                continue;
-            const size_t      layer_idx = candidates[candidate_idx];
-            const ExPolygons *above     = nullptr;
-            if (candidate_idx + 1 < candidates.size() && candidates[candidate_idx + 1] == layer_idx + 1) {
-                const size_t first_above = (candidate_idx + 1) * zs_per_candidate;
-                above = fitting[candidate_idx + 1] || split_layers ? &outlines[first_above] : &outlines[first_above + num_passes / 2];
-            } else if (layer_idx + 1 == num_layers)
-                above = &nothing_above;
-            if (above != nullptr && ! outer_wall_pass_steps_fit({ slices->passes.back() }, above, inner_walls.max_step, with_holes))
-                fitting[candidate_idx].reset();
-        }
-    }
     std::vector<coordf_t> out;
     out.reserve(object_layers.size());
     pass_slices.reserve(num_layers);

@@ -133,16 +133,27 @@ narrowest and the widest inner wall over the regions of the object. The walls
 are limited to the wall loops of the region with the fewest, and to the outer
 wall if a region prints the inner walls with another filament.
 
-With Only one wall on top surfaces on, the regular walls of a top surface give
-way to a single wall where the layer above leaves more than the outer wall and
-One wall threshold uncovered, provided there are top shell layers. The passes
-follow that rule: with more than one wall in passes, no pass may step back from
-the pass below it by more than that, and neither may what lies over the top
-pass (`outer_wall_pass_steps_fit()`): the lowest pass or thin layer of the
-layer above, or its middle if it ends up printed the regular way. The layers
-are checked against the layer above from the top down. A layer that does not
-keep to the rule follows the fallback. With the option off the joints of the
-walls may show from above, as they do on regular layers.
+With Only one wall on top surfaces on and top shell layers, the wall generator
+leaves a single wall on a top surface: where the middle line of the outer wall
+is not covered by the layer above grown by One wall threshold, or by half the
+wall width if that is more. The planning applies the same test to the outlines.
+A layer with such a top surface has no inner walls there to share the offset
+with and takes the outer wall alone; nothing lies over the last layer. How the
+layer above ends up printed is not known at that point, so it is taken both as
+printed at its middle and as split into thin layers. Besides, with more than
+one wall in passes no pass may step back from the pass below it by more than
+the outer wall and the threshold, which would uncover the joint of its walls
+(`outer_wall_pass_steps_fit()`); a layer that does is left to the fallback.
+With the option off the joints of the walls may show from above, as they do on
+regular layers.
+
+A layer whose outer wall hangs in the air follows the fallback: the wall
+generator prints such a stretch with a flow of its own, and a pass below it
+would hang lower still. The planning takes the middle line of the outer wall
+against the layer below grown by half the nozzle, as the wall generator does
+with overhang detection on. A stretch no longer than
+`outer_wall_pass_short_overhang` does not count, and a loop with such stretches
+is printed in passes as a whole. Each stretch is measured on its own.
 
 `split_outer_wall_loops()` samples every loop of these walls, an inner wall
 being measured at the point of the outer wall in front of it, so that the walls
@@ -159,8 +170,9 @@ offset alone, up to their limits.
 The lower passes of a level are printed nearest loop first, whichever wall a
 loop belongs to. An inner wall of a regular width out of the width range is
 printed in passes, but takes nothing of the offset on the side it is out of
-the range. The limits default to the default range and do not follow a change
-of the range: they only never lie inside it.
+the range. An inner wall loop with nothing to take anywhere stays a regular
+loop. A limit of zero stands for the end of the range, which is the default:
+the limits never lie inside the range.
 
 ## G-code
 
@@ -259,8 +271,10 @@ out, as it is with a prime tower.
   exist. Where a layer has fewer walls than planned, as in a thin part or under
   a single wall on a top surface, the outer edge of a pass stops at the limits of
   the walls that are there and leaves the outline.
-- The step of the passes is checked against the layer above only if that layer
-  is a candidate for the passes itself.
+- The layers below and above a layer are known to the planning only if they are
+  candidates for the passes themselves.
+- A loop the walls of which cannot be split for another reason, such as a thin
+  part, stays a regular loop at the layer height on a layer printed in passes.
 - The criterion offsets the middle outline with a miter limit, so a sloped layer
   with a convex corner sharper than about 30° to 40° may be taken for not
   fitting. This only sends the layer to the fallback.

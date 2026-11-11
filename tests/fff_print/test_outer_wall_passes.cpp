@@ -941,11 +941,11 @@ TEST_CASE("A slope too shallow for the outer wall alone takes the inner wall int
     }
 }
 
-TEST_CASE("A single wall on top surfaces limits the step of the passes of several walls", "[OuterWallPasses]")
+TEST_CASE("A layer with a single wall on its top surface takes the outer wall alone into the passes", "[OuterWallPasses]")
 {
     // A frustum narrowing by 0.6 mm a side per pass, within the reach of two walls going down to 0.2 mm and up to
-    // 0.8 mm. Each pass uncovers 0.6 mm of the pass below it: more than the outer wall of 0.5 mm, so the joint of
-    // the walls shows. With a single wall on top surfaces and its threshold at zero that is not allowed.
+    // 0.8 mm, and of the outer wall alone as well. Each layer uncovers 1.2 mm of the layer below it: with a single
+    // wall on top surfaces and its threshold at zero the wall generator leaves no inner wall there.
     DynamicPrintConfig config = passes_config("regular");
     config.set_deserialize_strict({
         { "split_outer_wall_walls",           0 },
@@ -964,8 +964,26 @@ TEST_CASE("A single wall on top surfaces limits the step of the passes of severa
             // The layer from 0.4 to 0.6 mm.
             const Layer &layer   = *print.objects().front()->layers()[2];
             const bool   limited = one_wall && top_shells > 0;
-            REQUIRE(bool(layer.outer_wall_pass_slices) == ! limited);
-            if (! limited)
-                REQUIRE(layer.outer_wall_pass_slices->walls == 2);
+            REQUIRE(layer.outer_wall_pass_slices);
+            REQUIRE(layer.outer_wall_pass_slices->walls == (limited ? 1 : 2));
         }
+}
+
+TEST_CASE("A layer with an outer wall hanging in the air follows the fallback", "[OuterWallPasses]")
+{
+    // A frustum widening upwards by 0.26 mm a side per pass, that is by 0.52 mm per layer: its outer wall hangs
+    // over the layer below by more than half the nozzle. Two walls would take the offset.
+    DynamicPrintConfig config = passes_config("split_layer");
+    config.set_deserialize_strict({ { "split_outer_wall_walls", 0 }, { "inner_wall_line_width", "0.45" } });
+    for (const bool detect : { true, false }) {
+        CAPTURE(detect);
+        config.set_deserialize_strict({ { "detect_overhang_wall", detect } });
+        Print print;
+        init_and_process_print({ frustum(4.8, 10., 2.) }, print, config);
+        const PrintObject &object = *print.objects().front();
+        // With the detection on the layers above the first two are split into thin layers.
+        const Layer &layer = *object.layers().back();
+        REQUIRE(bool(layer.outer_wall_pass_slices) == ! detect);
+        REQUIRE_THAT(layer.height, WithinAbs(detect ? pass_height : layer_height, 1e-6));
+    }
 }

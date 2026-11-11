@@ -43,6 +43,10 @@ struct OuterWallPassSlices
     double highest_width() const { return std::max(this->limit_max_width, this->max_width); }
 };
 
+// A stretch of a wall hanging in the air no longer than this is printed in passes along with the rest of its loop,
+// unscaled. A layer with a longer one is not printed in passes.
+constexpr double outer_wall_pass_short_overhang = 2.;
+
 // Inner walls of a layer region, which may be printed in passes behind its outer wall.
 struct OuterWallPassInnerWalls
 {

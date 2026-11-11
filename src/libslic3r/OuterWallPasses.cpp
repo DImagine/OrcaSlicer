@@ -128,12 +128,16 @@ bool sample_loop(WallLoop                            &wall_loop,
     const double         regular_width = walls.widths[wall];
     const ExtrusionRole  role          = wall == 0 ? erExternalPerimeter : erPerimeter;
     // Only a plain wall of its regular width is split: overhanging parts keep their bridging flow and
-    // a wall held back until the infill is printed must not be printed first.
+    // a wall held back until the infill is printed must not be printed first. A short overhanging stretch is
+    // printed in passes like the rest of the loop.
     if (loop.print_after_infill)
         return false;
-    for (const ExtrusionPath &path : loop.paths)
+    for (const ExtrusionPath &path : loop.paths) {
+        if (path.role() == erOverhangPerimeter && path.length() <= scaled<double>(outer_wall_pass_short_overhang))
+            continue;
         if (path.role() != role || std::abs(double(path.width) - regular_width) > 1e-3)
             return false;
+    }
 
     wall_loop.polygon = loop.polygon();
     wall_loop.polygon.remove_duplicate_points();
@@ -256,11 +260,13 @@ bool sample_loop(WallLoop                            &wall_loop,
 
 // Split the offsets of the pass outlines between the walls running one behind another at each point of the loop.
 // wall_lines: for this wall, the loops of every other wall printed in passes moved to where this wall runs along them.
-// Returns false if the loop takes none: an inner wall with no wall printed in passes in front of it.
+// Returns false if the loop takes none: an inner wall with no wall printed in passes in front of it, or one that
+// has nothing to take, which is then better printed in one piece.
 bool share_offsets(WallLoop &wall_loop, const WallSet &walls, const std::vector<OutlineDistancer> &wall_lines, size_t num_passes)
 {
     const size_t wall      = wall_loop.wall;
     const double tolerance = scaled<double>(0.05);
+    const double negligible = scaled<double>(0.001);
     bool         shares    = false;
     for (LoopSample &sample : wall_loop.samples) {
         sample.shifts.assign(num_passes, 0.);
@@ -281,7 +287,6 @@ bool share_offsets(WallLoop &wall_loop, const WallSet &walls, const std::vector<
         size_t last = wall;
         while (last + 1 < walls.count() && wall_at(last + 1))
             ++ last;
-        shares = true;
         for (size_t pass = 0; pass < num_passes; ++ pass) {
             const double offset  = sample.offsets[pass];
             const bool   out     = offset >= 0.;
@@ -307,6 +312,7 @@ bool share_offsets(WallLoop &wall_loop, const WallSet &walls, const std::vector<
             const double own = share(wall);
             sample.shifts[pass] = (out ? 1. : -1.) * (behind + 0.5 * own);
             sample.gains[pass]  = (out ? 1. : -1.) * own;
+            shares |= own > negligible;
         }
     }
     return shares || wall == 0;
