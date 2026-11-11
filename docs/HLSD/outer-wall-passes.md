@@ -89,8 +89,12 @@ the samples as differences of signed distances to `S_k` and `S_mid`, and each
 pass is built as a variable width loop. The outer side of the loop follows from
 its being a contour or a hole. The offsets are measured against the nearest edge
 of the outlines, which has to be the edge the loop follows: the distance to
-`S_mid` and to every `S_k` is probed on both sides of the loop, and a loop whose
-outer side a probe contradicts or none confirms is left as it is. So is a loop the XY compensations moved
+`S_mid` and to every `S_k` is probed on both sides of the loop. A loop whose
+outer side a probe of `S_mid` contradicts or none confirms is left as it is.
+Where only a probe of some `S_k` contradicts it, another edge is nearest in the
+outline of that pass, as the far side of a part tapering off: the offset is not
+known at that point and the passes run there as the regular wall does; a loop
+with more than a tenth of such points is left as it is. So is a loop the XY compensations moved
 beside another edge of the outlines, such as the hole of a thin wall they
 thickened. Where the outline of the layer does not lie half the wall width off
 the loop on its outer side, at a corner along the miter, the loop is taken to

@@ -161,6 +161,14 @@ TEST_CASE("A loop is split only along the edge of the outlines it follows", "[Ou
     // nearer to its hole at the low pass. The widths the outlines ask for are all allowed.
     REQUIRE(outer_wall_passes_fit({ square(20., 18.9) }, { { square(20.2, 19.1) }, { square(19.8, 18.7) } }, min_width, max_width, true));
     REQUIRE(low_passes(square(20., 16.9), square(20., 18.9), square(20.2, 19.1), square(19.8, 18.7)) == 0);
+    // A slit 0.4 mm wide in the outline of the high pass ends 0.4 mm off the bottom side of the square: its end
+    // is the nearest edge at two points of the loop only. The loop is split, the passes run there as the wall does.
+    ExPolygon slit = square(20.);
+    slit.contour = Polygon({ Point(scaled<coord_t>(-10.), scaled<coord_t>(-10.)), Point(scaled<coord_t>(10.), scaled<coord_t>(-10.)),
+                             Point(scaled<coord_t>(10.), scaled<coord_t>(10.)), Point(scaled<coord_t>(0.2), scaled<coord_t>(10.)),
+                             Point(scaled<coord_t>(0.2), scaled<coord_t>(-9.6)), Point(scaled<coord_t>(-0.2), scaled<coord_t>(-9.6)),
+                             Point(scaled<coord_t>(-0.2), scaled<coord_t>(10.)), Point(scaled<coord_t>(-10.), scaled<coord_t>(10.)) });
+    REQUIRE(low_passes(square(20.), square(20.), square(20.05), slit) == 1);
 }
 
 TEST_CASE("A loop along the border of another region is split, but not offset there", "[OuterWallPasses]")

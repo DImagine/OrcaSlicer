@@ -212,9 +212,8 @@ bool sample_loop(WallLoop                            &wall_loop,
     // of the outlines, such as the hole of a thin wall they thickened, is left as it is.
     const double side_probe     = scaled<double>(0.05);
     bool         side_confirmed = false;
-    // TEMP diagnostics.
+    // Number of the points with another edge nearest in the outline of a pass.
     size_t       side_fails     = 0;
-    std::string  side_details;
     // Whether the distance from an outline falls towards the outer side of the loop at a point: 1 if it does,
     // -1 if it rises, 0 if the probes on both sides of the point do not tell.
     auto outline_side = [side, side_probe](const OutlineDistancer &outline, const Vec2d &point, const Vec2d &outward) {
@@ -265,35 +264,25 @@ bool sample_loop(WallLoop                            &wall_loop,
         side_confirmed |= mid_side > 0;
         sample.on_surface = true;
         sample.offsets.reserve(num_passes);
-        size_t pass_idx = 0;
         for (const OutlineDistancer &pass_outline : pass_outlines) {
             double pass_distance;
             Vec2d  pass_nearest;
             if (! signed_distance(pass_outline, wall == 0 ? sample.point : measured, pass_distance, pass_nearest))
                 return refuse("no_pass_distance");
-            // The nearest edge may be another one in the outline of a pass only.
+            // The nearest edge may be another one in the outline of a pass only: the far side of a part tapering
+            // off, a notch. The offset is not known at such a point, the passes run there as the regular wall does.
             if (outline_side(pass_outline, measured_at, sample.outward) < 0) {
-                // TEMP diagnostics: count the points the check refuses and tell of the first one.
-                if (side_fails ++ == 0) {
-                    const Vec2d right = side_probe * sample.outward.normalized();
-                    double      outer = 0.;
-                    double      inner = 0.;
-                    Vec2d       nearest;
-                    signed_distance(pass_outline, Point((measured_at + right).cast<coord_t>()), outer, nearest);
-                    signed_distance(pass_outline, Point((measured_at - right).cast<coord_t>()), inner, nearest);
-                    side_details = " pass " + std::to_string(pass_idx) + " first_at " + std::to_string(unscaled<double>(sample.point.x())) +
-                        " " + std::to_string(unscaled<double>(sample.point.y())) + " vertex " + std::to_string(int(sample.vertex)) +
-                        " outward " + std::to_string(sample.outward.x()) + " " + std::to_string(sample.outward.y()) +
-                        " mid_dist " + std::to_string(unscaled<double>(mid_distance)) + " pass_dist " + std::to_string(unscaled<double>(pass_distance)) +
-                        " probe_outer " + std::to_string(unscaled<double>(outer)) + " probe_inner " + std::to_string(unscaled<double>(inner));
-                }
+                sample.offsets.assign(num_passes, 0.);
+                sample.on_surface = false;
+                ++ side_fails;
+                break;
             }
             sample.offsets.emplace_back(pass_distance - mid_distance);
-            ++ pass_idx;
         }
     }
-    if (side_fails > 0)
-        return refuse("pass_side fails " + std::to_string(side_fails) + " of_samples " + std::to_string(samples.size()) + side_details);
+    // A loop running beside another edge along a good part of its length is left as it is.
+    if (10 * side_fails > samples.size())
+        return refuse("pass_side " + std::to_string(side_fails) + " of " + std::to_string(samples.size()));
     return side_confirmed || refuse("side_unconfirmed");
 }
 
