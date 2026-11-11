@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -344,6 +345,60 @@ TEST_CASE("An inner wall around a hole shares the offset along its whole sides",
     for (const ExtrusionPath &path : static_cast<const ExtrusionLoop*>(lower_passes.front().entities[1])->paths)
         narrowest = std::min(narrowest, double(path.width));
     REQUIRE(narrowest > 0.45 + 0.06);
+}
+
+TEST_CASE("A hanging stretch of a wall keeps its length in the passes", "[OuterWallPasses]")
+{
+    // A vertical square of 20 mm, the wall along its bottom side hangs in the air for 0.1 mm. The same with
+    // a regular stretch of 0.3 mm between two hanging ones.
+    const bool          gap  = GENERATE(false, true);
+    const coord_t       half = scaled<coord_t>(9.75);
+    std::vector<Points> stretches;
+    std::vector<bool>   hangs;
+    auto                add = [&](double from, double to, bool hanging) {
+        stretches.push_back({ Point(scaled<coord_t>(from), - half), Point(scaled<coord_t>(to), - half) });
+        hangs.emplace_back(hanging);
+    };
+    add(-9.75, -0.05, false);
+    add(-0.05, 0.05, true);
+    if (gap) {
+        add(0.05, 0.35, false);
+        add(0.35, 0.45, true);
+        add(0.45, 9.75, false);
+    } else
+        add(0.05, 9.75, false);
+    stretches.push_back({ Point(half, - half), Point(half, half), Point(- half, half), Point(- half, - half) });
+    hangs.emplace_back(false);
+    ExtrusionPaths paths;
+    for (size_t i = 0; i < stretches.size(); ++ i) {
+        // The hanging path comes with the flow of a bridge, which the passes do not take.
+        ExtrusionPath path = hangs[i] ? ExtrusionPath(erOverhangPerimeter, 0.12, 0.4f, 0.4f) : ExtrusionPath(erExternalPerimeter, 0.1, 0.5f, 0.2f);
+        path.polyline = Polyline3(Polyline(stretches[i]));
+        paths.emplace_back(std::move(path));
+    }
+    ExtrusionLoop loop(std::move(paths), elrDefault);
+    loop.inset_idx = 0;
+    ExtrusionEntityCollection perimeters;
+    perimeters.append(loop);
+    OuterWallPassSlices slices;
+    slices.mid       = { square(20.) };
+    slices.passes    = { { square(20.) }, { square(20.) } };
+    slices.min_width = min_width;
+    slices.max_width = max_width;
+    std::vector<ExtrusionEntityCollection> lower_passes;
+    split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), true);
+    REQUIRE(lower_passes.size() == 1);
+    REQUIRE(lower_passes.front().entities.size() == 1);
+    for (const ExtrusionEntity *entity : { lower_passes.front().entities.front(), perimeters.entities.front() }) {
+        double hanging = 0.;
+        for (const ExtrusionPath &path : static_cast<const ExtrusionLoop*>(entity)->paths)
+            if (path.role() == erOverhangPerimeter) {
+                hanging += unscaled<double>(path.length());
+                REQUIRE_THAT(double(path.width), WithinAbs(0.5, 1e-6));
+                REQUIRE_THAT(double(path.height), WithinAbs(0.1, 1e-6));
+            }
+        REQUIRE_THAT(hanging, WithinAbs(gap ? 0.2 : 0.1, 1e-3));
+    }
 }
 
 TEST_CASE("Three walls around a hole share the offset along their whole sides", "[OuterWallPasses]")

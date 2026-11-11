@@ -134,7 +134,11 @@ wall if a region prints the inner walls with another filament.
 With Only one wall on top surfaces on and top shell layers, the wall generator
 leaves a single wall on a top surface: where the middle line of the outer wall
 is not covered by the layer above grown by One wall threshold, or by half the
-wall width if that is more. The planning applies the same test to the outlines.
+spacing of the outer wall if that is more. The planning applies the same test
+to the outlines, a strip left however narrow counts. With interface shells the
+wall generator tests each region against the same region above, which the
+outlines do not tell: an object of several regions then takes the outer wall
+alone on every layer.
 A layer with such a top surface has no inner walls there to share the offset
 with and takes the outer wall alone; nothing lies over the last layer. How the
 layer above ends up printed is not known at that point, so it is taken both as

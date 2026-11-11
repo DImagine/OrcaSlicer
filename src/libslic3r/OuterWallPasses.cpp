@@ -183,7 +183,10 @@ bool sample_loop(WallLoop                            &wall_loop,
             } else
                 sample.outward = n_next;
             {
-                const auto [dist, line_idx, nearest_point] = overhang_lines.distance_from_lines_extra<false>(sample.point);
+                // The segment from this point to the next one hangs if its middle lies on a hanging path: the ends
+                // of a hanging path are the ends of the regular paths beside it as well.
+                const Point middle((a + ab * ((double(j) + 0.5) / double(steps))).cast<coord_t>());
+                const auto [dist, line_idx, nearest_point] = overhang_lines.distance_from_lines_extra<false>(middle);
                 sample.overhang = std::isfinite(dist) && dist <= scaled<double>(0.01);
             }
             samples.emplace_back(std::move(sample));
@@ -366,7 +369,7 @@ bool build_passes(WallLoop &wall_loop, const WallSet &walls, size_t num_passes)
             for (size_t j = i + 1; j < edge_end && linear; ++ j) {
                 const double t = double(j - i) / double(edge_end - i);
                 // An overhanging stretch may begin and end inside the edge.
-                linear = samples[j].overhang == sample_a.overhang && samples[j].overhang == sample_b.overhang &&
+                linear = samples[j].overhang == sample_a.overhang &&
                          std::abs(samples[j].shifts[pass] - (sample_a.shifts[pass] + t * (sample_b.shifts[pass] - sample_a.shifts[pass]))) <= 0.5 * linear_tolerance &&
                          std::abs(samples[j].gains[pass] - (sample_a.gains[pass] + t * (sample_b.gains[pass] - sample_a.gains[pass]))) <= linear_tolerance;
             }
@@ -381,13 +384,13 @@ bool build_passes(WallLoop &wall_loop, const WallSet &walls, size_t num_passes)
         hanging.emplace_back(hanging.front());
 
         // Split the pass into paths of a constant width, the stretches taken for hanging in the air apart from the
-        // rest: a segment hangs if either of its ends does. The steps of the width are finer than those of thin
-        // walls to keep the outer surface smooth.
+        // rest: a point tells whether the segment beginning at it hangs. The steps of the width are finer than
+        // those of thin walls to keep the outer surface smooth.
         ExtrusionPaths paths;
         for (size_t begin = 0; begin + 1 < polyline.points.size();) {
-            const bool hangs = hanging[begin] || hanging[begin + 1];
+            const bool hangs = hanging[begin];
             size_t     end   = begin + 1;
-            while (end + 1 < polyline.points.size() && (hanging[end] || hanging[end + 1]) == hangs)
+            while (end + 1 < polyline.points.size() && hanging[end] == hangs)
                 ++ end;
             ThickPolyline stretch;
             stretch.points.assign(polyline.points.begin() + begin, polyline.points.begin() + end + 1);

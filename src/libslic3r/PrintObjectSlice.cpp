@@ -405,9 +405,12 @@ struct InnerPassWalls
     // How far a pass may step back from the pass below it without uncovering the joint of its walls further than
     // a single wall on top surfaces lets the regular walls. Negative if the walls are not limited.
     double max_step { -1. };
-    // How far the layer above is grown to find the top surfaces left with a single wall, as the classic wall
-    // generator does. Negative without a single wall on top surfaces.
+    // One wall threshold: how far the layer above is grown at least to find the top surfaces left with a single
+    // wall, as the classic wall generator does. Negative without a single wall on top surfaces.
     double top_reach { -1. };
+    // The wall generator looks for the top surfaces of each region apart, which the outlines of the layers do not
+    // tell: every layer takes the outer wall alone.
+    bool   top_by_region { false };
 };
 
 InnerPassWalls inner_pass_walls(const PrintObject &object, double nominal_width)
@@ -432,11 +435,11 @@ InnerPassWalls inner_pass_walls(const PrintObject &object, double nominal_width)
         if (config.only_one_wall_top.value && config.top_shell_layers.value > 0) {
             const double threshold = config.min_width_top_surface.get_abs_value(width);
             const double step      = nominal_width + threshold;
-            const double reach     = std::max(threshold, 0.5 * nominal_width);
             out.max_step  = out.max_step < 0. ? step : std::min(out.max_step, step);
-            out.top_reach = out.top_reach < 0. ? reach : std::min(out.top_reach, reach);
+            out.top_reach = out.top_reach < 0. ? threshold : std::min(out.top_reach, threshold);
         }
     }
+    out.top_by_region = out.top_reach >= 0. && object.config().interface_shells.value && object.num_printing_regions() > 1;
     if (any)
         out.max_walls = std::max<size_t>(1, walls);
     return out;
@@ -530,12 +533,17 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
                 const bool       above_known = candidate_idx + 1 < candidates.size() && candidates[candidate_idx + 1] == layer_idx + 1;
                 // Where the wall generator leaves a single wall on a top surface, there are no inner walls to share
                 // the offset with: such a layer takes the outer wall alone.
-                bool single_wall = false;
-                if (inner_walls.top_reach >= 0.) {
+                bool single_wall = inner_walls.top_by_region;
+                if (inner_walls.top_reach >= 0. && ! single_wall) {
                     if (above_known) {
+                        // The layer above is grown by the threshold, at least by half the spacing of the outer wall
+                        // at the height of the layer. A strip left however narrow makes a top surface: the wall
+                        // generator widens it and drops the whole inner wall running over it.
+                        const double layer_height = object_layers[2 * layer_idx + 1] - object_layers[2 * layer_idx];
+                        const double spacing      = nominal_width - layer_height * (1. - 0.25 * PI);
+                        const float  top_reach    = float(std::max(scaled<double>(inner_walls.top_reach), 0.5 * scaled<double>(spacing) + 10.));
                         for (const size_t above : { first + zs_per_candidate + num_passes / 2, first + zs_per_candidate })
-                            single_wall |= ! opening_ex(diff_ex(wall_line, offset(outlines[above], scaled<float>(inner_walls.top_reach))),
-                                                        float(scale_(0.01))).empty();
+                            single_wall |= ! diff_ex(wall_line, offset(outlines[above], top_reach), ApplySafetyOffset::Yes).empty();
                     } else
                         // Nothing lies over the last layer. A layer above that is no candidate is not known here.
                         single_wall = layer_idx + 1 == num_layers;
