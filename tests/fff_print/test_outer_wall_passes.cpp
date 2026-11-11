@@ -9,7 +9,6 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
-#include "libslic3r/GCode/PrintExtents.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
@@ -33,6 +32,11 @@
 #include <vector>
 
 #include "test_helpers.hpp"
+
+namespace Slic3r {
+// Declared in libslic3r/GCode/PrintExtents.hpp, which includes its headers by paths the tests do not have.
+BoundingBoxf get_print_object_extrusions_extents(const PrintObject &print_object, const coordf_t max_print_z);
+} // namespace Slic3r
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
