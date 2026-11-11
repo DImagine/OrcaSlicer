@@ -380,21 +380,29 @@ bool sample_loop(WallLoop                            &wall_loop,
             // planning keeps the edge within that, so the only end of the material there is the one the loop
             // follows. A loop beside an edge of another ring, a hole or another part, or with none or several ends
             // of the material on the way out is left as it is: which edge it follows there is not known.
-            if (outline_side(pass_outline, measured_at, sample.outward) < 0) {
-                const Vec2d                way_out = side * sample.outward;
-                const Point                from(measured_at.cast<coord_t>());
+            // So it is where the nearest edge faces another way than the loop does, the material lying on its
+            // outer side as seen from the loop, whatever the probes tell: there the nearest edge is taken as before
+            // only if the edge on the way out is not found.
+            const Vec2d  way_out      = side * sample.outward;
+            const Point  from(measured_at.cast<coord_t>());
+            const size_t pass_line    = std::get<1>(pass_outline.distance_from_lines_extra<false>(from));
+            const Vec2d  nearest_dir  = (pass_outline.get_line(pass_line).b - pass_outline.get_line(pass_line).a).cast<double>();
+            const bool   faces_out    = nearest_dir.y() * way_out.x() - nearest_dir.x() * way_out.y() > 1e-3 * nearest_dir.norm() * way_out.norm();
+            const bool   another_edge = outline_side(pass_outline, measured_at, sample.outward) < 0;
+            if (another_edge || ! faces_out) {
                 const std::vector<size_t> &rings   = pass_rings[&pass_outline - pass_outlines.data()];
                 double                     mid_at  = 0.;
                 double                     pass_at = 0.;
                 const char                *why     = "";
-                if (! edge_on_way_out(mid_outline, mid_rings, mid_rings[std::get<1>(mid_outline.distance_from_lines_extra<false>(from))],
-                                      measured_at, way_out, 0., 4. * mid_distance + edge_tolerance, mid_at, &why))
-                    return refuse(std::string("pass_side_mid_") + why);
-                if (! edge_on_way_out(pass_outline, rings, rings[std::get<1>(pass_outline.distance_from_lines_extra<false>(from))],
-                                      measured_at, way_out, mid_at - most_inwards, mid_at + most_outwards, pass_at, &why))
-                    return refuse(std::string("pass_side_pass_") + why);
-                sample.offsets.emplace_back(pass_at - mid_at);
-                continue;
+                if (edge_on_way_out(mid_outline, mid_rings, mid_rings[std::get<1>(mid_outline.distance_from_lines_extra<false>(from))],
+                                    measured_at, way_out, 0., 4. * mid_distance + edge_tolerance, mid_at, &why) &&
+                    edge_on_way_out(pass_outline, rings, rings[pass_line], measured_at, way_out, mid_at - most_inwards,
+                                    mid_at + most_outwards, pass_at, &why)) {
+                    sample.offsets.emplace_back(pass_at - mid_at);
+                    continue;
+                }
+                if (another_edge)
+                    return refuse(std::string("pass_side_") + why);
             }
             sample.offsets.emplace_back(pass_distance - mid_distance);
         }
