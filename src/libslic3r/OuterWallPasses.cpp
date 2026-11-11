@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -65,14 +64,8 @@ std::vector<size_t> rings_of_lines(const ExPolygons &outline)
 // between the given two. Finds the edge a loop follows where another edge of the same ring is nearer to the point:
 // the material has to end there once only, on the given ring. Returns false otherwise.
 bool edge_on_way_out(const OutlineDistancer &outline, const std::vector<size_t> &rings, size_t ring, const Vec2d &point,
-                     const Vec2d &outward, double lowest, double highest, double &at, const char **why = nullptr)
+                     const Vec2d &outward, double lowest, double highest, double &at)
 {
-    // TEMP diagnostics: why there is no such edge.
-    auto refuse = [why](const char *reason) {
-        if (why != nullptr)
-            *why = reason;
-        return false;
-    };
     const Line way(Point((point + lowest * outward).cast<coord_t>()), Point((point + highest * outward).cast<coord_t>()));
     // Crossings of the way with the outline.
     struct Crossing
@@ -130,20 +123,18 @@ bool edge_on_way_out(const OutlineDistancer &outline, const std::vector<size_t> 
             ends += crossings[end].out ? 1 : -1;
             // An edge running along the way tells nothing of the material beside it.
             if (crossings[end].along)
-                return refuse("along");
+                return false;
         }
         if (ends > 0) {
             // A hole, a notch or another part beside the wall gives the way more than one end of the material, or
             // one on another ring: which of them the loop follows is not known.
-            if (++ ways_out > 1)
-                return refuse("several");
-            if (crossings[begin].ring != ring)
-                return refuse("ring");
+            if (++ ways_out > 1 || crossings[begin].ring != ring)
+                return false;
             at = crossings[begin].at;
         }
         begin = end;
     }
-    return ways_out == 1 || refuse("none");
+    return ways_out == 1;
 }
 
 // Point of a wall loop the passes are derived from.
@@ -208,8 +199,8 @@ struct WallLoop
     std::vector<LoopSample>     samples;
     std::vector<ExtrusionLoop>  passes;
     bool                        valid { false };
-    // TEMP diagnostics: why the loop is left as it is.
-    std::string                 reject;
+    // Whether the loop is left as it is on purpose: the wall of a hole with the holes off.
+    bool                        on_purpose { false };
 
     const ExtrusionLoop& loop() const { return *static_cast<const ExtrusionLoop*>(*this->slot); }
 };
@@ -228,7 +219,6 @@ bool sample_loop(WallLoop                            &wall_loop,
 {
     const ExtrusionLoop &loop          = wall_loop.loop();
     const size_t         wall          = wall_loop.wall;
-    auto                 refuse        = [&wall_loop](const std::string &why) { wall_loop.reject = why; return false; };
     const double         regular_width = walls.widths[wall];
     const ExtrusionRole  role          = wall == 0 ? erExternalPerimeter : erPerimeter;
     // Only a wall of its regular width is split, and a wall held back until the infill is printed must not be
@@ -236,7 +226,7 @@ bool sample_loop(WallLoop                            &wall_loop,
     // loop: the wall is taken for hanging by the whole layer, while a pass reaches out half as far over the pass
     // below it. They keep their role, that is their speed and cooling, but not their flow.
     if (loop.print_after_infill)
-        return refuse("after_infill");
+        return false;
     Lines overhangs;
     for (const ExtrusionPath &path : loop.paths) {
         if (path.role() == erOverhangPerimeter) {
@@ -244,7 +234,7 @@ bool sample_loop(WallLoop                            &wall_loop,
             continue;
         }
         if (path.role() != role || std::abs(double(path.width) - regular_width) > 1e-3)
-            return refuse("width_or_role");
+            return false;
     }
     const OutlineDistancer overhang_lines(std::move(overhangs));
 
@@ -252,7 +242,7 @@ bool sample_loop(WallLoop                            &wall_loop,
     wall_loop.polygon.remove_duplicate_points();
     const Points &points = wall_loop.polygon.points;
     if (points.size() < 3)
-        return refuse("degenerate");
+        return false;
 
     // Sample the loop densely enough to follow a slope changing along a straight edge.
     const double             max_segment = scaled<double>(0.5);
@@ -298,8 +288,10 @@ bool sample_loop(WallLoop                            &wall_loop,
     // Measure the offsets of the pass outlines and find out, which side of the loop the material is on.
     // The material is inside a contour and outside a hole. The normals point to the right of the loop.
     const bool is_hole = (loop.loop_role() & elrHole) == elrHole;
-    if (! with_holes && is_hole)
-        return refuse("holes_off");
+    if (! with_holes && is_hole) {
+        wall_loop.on_purpose = true;
+        return false;
+    }
     const double side = wall_loop.polygon.is_counter_clockwise() != is_hole ? 1. : -1.;
     wall_loop.side = side;
     wall_loop.hole = is_hole;
@@ -352,7 +344,7 @@ bool sample_loop(WallLoop                            &wall_loop,
         if (wall == 0 ? ! signed_distance(layer_outline, Point((point + surface_offset * sample.outward).cast<coord_t>()), surface_distance,
                                           surface_nearest) :
                         ! signed_distance(walls.surface_lines[wall], sample.point, surface_distance, surface_nearest))
-            return refuse("no_surface_distance");
+            return false;
         if (std::abs(surface_distance) > surface_tolerance) {
             sample.offsets.assign(num_passes, 0.);
             continue;
@@ -362,10 +354,10 @@ bool sample_loop(WallLoop                            &wall_loop,
         double      mid_distance;
         Vec2d       mid_nearest;
         if (! signed_distance(mid_outline, wall == 0 ? sample.point : measured, mid_distance, mid_nearest))
-            return refuse("no_mid_distance");
+            return false;
         const int mid_side = outline_side(mid_outline, measured_at, sample.outward);
         if (mid_side < 0)
-            return refuse("mid_side");
+            return false;
         side_confirmed |= mid_side > 0;
         sample.on_surface = true;
         sample.offsets.reserve(num_passes);
@@ -373,7 +365,7 @@ bool sample_loop(WallLoop                            &wall_loop,
             double pass_distance;
             Vec2d  pass_nearest;
             if (! signed_distance(pass_outline, wall == 0 ? sample.point : measured, pass_distance, pass_nearest))
-                return refuse("no_pass_distance");
+                return false;
             // The nearest edge may be another one in the outline of a pass only. Where it is the far side of a part
             // tapering off, the same ring of the outline coming round, the edge the loop follows is looked up on
             // the way out of the material, in the middle outline as well, as far as the walls may move it. The
@@ -386,20 +378,18 @@ bool sample_loop(WallLoop                            &wall_loop,
                 const std::vector<size_t> &rings   = pass_rings[&pass_outline - pass_outlines.data()];
                 double                     mid_at  = 0.;
                 double                     pass_at = 0.;
-                const char                *why     = "";
                 if (! edge_on_way_out(mid_outline, mid_rings, mid_rings[std::get<1>(mid_outline.distance_from_lines_extra<false>(from))],
-                                      measured_at, way_out, 0., 4. * mid_distance + edge_tolerance, mid_at, &why))
-                    return refuse(std::string("pass_side_mid_") + why);
-                if (! edge_on_way_out(pass_outline, rings, rings[std::get<1>(pass_outline.distance_from_lines_extra<false>(from))],
-                                      measured_at, way_out, mid_at - most_inwards, mid_at + most_outwards, pass_at, &why))
-                    return refuse(std::string("pass_side_pass_") + why);
+                                      measured_at, way_out, 0., 4. * mid_distance + edge_tolerance, mid_at) ||
+                    ! edge_on_way_out(pass_outline, rings, rings[std::get<1>(pass_outline.distance_from_lines_extra<false>(from))],
+                                      measured_at, way_out, mid_at - most_inwards, mid_at + most_outwards, pass_at))
+                    return false;
                 sample.offsets.emplace_back(pass_at - mid_at);
                 continue;
             }
             sample.offsets.emplace_back(pass_distance - mid_distance);
         }
     }
-    return side_confirmed || refuse("side_unconfirmed");
+    return side_confirmed;
 }
 
 // Split the offsets of the pass outlines between the walls running one behind another at each point of the loop.
@@ -612,18 +602,17 @@ bool outer_wall_pass_steps_fit(const std::vector<ExPolygons> &passes, const ExPo
     return above == nullptr || passes.empty() || covered(passes.back(), *above);
 }
 
-void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
+bool split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
                             std::vector<ExtrusionEntityCollection> &lower_passes,
                             const OuterWallPassSlices              &slices,
                             const ExPolygons                       &layer_outline,
                             const Flow                             &pass_flow,
                             bool                                    with_holes,
-                            const OuterWallPassInnerWalls          *inner_walls,
-                            std::vector<std::string>               *rejections)
+                            const OuterWallPassInnerWalls          *inner_walls)
 {
     const size_t num_passes = slices.count();
     if (num_passes < 2)
-        return;
+        return true;
     lower_passes.resize(num_passes - 1);
     const OutlineDistancer        layer_outline_lines(to_lines(layer_outline));
     const OutlineDistancer        mid_outline(to_lines(slices.mid));
@@ -688,7 +677,6 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
         }
         for (WallLoop &wall_loop : wall_loops)
             if (wall_loop.valid && ! share_offsets(wall_loop, walls, wall_lines[wall_loop.wall], num_passes)) {
-                wall_loop.reject = "no_share";
                 wall_loop.valid = false;
                 changed         = true;
             }
@@ -696,20 +684,16 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
             continue;
         for (WallLoop &wall_loop : wall_loops)
             if (wall_loop.valid && ! build_passes(wall_loop, walls, num_passes)) {
-                wall_loop.reject = "build";
                 wall_loop.valid = false;
                 changed         = true;
             }
     }
 
+    bool all_split = true;
     for (WallLoop &wall_loop : wall_loops) {
         if (! wall_loop.valid) {
-            if (rejections != nullptr && wall_loop.wall == 0) {
-                const Point at = wall_loop.loop().first_point();
-                rejections->emplace_back((wall_loop.reject.empty() ? std::string("unknown") : wall_loop.reject) +
-                    " len " + std::to_string(unscaled<double>(wall_loop.loop().length())) +
-                    " at " + std::to_string(unscaled<double>(at.x())) + " " + std::to_string(unscaled<double>(at.y())));
-            }
+            if (wall_loop.wall == 0 && ! wall_loop.on_purpose)
+                all_split = false;
             continue;
         }
         for (size_t pass = 0; pass + 1 < num_passes; ++ pass)
@@ -719,6 +703,7 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
         delete *wall_loop.slot;
         *wall_loop.slot = top_pass;
     }
+    return all_split;
 }
 
 } // namespace Slic3r

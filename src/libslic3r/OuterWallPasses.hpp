@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <string>
 #include <vector>
 
 #include "ExPolygon.hpp"
@@ -86,14 +85,13 @@ bool outer_wall_pass_steps_fit(const std::vector<ExPolygons> &passes, const ExPo
 // the role of an overhanging wall where the loop has it, for its speed and cooling, with the flow of a pass.
 // With slices.walls above one the loops of the inner walls behind the outer wall are split as well, which takes
 // inner_walls.
-void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
+// Returns false if a loop of the outer wall was left as it is for another reason than the holes being off.
+bool split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
                             std::vector<ExtrusionEntityCollection> &lower_passes,
                             const OuterWallPassSlices              &slices,
                             const ExPolygons                       &layer_outline,
                             const Flow                             &pass_flow,
                             bool                                    with_holes,
-                            const OuterWallPassInnerWalls          *inner_walls = nullptr,
-                            // TEMP diagnostics: the loops of the outer wall left as they are, and why.
-                            std::vector<std::string>               *rejections = nullptr);
+                            const OuterWallPassInnerWalls          *inner_walls = nullptr);
 
 } // namespace Slic3r

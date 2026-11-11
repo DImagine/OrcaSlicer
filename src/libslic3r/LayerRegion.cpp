@@ -23,10 +23,6 @@
 #include "Utils.hpp"
 
 #include <cmath>
-#include <cstdlib>
-#include <fstream>
-#include <ios>
-#include <mutex>
 #include <array>
 #include <cstddef>
 #include <initializer_list>
@@ -207,25 +203,12 @@ void LayerRegion::split_outer_wall()
             0.5 * double(outer_flow.width() + inner_flow.width()) : 0.5 * double(outer_flow.spacing() + inner_flow.spacing());
         inner_walls.spacing = double(inner_flow.spacing());
     }
-    // TEMP diagnostics.
-    std::vector<std::string> rejections;
-    split_outer_wall_loops(this->perimeters, this->outer_wall_lower_passes, *pass_slices, this->layer()->lslices,
-                           this->flow(frExternalPerimeter, pass_height),
-                           this->layer()->object()->config().split_outer_wall_holes.value,
-                           with_inner_walls ? &inner_walls : nullptr, &rejections);
-    // A loop of the outer wall left as it is sends the layer to the fallback, unless left so on purpose: the
-    // wall of a hole with the holes off.
-    for (const std::string &rejection : rejections)
-        if (rejection.rfind("holes_off", 0) != 0)
-            this->layer()->outer_wall_pass_refused = true;
-    // The log of the command line run is not captured: the lines go to the file named by OWP_DIAG.
-    if (const char *diag = std::getenv("OWP_DIAG"); diag != nullptr && ! rejections.empty()) {
-        static std::mutex           diag_mutex;
-        std::lock_guard<std::mutex> lock(diag_mutex);
-        std::ofstream               out(diag, std::ios::app);
-        for (const std::string &rejection : rejections)
-            out << "OWP_REJECT z " << this->layer()->print_z << " walls " << pass_slices->walls << " " << rejection << '\n';
-    }
+    // A loop of the outer wall that could not be split sends the layer to the fallback.
+    if (! split_outer_wall_loops(this->perimeters, this->outer_wall_lower_passes, *pass_slices, this->layer()->lslices,
+                                 this->flow(frExternalPerimeter, pass_height),
+                                 this->layer()->object()->config().split_outer_wall_holes.value,
+                                 with_inner_walls ? &inner_walls : nullptr))
+        this->layer()->outer_wall_pass_refused = true;
 }
 
 #if 1

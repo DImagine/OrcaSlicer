@@ -569,6 +569,29 @@ TEST_CASE("A pass may step back from the pass below it by the given step at most
     REQUIRE_FALSE(outer_wall_pass_steps_fit(passes, &nothing, 0.35, true));
 }
 
+TEST_CASE("A loop of the outer wall left as it is is reported unless the holes are off", "[OuterWallPasses]")
+{
+    // A square with a hole, both vertical. The wall of the contour is narrower than the passes are.
+    OuterWallPassSlices slices;
+    slices.mid       = { square(20., 8.) };
+    slices.passes    = { slices.mid, slices.mid };
+    slices.min_width = min_width;
+    slices.max_width = max_width;
+    auto split = [&slices](bool narrow_contour, bool with_holes) {
+        ExtrusionEntityCollection perimeters = wall_loop(19.5);
+        if (narrow_contour)
+            static_cast<ExtrusionLoop*>(perimeters.entities.front())->paths.front().width = 0.3f;
+        perimeters.append(wall_loop(8.5, true));
+        std::vector<ExtrusionEntityCollection> lower_passes;
+        return split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), with_holes);
+    };
+    REQUIRE(split(false, true));
+    // The wall of the hole is left as it is on purpose.
+    REQUIRE(split(false, false));
+    REQUIRE_FALSE(split(true, true));
+    REQUIRE_FALSE(split(true, false));
+}
+
 TEST_CASE("Holes count only when asked for", "[OuterWallPasses]")
 {
     // The hole grows by 0.3 mm a side between the passes, the contour stays.

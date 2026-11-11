@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -333,6 +334,29 @@ TEST_CASE("Layers of a slope out of the pass width range follow the fallback set
             for (const PassPaths &pass : passes_of(layer))
                 REQUIRE(pass.widths.empty());
         }
+    }
+}
+
+TEST_CASE("A layer with an outer wall that cannot be split follows the fallback setting", "[OuterWallPasses]")
+{
+    // A box with an XY compensation of 0.4 mm, more than half the outer wall: the wall runs outside the outline
+    // of the model the passes are planned by, so its loop cannot be split on any layer.
+    DynamicPrintConfig config = passes_config(GENERATE("split_layer", "regular"));
+    config.set_deserialize_strict({ { "xy_contour_compensation", 0.4 } });
+    const bool split_layers = config.opt_serialize("split_outer_wall_fallback") == "split_layer";
+    CAPTURE(split_layers);
+    Print print;
+    init_and_process_print({ frustum(10., 10., 2.) }, print, config);
+    const PrintObject &object = *print.objects().front();
+    // 2 mm of layers of 0.2 mm, all but the first one halved by the split.
+    REQUIRE(object.layers().size() == (split_layers ? 19 : 10));
+    for (size_t layer_idx = 1; layer_idx < object.layers().size(); ++ layer_idx) {
+        CAPTURE(layer_idx);
+        const Layer &layer = *object.layers()[layer_idx];
+        REQUIRE_FALSE(layer.outer_wall_pass_slices);
+        REQUIRE_THAT(layer.height, WithinAbs(split_layers ? pass_height : layer_height, 1e-6));
+        for (const PassPaths &pass : passes_of(layer))
+            REQUIRE(pass.widths.empty());
     }
 }
 
