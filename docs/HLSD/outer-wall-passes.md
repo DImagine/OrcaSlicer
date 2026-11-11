@@ -150,9 +150,11 @@ With the option off the joints of the walls may show from above, as they do on
 regular layers.
 
 A loop with stretches the wall generator took for hanging in the air is printed
-in passes like any other. The wall generator judges by the whole layer, while a
-pass reaches out over the pass below it half as far, so most of such stretches
-do not hang as passes at all. Along these stretches the passes keep the role of
+in passes like any other. The wall generator judges by the whole layer, while
+on a slope a pass reaches out over the pass below it by a part of that only, so
+most of such stretches do not hang as passes at all. A stretch stepping out
+over nothing, as the first layer of a shelf, does hang as a pass: its low pass
+is printed thin and first on the layer, with nothing under it. Along these stretches the passes keep the role of
 an overhanging wall, which gives them its speed and cooling; their flow is that
 of a pass of their width and height, not the bridging flow.
 
