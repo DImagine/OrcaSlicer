@@ -65,6 +65,7 @@ struct LoopSample
 // Build the passes of one external loop. Returns false if the loop has to be printed the regular way.
 bool make_passes(const ExtrusionLoop                 &loop,
                  const OuterWallPassSlices           &slices,
+                 const OutlineDistancer              &layer_outline,
                  const OutlineDistancer              &mid_outline,
                  const std::vector<OutlineDistancer> &pass_outlines,
                  const Flow                          &pass_flow,
@@ -134,26 +135,48 @@ bool make_passes(const ExtrusionLoop                 &loop,
     // of the outlines, such as the hole of a thin wall they thickened, is left as it is.
     const double side_probe     = scaled<double>(0.05);
     bool         side_confirmed = false;
+    // Whether the distance from an outline falls towards the outer side of the loop at a sample: 1 if it does,
+    // -1 if it rises, 0 if the probes on both sides of the loop do not tell.
+    auto outline_side = [side, side_probe](const OutlineDistancer &outline, const LoopSample &sample) {
+        const Vec2d right = side_probe * sample.outward.normalized();
+        double      distance_right;
+        double      distance_left;
+        Vec2d       nearest;
+        if (! signed_distance(outline, Point((sample.point.cast<double>() + right).cast<coord_t>()), distance_right, nearest) ||
+            ! signed_distance(outline, Point((sample.point.cast<double>() - right).cast<coord_t>()), distance_left, nearest) ||
+            std::abs(distance_left - distance_right) <= 0.5 * side_probe)
+            return 0;
+        return (distance_left > distance_right) == (side > 0.) ? 1 : -1;
+    };
+    // The middle of the outer wall runs half its width inside the outline of the layer where it follows the surface
+    // of the object. Further in it runs along the border of another region of the layer: there it is neither
+    // offset nor checked against the outlines, whose nearest edge is the far side of the object.
+    const double surface_reach  = scaled<double>(0.5 * nominal_width + 0.05);
     for (LoopSample &sample : samples) {
+        double surface_distance;
+        Vec2d  surface_nearest;
+        if (! signed_distance(layer_outline, sample.point, surface_distance, surface_nearest))
+            return false;
+        if (surface_distance > surface_reach) {
+            sample.offsets.assign(num_passes, 0.);
+            continue;
+        }
         double mid_distance;
         Vec2d  mid_nearest;
         if (! signed_distance(mid_outline, sample.point, mid_distance, mid_nearest))
             return false;
-        const Vec2d right = side_probe * sample.outward.normalized();
-        double      distance_right;
-        double      distance_left;
-        if (signed_distance(mid_outline, Point((sample.point.cast<double>() + right).cast<coord_t>()), distance_right, mid_nearest) &&
-            signed_distance(mid_outline, Point((sample.point.cast<double>() - right).cast<coord_t>()), distance_left, mid_nearest) &&
-            std::abs(distance_left - distance_right) > 0.5 * side_probe) {
-            if ((distance_left > distance_right) != (side > 0.))
-                return false;
-            side_confirmed = true;
-        }
+        const int mid_side = outline_side(mid_outline, sample);
+        if (mid_side < 0)
+            return false;
+        side_confirmed |= mid_side > 0;
         sample.offsets.reserve(num_passes);
         for (const OutlineDistancer &pass_outline : pass_outlines) {
             double pass_distance;
             Vec2d  pass_nearest;
             if (! signed_distance(pass_outline, sample.point, pass_distance, pass_nearest))
+                return false;
+            // The nearest edge may be another one in the outline of a pass only.
+            if (outline_side(pass_outline, sample) < 0)
                 return false;
             sample.offsets.emplace_back(std::clamp(pass_distance - mid_distance, min_offset, max_offset));
         }
@@ -219,6 +242,7 @@ bool make_passes(const ExtrusionLoop                 &loop,
 void split_loops_recursive(ExtrusionEntityCollection              &collection,
                            std::vector<ExtrusionEntityCollection> &lower_passes,
                            const OuterWallPassSlices              &slices,
+                           const OutlineDistancer                 &layer_outline,
                            const OutlineDistancer                 &mid_outline,
                            const std::vector<OutlineDistancer>    &pass_outlines,
                            const Flow                             &pass_flow,
@@ -227,10 +251,11 @@ void split_loops_recursive(ExtrusionEntityCollection              &collection,
     std::vector<ExtrusionLoop> passes;
     for (ExtrusionEntity *&entity : collection.entities) {
         if (entity->is_collection()) {
-            split_loops_recursive(*static_cast<ExtrusionEntityCollection*>(entity), lower_passes, slices, mid_outline, pass_outlines,
-                                  pass_flow, with_holes);
+            split_loops_recursive(*static_cast<ExtrusionEntityCollection*>(entity), lower_passes, slices, layer_outline, mid_outline,
+                                  pass_outlines, pass_flow, with_holes);
         } else if (entity->is_loop() && entity->inset_idx == 0 &&
-                   make_passes(*static_cast<const ExtrusionLoop*>(entity), slices, mid_outline, pass_outlines, pass_flow, with_holes, passes)) {
+                   make_passes(*static_cast<const ExtrusionLoop*>(entity), slices, layer_outline, mid_outline, pass_outlines, pass_flow,
+                               with_holes, passes)) {
             for (size_t pass = 0; pass + 1 < passes.size(); ++ pass)
                 lower_passes[pass].entities.emplace_back(new ExtrusionLoop(std::move(passes[pass])));
             // The top pass is printed at the layer height and takes the place of the regular outer wall.
@@ -270,18 +295,20 @@ bool outer_wall_passes_fit(const ExPolygons              &mid,
 void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
                             std::vector<ExtrusionEntityCollection> &lower_passes,
                             const OuterWallPassSlices              &slices,
+                            const ExPolygons                       &layer_outline,
                             const Flow                             &pass_flow,
                             bool                                    with_holes)
 {
     if (slices.count() < 2)
         return;
     lower_passes.resize(slices.count() - 1);
+    const OutlineDistancer        layer_outline_lines(to_lines(layer_outline));
     const OutlineDistancer        mid_outline(to_lines(slices.mid));
     std::vector<OutlineDistancer> pass_outlines;
     pass_outlines.reserve(slices.count());
     for (const ExPolygons &pass : slices.passes)
         pass_outlines.emplace_back(to_lines(pass));
-    split_loops_recursive(perimeters, lower_passes, slices, mid_outline, pass_outlines, pass_flow, with_holes);
+    split_loops_recursive(perimeters, lower_passes, slices, layer_outline_lines, mid_outline, pass_outlines, pass_flow, with_holes);
 }
 
 } // namespace Slic3r

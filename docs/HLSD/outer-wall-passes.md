@@ -83,10 +83,13 @@ the samples as differences of signed distances to `S_k` and `S_mid`, and each
 pass is built as a variable width loop. The outer side of the loop follows from
 its being a contour or a hole. The offsets are measured against the nearest edge
 of the outlines, which has to be the edge the loop follows: the distance to
-`S_mid` is probed on both sides of the loop, and a loop whose outer side the
-probe does not confirm is left as it is. So is a loop the XY compensations moved
+`S_mid` and to every `S_k` is probed on both sides of the loop, and a loop whose
+outer side a probe contradicts or none confirms is left as it is. So is a loop the XY compensations moved
 beside another edge of the outlines, such as the hole of a thin wall they
-thickened. The top pass takes the place of the
+thickened. Where the loop runs along the border of another region of the layer,
+further inside the outline of the layer than half its width, it is neither
+offset nor checked: its passes are plain thin loops there. A loop with no part
+along the outline of the layer is left as it is. The top pass takes the place of the
 original loop in `LayerRegion::perimeters`. The passes below it are kept in
 `LayerRegion::outer_wall_lower_passes`, bottom pass first.
 

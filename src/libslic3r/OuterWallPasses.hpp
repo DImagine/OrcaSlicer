@@ -43,10 +43,13 @@ bool outer_wall_passes_fit(const ExPolygons              &mid,
 
 // Replace the external loops of perimeters by their top passes and append the passes below to lower_passes, one
 // collection per pass, bottom pass first. pass_flow is the outer wall flow at the pass height.
+// layer_outline is the outline of the layer the walls were generated in, with the XY compensations: the outer wall
+// follows the surface of the object where it runs along it, and the border of another region of the layer elsewhere.
 // Loops which cannot be split (overhangs, another width, holes when with_holes == false) are left as they are.
 void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
                             std::vector<ExtrusionEntityCollection> &lower_passes,
                             const OuterWallPassSlices              &slices,
+                            const ExPolygons                       &layer_outline,
                             const Flow                             &pass_flow,
                             bool                                    with_holes);
 

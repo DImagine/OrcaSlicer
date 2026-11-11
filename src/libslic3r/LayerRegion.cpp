@@ -186,7 +186,7 @@ void LayerRegion::split_outer_wall()
 {
     this->outer_wall_lower_passes.clear();
     if (const OuterWallPassSlices *pass_slices = this->layer()->outer_wall_pass_slices.get(); pass_slices != nullptr)
-        split_outer_wall_loops(this->perimeters, this->outer_wall_lower_passes, *pass_slices,
+        split_outer_wall_loops(this->perimeters, this->outer_wall_lower_passes, *pass_slices, this->layer()->lslices,
                                this->flow(frExternalPerimeter, this->layer()->height / double(pass_slices->count())),
                                this->layer()->object()->config().split_outer_wall_holes.value);
 }

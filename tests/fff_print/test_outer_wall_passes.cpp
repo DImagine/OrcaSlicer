@@ -689,6 +689,37 @@ TEST_CASE("A part behind a negative volume in the model is planned as it is slic
     REQUIRE(layers[20]->outer_wall_pass_slices);
 }
 
+TEST_CASE("A wall along the border of another part keeps its passes", "[OuterWallPasses]")
+{
+    // Two cubes side by side as parts of one object, the second one with three walls. Each part has an outer wall
+    // of its own, which runs along the other part as well, far from the outline of the layer.
+    TriangleMesh right = make_cube(10., 10., 10.);
+    right.translate(10.f, 0.f, 0.f);
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "parts.stl";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->add_volume(std::move(right))->config.set("wall_loops", 3);
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.apply(model, passes_config("regular"));
+    print.set_status_silent();
+    print.process();
+
+    const Layer &layer = *print.objects().front()->layers()[10];
+    REQUIRE(layer.outer_wall_pass_slices);
+    size_t parts = 0;
+    for (const LayerRegion *region : layer.regions())
+        if (! region->perimeters.entities.empty()) {
+            ++ parts;
+            REQUIRE(count_pass_loops(region->perimeters) == 1);
+            REQUIRE(region->outer_wall_lower_passes.size() == 1);
+            REQUIRE(count_pass_loops(region->outer_wall_lower_passes.front()) == 1);
+        }
+    REQUIRE(parts == 2);
+}
+
 TEST_CASE("Changing fuzzy skin plans the layers again", "[OuterWallPasses]")
 {
     DynamicPrintConfig config = passes_config("split_layer");
