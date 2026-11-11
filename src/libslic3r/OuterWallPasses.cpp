@@ -50,6 +50,29 @@ bool signed_distance(const OutlineDistancer &outline, const Point &point, double
     return true;
 }
 
+// Where the material of an outline ends on the way out of it from a point, in the units of the outward vector:
+// the crossing nearest to the expected one between the given two. Finds the edge a loop follows where another edge
+// of the outline is nearer to the point. Returns false if the material does not end there.
+bool edge_on_way_out(const OutlineDistancer &outline, const Vec2d &point, const Vec2d &outward, double expected, double lowest,
+                     double highest, double &at)
+{
+    const Line way(Point((point + lowest * outward).cast<coord_t>()), Point((point + highest * outward).cast<coord_t>()));
+    bool       found = false;
+    for (const auto &[crossing, line_idx] : outline.intersections_with_line<false>(way)) {
+        // The material lies to the left of an edge of the outlines: it ends where the way out leaves to the right.
+        const Line  &edge = outline.get_line(line_idx);
+        const Vec2d  dir  = (edge.b - edge.a).cast<double>();
+        if (dir.x() * outward.y() - dir.y() * outward.x() >= 0.)
+            continue;
+        const double crossed_at = (crossing.cast<double>() - point).dot(outward) / outward.squaredNorm();
+        if (! found || std::abs(crossed_at - expected) < std::abs(at - expected)) {
+            at    = crossed_at;
+            found = true;
+        }
+    }
+    return found;
+}
+
 // Point of a wall loop the passes are derived from.
 struct LoopSample
 {
@@ -212,8 +235,15 @@ bool sample_loop(WallLoop                            &wall_loop,
     // of the outlines, such as the hole of a thin wall they thickened, is left as it is.
     const double side_probe     = scaled<double>(0.05);
     bool         side_confirmed = false;
-    // Number of the points with another edge nearest in the outline of a pass.
-    size_t       side_fails     = 0;
+    // How far all the walls together move the outer edge at most, for the points where it is looked up on the way
+    // out of the material.
+    const double edge_tolerance = scaled<double>(0.05);
+    double       most_inwards   = edge_tolerance;
+    double       most_outwards  = edge_tolerance;
+    for (const WallReach &reach : walls.reach) {
+        most_inwards  += reach.limit_inwards;
+        most_outwards += reach.limit_outwards;
+    }
     // Whether the distance from an outline falls towards the outer side of the loop at a point: 1 if it does,
     // -1 if it rises, 0 if the probes on both sides of the point do not tell.
     auto outline_side = [side, side_probe](const OutlineDistancer &outline, const Vec2d &point, const Vec2d &outward) {
@@ -270,19 +300,21 @@ bool sample_loop(WallLoop                            &wall_loop,
             if (! signed_distance(pass_outline, wall == 0 ? sample.point : measured, pass_distance, pass_nearest))
                 return refuse("no_pass_distance");
             // The nearest edge may be another one in the outline of a pass only: the far side of a part tapering
-            // off, a notch. The offset is not known at such a point, the passes run there as the regular wall does.
+            // off, a notch. The edge the loop follows is then looked up on the way out of the material, in the
+            // middle outline as well, as far as the walls may move it. A loop with no such edge is left as it is.
             if (outline_side(pass_outline, measured_at, sample.outward) < 0) {
-                sample.offsets.assign(num_passes, 0.);
-                sample.on_surface = false;
-                ++ side_fails;
-                break;
+                const Vec2d way_out = side * sample.outward;
+                double      mid_at  = 0.;
+                double      pass_at = 0.;
+                if (! edge_on_way_out(mid_outline, measured_at, way_out, mid_distance, 0., 4. * mid_distance + edge_tolerance, mid_at) ||
+                    ! edge_on_way_out(pass_outline, measured_at, way_out, mid_at, mid_at - most_inwards, mid_at + most_outwards, pass_at))
+                    return refuse("pass_side");
+                sample.offsets.emplace_back(pass_at - mid_at);
+                continue;
             }
             sample.offsets.emplace_back(pass_distance - mid_distance);
         }
     }
-    // A loop running beside another edge along a good part of its length is left as it is.
-    if (10 * side_fails > samples.size())
-        return refuse("pass_side " + std::to_string(side_fails) + " of " + std::to_string(samples.size()));
     return side_confirmed || refuse("side_unconfirmed");
 }
 

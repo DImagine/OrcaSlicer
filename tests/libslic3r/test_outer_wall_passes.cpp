@@ -158,17 +158,61 @@ TEST_CASE("A loop is split only along the edge of the outlines it follows", "[Ou
     REQUIRE(low_passes(square(20., 17.6), square(20., 19.6), square(20.05, 19.65), square(19.95, 19.55)) == 0);
     // A frame 0.55 mm thick in the model, thickened the same way, both its edges moving by 0.1 mm per pass. The
     // loop runs inside the frame, nearer to its outer edge at the middle of the layer and at the high pass, but
-    // nearer to its hole at the low pass. The widths the outlines ask for are all allowed.
+    // nearer to its hole at the low pass. The widths the outlines ask for are all allowed, and the outer edge
+    // of the low pass is found on the way out of the material.
     REQUIRE(outer_wall_passes_fit({ square(20., 18.9) }, { { square(20.2, 19.1) }, { square(19.8, 18.7) } }, min_width, max_width, true));
-    REQUIRE(low_passes(square(20., 16.9), square(20., 18.9), square(20.2, 19.1), square(19.8, 18.7)) == 0);
+    REQUIRE(low_passes(square(20., 16.9), square(20., 18.9), square(20.2, 19.1), square(19.8, 18.7)) == 1);
     // A slit 0.4 mm wide in the outline of the high pass ends 0.4 mm off the bottom side of the square: its end
-    // is the nearest edge at two points of the loop only. The loop is split, the passes run there as the wall does.
+    // is the nearest edge at two points of the loop, where the bottom side is found on the way out.
     ExPolygon slit = square(20.);
     slit.contour = Polygon({ Point(scaled<coord_t>(-10.), scaled<coord_t>(-10.)), Point(scaled<coord_t>(10.), scaled<coord_t>(-10.)),
                              Point(scaled<coord_t>(10.), scaled<coord_t>(10.)), Point(scaled<coord_t>(0.2), scaled<coord_t>(10.)),
                              Point(scaled<coord_t>(0.2), scaled<coord_t>(-9.6)), Point(scaled<coord_t>(-0.2), scaled<coord_t>(-9.6)),
                              Point(scaled<coord_t>(-0.2), scaled<coord_t>(10.)), Point(scaled<coord_t>(-10.), scaled<coord_t>(10.)) });
     REQUIRE(low_passes(square(20.), square(20.), square(20.05), slit) == 1);
+}
+
+TEST_CASE("A wall follows its edge past a hole of the model nearer to it in a pass", "[OuterWallPasses]")
+{
+    // A square of 20 mm with a hole 1 mm wide 0.55 mm off its right side, leaning by 0.2 mm per pass along X. The
+    // hole is closed by an XY compensation in the layer. In the low pass the hole lies 0.1 mm off the wall along
+    // 1.8 mm of its right side, nearer than the side of the square: the wall still follows the side.
+    auto leaning = [](double shift) {
+        ExPolygon out = square(20.);
+        out.holes.emplace_back(Polygon({ Point(scaled<coord_t>(8.45), scaled<coord_t>(-0.9)), Point(scaled<coord_t>(8.45), scaled<coord_t>(0.9)),
+                                         Point(scaled<coord_t>(9.45), scaled<coord_t>(0.9)), Point(scaled<coord_t>(9.45), scaled<coord_t>(-0.9)) }));
+        out.translate(Point(scaled<coord_t>(shift), 0));
+        return out;
+    };
+    OuterWallPassSlices slices;
+    slices.mid       = { leaning(0.) };
+    slices.passes    = { { leaning(0.2) }, { leaning(-0.2) } };
+    slices.min_width = 0.2;
+    slices.max_width = 0.8;
+    ExtrusionEntityCollection              perimeters = wall_loop(19.5);
+    std::vector<ExtrusionEntityCollection> lower_passes;
+    split_outer_wall_loops(perimeters, lower_passes, slices, { square(20.) }, Flow(0.5f, 0.1f, 0.4f), true);
+    REQUIRE(lower_passes.size() == 1);
+    REQUIRE(lower_passes.front().entities.size() == 1);
+    // Along the right side the low pass is 0.2 mm wider and the high pass 0.2 mm narrower, beside the hole as well.
+    for (const bool low : { true, false }) {
+        CAPTURE(low);
+        const ExtrusionLoop &loop   = *static_cast<const ExtrusionLoop*>(low ? lower_passes.front().entities.front() : perimeters.entities.front());
+        size_t               beside = 0;
+        for (const ExtrusionPath &path : loop.paths) {
+            // Away from the corners of the square, by the middles of the segments: the points inside a straight
+            // edge are dropped from a pass.
+            const Points points = path.polyline.to_polyline().points;
+            for (size_t i = 0; i + 1 < points.size(); ++ i) {
+                const Vec2d middle = 0.5 * (points[i].cast<double>() + points[i + 1].cast<double>());
+                if (middle.x() > scaled<double>(9.) && std::abs(middle.y()) < scaled<double>(8.)) {
+                    REQUIRE_THAT(double(path.width), WithinAbs(low ? 0.7 : 0.3, 0.02));
+                    ++ beside;
+                }
+            }
+        }
+        REQUIRE(beside > 0);
+    }
 }
 
 TEST_CASE("A loop along the border of another region is split, but not offset there", "[OuterWallPasses]")
