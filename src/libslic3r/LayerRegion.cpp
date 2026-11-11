@@ -218,8 +218,7 @@ void LayerRegion::split_outer_wall()
         std::lock_guard<std::mutex> lock(diag_mutex);
         std::ofstream               out(diag, std::ios::app);
         for (const std::string &rejection : rejections)
-            out << "OWP_REJECT z " << this->layer()->print_z << " walls " << pass_slices->walls << " " << rejection << "
-";
+            out << "OWP_REJECT z " << this->layer()->print_z << " walls " << pass_slices->walls << " " << rejection << '\n';
     }
 }
 
