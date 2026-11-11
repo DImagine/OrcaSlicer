@@ -104,6 +104,8 @@ struct WallLoop
     Polygon                     polygon;
     // 1 if the material is to the left of the loop, -1 if to the right.
     double                      side { 1. };
+    // Whether the loop runs around a hole of the material.
+    bool                        hole { false };
     std::vector<LoopSample>     samples;
     std::vector<ExtrusionLoop>  passes;
     bool                        valid { false };
@@ -180,6 +182,7 @@ bool sample_loop(WallLoop                            &wall_loop,
         return false;
     const double side = wall_loop.polygon.is_counter_clockwise() != is_hole ? 1. : -1.;
     wall_loop.side = side;
+    wall_loop.hole = is_hole;
     // The offsets are measured against the nearest edge of the outlines, which has to be the edge the loop follows:
     // the distance from the middle outline, positive inside, has to fall towards the outer side of the loop.
     // It is probed on both sides of the loop, which works even for a loop running along the outline itself, as it
@@ -252,32 +255,31 @@ bool sample_loop(WallLoop                            &wall_loop,
 }
 
 // Split the offsets of the pass outlines between the walls running one behind another at each point of the loop.
+// wall_lines: for this wall, the loops of every other wall printed in passes moved to where this wall runs along them.
 // Returns false if the loop takes none: an inner wall with no wall printed in passes in front of it.
 bool share_offsets(WallLoop &wall_loop, const WallSet &walls, const std::vector<OutlineDistancer> &wall_lines, size_t num_passes)
 {
     const size_t wall      = wall_loop.wall;
     const double tolerance = scaled<double>(0.05);
-    // Whether the middle line of a wall printed in passes runs through the point.
-    auto wall_at = [&wall_lines, tolerance](size_t other, const Vec2d &point) {
-        const auto [dist, line_idx, nearest_point] = wall_lines[other].distance_from_lines_extra<false>(Point(point.cast<coord_t>()));
-        return std::isfinite(dist) && dist <= tolerance;
-    };
-    bool shares = false;
+    bool         shares    = false;
     for (LoopSample &sample : wall_loop.samples) {
         sample.shifts.assign(num_passes, 0.);
         sample.gains.assign(num_passes, 0.);
         if (! sample.on_surface)
             continue;
+        // Whether another wall printed in passes runs along this one here.
+        auto wall_at = [&wall_lines, &sample, tolerance](size_t other) {
+            const auto [dist, line_idx, nearest_point] = wall_lines[other].distance_from_lines_extra<false>(sample.point);
+            return std::isfinite(dist) && dist <= tolerance;
+        };
         // The walls in front of this one and those behind it, as far as they run here one behind another.
-        const Vec2d surface = sample.point.cast<double>() + wall_loop.side * walls.depths[wall] * sample.outward;
-        auto        expected = [&](size_t other) { return Vec2d(surface - wall_loop.side * walls.depths[other] * sample.outward); };
-        bool        fronted  = true;
+        bool fronted = true;
         for (size_t other = 0; other < wall && fronted; ++ other)
-            fronted = wall_at(other, expected(other));
+            fronted = wall_at(other);
         if (! fronted)
             continue;
         size_t last = wall;
-        while (last + 1 < walls.count() && wall_at(last + 1, expected(last + 1)))
+        while (last + 1 < walls.count() && wall_at(last + 1))
             ++ last;
         shares = true;
         for (size_t pass = 0; pass < num_passes; ++ pass) {
@@ -488,18 +490,29 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
     // loops beside it change.
     for (bool changed = true; changed;) {
         changed = false;
-        std::vector<OutlineDistancer> wall_lines;
-        wall_lines.reserve(num_walls);
+        // For every wall, the loops of every other wall printed in passes moved to where the wall runs along them:
+        // offset by the difference of their depths, as the wall generator offsets one wall from another. Moving
+        // a point of a wall along its normal would miss the other wall beside a corner of a hole, where the sides
+        // of the walls differ in length.
+        std::vector<std::vector<OutlineDistancer>> wall_lines(num_walls);
         for (size_t wall = 0; wall < num_walls; ++ wall) {
-            Lines lines;
-            if (num_walls > 1)
-                for (const WallLoop &wall_loop : wall_loops)
-                    if (wall_loop.valid && wall_loop.wall == wall)
-                        append(lines, wall_loop.polygon.lines());
-            wall_lines.emplace_back(std::move(lines));
+            wall_lines[wall].reserve(num_walls);
+            for (size_t other = 0; other < num_walls; ++ other) {
+                Lines lines;
+                if (other != wall)
+                    for (const WallLoop &wall_loop : wall_loops)
+                        if (wall_loop.valid && wall_loop.wall == other) {
+                            // Deeper into the material a contour shrinks and a hole grows.
+                            Polygon polygon = wall_loop.polygon;
+                            polygon.make_counter_clockwise();
+                            const double deeper = walls.depths[wall] - walls.depths[other];
+                            append(lines, to_lines(offset(polygon, float(wall_loop.hole ? deeper : - deeper))));
+                        }
+                wall_lines[wall].emplace_back(std::move(lines));
+            }
         }
         for (WallLoop &wall_loop : wall_loops)
-            if (wall_loop.valid && ! share_offsets(wall_loop, walls, wall_lines, num_passes)) {
+            if (wall_loop.valid && ! share_offsets(wall_loop, walls, wall_lines[wall_loop.wall], num_passes)) {
                 wall_loop.valid = false;
                 changed         = true;
             }

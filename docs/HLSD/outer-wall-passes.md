@@ -148,8 +148,9 @@ walls may show from above, as they do on regular layers.
 being measured at the point of the outer wall in front of it, so that the walls
 take the same offset. An inner wall follows the surface where it runs along the
 outline of the layer offset by its depth. At every sample it finds the walls running there one
-behind another: the middle lines of the walls printed in passes are looked up
-at the distances the wall generator puts them at. A wall with no wall in front
+behind another: the loops of the other walls printed in passes are offset by
+the distances the wall generator puts the walls at, and a wall runs along
+another where it lies on the offset loop of that wall. A wall with no wall in front
 of it there, or a loop the outer wall of which is printed the regular way, is
 not offset; an inner wall loop offset nowhere stays a regular loop. Where the
 walls behind are missing, as in a thin part, the walls that are there take the
