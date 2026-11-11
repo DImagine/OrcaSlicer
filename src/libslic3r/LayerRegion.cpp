@@ -23,6 +23,9 @@
 #include "Utils.hpp"
 
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <mutex>
 #include <array>
 #include <cstddef>
 #include <initializer_list>
@@ -209,8 +212,15 @@ void LayerRegion::split_outer_wall()
                            this->flow(frExternalPerimeter, pass_height),
                            this->layer()->object()->config().split_outer_wall_holes.value,
                            with_inner_walls ? &inner_walls : nullptr, &rejections);
-    for (const std::string &rejection : rejections)
-        BOOST_LOG_TRIVIAL(error) << "OWP_REJECT z " << this->layer()->print_z << " walls " << pass_slices->walls << " " << rejection;
+    // The log of the command line run is not captured: the lines go to the file named by OWP_DIAG.
+    if (const char *diag = std::getenv("OWP_DIAG"); diag != nullptr && ! rejections.empty()) {
+        static std::mutex           diag_mutex;
+        std::lock_guard<std::mutex> lock(diag_mutex);
+        std::ofstream               out(diag, std::ios::app);
+        for (const std::string &rejection : rejections)
+            out << "OWP_REJECT z " << this->layer()->print_z << " walls " << pass_slices->walls << " " << rejection << "
+";
+    }
 }
 
 #if 1
