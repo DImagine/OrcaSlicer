@@ -445,6 +445,12 @@ TEST_CASE("Nothing is purged into a layer printed in passes", "[OuterWallPasses]
             { "sparse_infill_density",            "15%" },
             { "is_infill_first",                  true },
             { "enable_prime_tower",               true },
+            // On the 200 x 200 mm bed of the tests, which the default position is not, and clear of the model.
+            { "wipe_tower_x",                     "50" },
+            { "wipe_tower_y",                     "50" },
+            // One nozzle purged at the tower: what is purged into the object is taken off the tower.
+            { "single_extruder_multi_material",   true },
+            { "purge_in_prime_tower",             true },
             { "flush_into_infill",                true },
             { "enable_support",                   true },
             { "support_type",                     "normal(auto)" },
