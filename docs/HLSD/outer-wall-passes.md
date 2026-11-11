@@ -18,6 +18,10 @@ range `split_outer_wall_min_width` .. `split_outer_wall_max_width` everywhere.
 A layer that does not fit is either split into `n` regular thin layers or printed
 the regular way (`split_outer_wall_fallback`).
 
+Where the outer wall alone does not fit, the inner walls behind it are printed
+in passes as well and share the offset with it (`split_outer_wall_walls`, see
+Several walls in passes).
+
 Only the classic wall generator is supported. The option is off with the spiral
 vase mode, a raft, fuzzy skin, Z contouring, Make overhang printable, objects
 painted with several filaments and belt printers; `Print::validate()` warns
@@ -98,6 +102,51 @@ A loop is left as it is if it has an overhanging part, if it is held back until
 the infill is printed, or if it runs around a hole and `split_outer_wall_holes`
 is off. A layer stepping out over the layer below has vertical walls and passes
 the criterion, but its loop hangs in the air and must not be thinned.
+
+## Several walls in passes
+
+`split_outer_wall_walls` is the number of walls, counted from the outer one,
+that may be printed in passes; 0 stands for all of them. The vertical edge of
+the stack is then the inner edge of the last of these walls. The wall generator
+is not changed: the inner walls keep their regular width and spacing, and what
+lies behind the last wall printed in passes is printed at the full layer height.
+
+The offset `d_k` of a pass is split between the walls. A wall of the regular
+width `W` may get `W - W_min` narrower and `W_max - W` wider within the range
+the walls keep to, and `W - L_min` and `L_max - W` within the limits
+`split_outer_wall_limit_min_width` .. `split_outer_wall_limit_max_width`,
+which contain that range. The walls take the offset in proportion to what each
+of them may take, so that all of them reach the end of the range together, and
+beyond it all of them reach the limits together. The width of a wall changes by
+its share; its middle line moves by the shares of the walls behind it and by a
+half of its own.
+
+The planning takes as few walls as a layer needs. It tries the outer wall alone
+within the range, then all the walls within the limits, which decides whether
+the layer is printed in passes at all, and then looks for the least number of
+walls that fits within the range. The number is kept in
+`OuterWallPassSlices::walls`. The reach of the inner walls is taken from the
+narrowest and the widest inner wall over the regions of the object. The walls
+are limited to the wall loops of the region with the fewest, and to the outer
+wall if a region prints the inner walls with another filament.
+
+With Only one wall on top surfaces on, the regular walls of a top surface give
+way to a single wall where the layer above leaves more than the outer wall and
+One wall threshold uncovered. The passes follow that rule: with more than one
+wall in passes, no pass may step back from the pass below it by more than that,
+and neither may what lies over the top pass (`outer_wall_pass_steps_fit()`).
+A layer that does not keep to it follows the fallback. With the option off the
+joints of the walls may show from above, as they do on regular layers.
+
+`split_outer_wall_loops()` samples every loop of these walls, an inner wall
+being measured at the point of the outer wall in front of it, so that the walls
+take the same offset. At every sample it finds the walls running there one
+behind another: the middle lines of the walls printed in passes are looked up
+at the distances the wall generator puts them at. A wall with no wall in front
+of it there, or a loop the outer wall of which is printed the regular way, is
+not offset; an inner wall loop offset nowhere stays a regular loop. Where the
+walls behind are missing, as in a thin part, the walls that are there take the
+offset alone, up to their limits.
 
 ## G-code
 
@@ -192,6 +241,12 @@ out, as it is with a prime tower.
   range. The corner of a pass deviates from the outline by a fraction of the
   offset.
 - The passes are measured against outlines without the XY size compensations.
+- The number of walls in passes is planned for the whole layer, before the walls
+  exist. Where a layer has fewer walls than planned, as in a thin part or under
+  a single wall on a top surface, the outer edge of a pass stops at the limits of
+  the walls that are there and leaves the outline.
+- The step of the passes is checked against the layer above only if that layer
+  is a candidate for the passes itself.
 - The criterion offsets the middle outline with a miter limit, so a sloped layer
   with a convex corner sharper than about 30° to 40° may be taken for not
   fitting. This only sends the layer to the fallback.

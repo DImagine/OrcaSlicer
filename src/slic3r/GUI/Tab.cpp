@@ -3069,6 +3069,9 @@ void TabPrint::build()
         optgroup->append_single_option_line("split_outer_wall_count");
         optgroup->append_single_option_line("split_outer_wall_min_width");
         optgroup->append_single_option_line("split_outer_wall_max_width");
+        optgroup->append_single_option_line("split_outer_wall_limit_min_width");
+        optgroup->append_single_option_line("split_outer_wall_limit_max_width");
+        optgroup->append_single_option_line("split_outer_wall_walls");
         optgroup->append_single_option_line("split_outer_wall_fallback");
         optgroup->append_single_option_line("split_outer_wall_holes");
         optgroup->append_single_option_line("hole_to_polyhole", "quality_settings_precision#polyholes");

@@ -1526,6 +1526,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "role_based_wipe_speed"
             || opt_key == "wipe_on_loops"
             || opt_key == "wipe_speed") {
+            // Orca: the walls printed in thin passes behind the outer wall are planned with the layers.
+            if (m_config.split_outer_wall.value &&
+                (opt_key == "wall_loops" || opt_key == "min_width_top_surface" || opt_key == "inner_wall_line_width"))
+                steps.emplace_back(posSlice);
             steps.emplace_back(posPerimeters);
         } else if (
             opt_key == "small_area_infill_flow_compensation_model") {
@@ -1563,6 +1567,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "split_outer_wall_count"
             || opt_key == "split_outer_wall_min_width"
             || opt_key == "split_outer_wall_max_width"
+            || opt_key == "split_outer_wall_limit_min_width"
+            || opt_key == "split_outer_wall_limit_max_width"
+            || opt_key == "split_outer_wall_walls"
             || opt_key == "split_outer_wall_fallback"
             || opt_key == "split_outer_wall_holes"
             || opt_key == "slowdown_for_curled_perimeters"
@@ -1597,12 +1604,14 @@ bool PrintObject::invalidate_state_by_config_options(
             ) {
             steps.emplace_back(posSlice);
         } else if (m_config.split_outer_wall.value &&
-                   (opt_key == "fuzzy_skin" || opt_key == "outer_wall_filament_id" || opt_key == "enable_support" ||
+                   (opt_key == "fuzzy_skin" || opt_key == "outer_wall_filament_id" || opt_key == "inner_wall_filament_id" ||
+                    opt_key == "only_one_wall_top" || opt_key == "enable_support" ||
                     opt_key == "enforce_support_layers" || opt_key == "support_filament" ||
                     opt_key == "support_interface_filament")) {
             // Orca: the outer wall printed in thin passes is planned with the layers. Fuzzy skin rules it out,
             // the nozzle of the outer wall gives its widths in percent, and the nozzles of the object and of its
-            // supports the minimum layer height. Checked ahead of the branches of these keys below.
+            // supports the minimum layer height. The inner walls join the passes only with the filament of the outer
+            // wall, and a single wall on top surfaces limits them. Checked ahead of the branches of these keys below.
             steps.emplace_back(posSlice);
         } else if (opt_key == "enable_support") {
             steps.emplace_back(posSupportMaterial);

@@ -392,6 +392,51 @@ bool PrintObject::outer_wall_pass_candidate(size_t layer_idx, coordf_t layer_hei
     return min_width > pass_height && 0.5 * (min_width + max_width) > layer_height;
 }
 
+namespace {
+
+// Inner walls of an object which may be printed in passes behind its outer wall.
+struct InnerPassWalls
+{
+    // Number of the walls printed in passes at most, the outer wall included.
+    size_t max_walls { 1 };
+    // Range of the regular widths of the inner walls over the regions of the object, unscaled.
+    double min_width { 0. };
+    double max_width { 0. };
+    // How far a pass may step back from the pass below it without uncovering the joint of its walls further than
+    // a single wall on top surfaces lets the regular walls. Negative if the walls are not limited.
+    double max_step { -1. };
+};
+
+InnerPassWalls inner_pass_walls(const PrintObject &object, double nominal_width)
+{
+    InnerPassWalls out;
+    const int      allowed = object.config().split_outer_wall_walls.value;
+    size_t         walls   = allowed > 0 ? size_t(allowed) : std::numeric_limits<size_t>::max();
+    bool           any     = false;
+    for (size_t region_id = 0; region_id < object.num_printing_regions(); ++ region_id) {
+        const PrintRegion       &region = object.printing_region(region_id);
+        const PrintRegionConfig &config = region.config();
+        if (config.wall_loops.value < 1)
+            continue;
+        // An inner wall of another filament is not printed along with the outer wall.
+        walls = std::min(walls, config.inner_wall_filament_id.value == config.outer_wall_filament_id.value ?
+                                size_t(config.wall_loops.value) : size_t(1));
+        const double width = double(region.flow(object, frPerimeter, object.config().layer_height.value).width());
+        out.min_width = any ? std::min(out.min_width, width) : width;
+        out.max_width = any ? std::max(out.max_width, width) : width;
+        any = true;
+        if (config.only_one_wall_top.value) {
+            const double step = nominal_width + config.min_width_top_surface.get_abs_value(width);
+            out.max_step = out.max_step < 0. ? step : std::min(out.max_step, step);
+        }
+    }
+    if (any)
+        out.max_walls = std::max<size_t>(1, walls);
+    return out;
+}
+
+} // namespace
+
 std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t>                                     object_layers,
                                                           std::vector<std::shared_ptr<const OuterWallPassSlices>> &pass_slices) const
 {
@@ -401,10 +446,16 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
 
     double min_width = 0.;
     double max_width = 0.;
-    if (! this->outer_wall_pass_width_range(min_width, max_width))
+    double nozzle    = 0.;
+    if (! this->outer_wall_pass_width_range(min_width, max_width, &nozzle))
         return object_layers;
     const size_t num_passes = size_t(m_config.split_outer_wall_count.value);
     const bool   with_holes = m_config.split_outer_wall_holes.value;
+    // The limits of the pass width contain the range the walls keep to as long as they can.
+    const double         nominal_width   = 0.5 * (min_width + max_width);
+    const double         limit_min_width = std::min(min_width, m_config.split_outer_wall_limit_min_width.get_abs_value(nozzle));
+    const double         limit_max_width = std::max(max_width, m_config.split_outer_wall_limit_max_width.get_abs_value(nozzle));
+    const InnerPassWalls inner_walls     = inner_pass_walls(*this, nominal_width);
 
     // Slice the outline of each candidate layer at the middle of each pass and at the middle of the layer.
     // With an odd number of passes the middle pass is sliced at the middle of the layer.
@@ -431,23 +482,70 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
     const auto throw_on_cancel_callback = std::function<void()>([this]() { m_print->throw_if_canceled(); });
     std::vector<ExPolygons> outlines = slice_object_outlines(*this, m_shared_regions->layer_ranges, zs, throw_on_cancel_callback);
 
-    // Keep the slices of the layers whose passes fit the width range.
+    // Keep the slices of the layers whose passes fit the width range. The outlines are only read here: a layer
+    // looks at the lowest pass of the layer above it.
+    const ExPolygons nothing_above;
     std::vector<std::shared_ptr<const OuterWallPassSlices>> fitting(candidates.size());
     tbb::parallel_for(tbb::blocked_range<size_t>(0, candidates.size()),
         [&](const tbb::blocked_range<size_t> &range) {
             for (size_t candidate_idx = range.begin(); candidate_idx < range.end(); ++ candidate_idx) {
                 m_print->throw_if_canceled();
-                const size_t        first = candidate_idx * zs_per_candidate;
+                const size_t        first       = candidate_idx * zs_per_candidate;
+                const size_t        layer_idx   = candidates[candidate_idx];
+                const coordf_t      pass_height = (object_layers[2 * layer_idx + 1] - object_layers[2 * layer_idx]) / coordf_t(num_passes);
                 OuterWallPassSlices slices;
-                slices.min_width = min_width;
-                slices.max_width = max_width;
+                slices.min_width       = min_width;
+                slices.max_width       = max_width;
+                // A line has to stay wider than it is high.
+                slices.limit_min_width = std::min(min_width, std::max(limit_min_width, pass_height + 0.01));
+                slices.limit_max_width = limit_max_width;
                 slices.passes.reserve(num_passes);
                 for (size_t pass = 0; pass < num_passes; ++ pass)
-                    slices.passes.emplace_back(std::move(outlines[first + pass + (separate_mid && pass >= num_passes / 2 ? 1 : 0)]));
-                slices.mid = separate_mid ? std::move(outlines[first + num_passes / 2]) : slices.passes[num_passes / 2];
+                    slices.passes.emplace_back(outlines[first + pass + (separate_mid && pass >= num_passes / 2 ? 1 : 0)]);
+                slices.mid = separate_mid ? outlines[first + num_passes / 2] : slices.passes[num_passes / 2];
                 // A layer with nothing at its middle has no outer wall to split.
-                if (! slices.mid.empty() && outer_wall_passes_fit(slices.mid, slices.passes, min_width, max_width, with_holes))
+                if (slices.mid.empty())
+                    continue;
+                // What the given number of walls reaches with every wall within the given width range. The inner
+                // walls of the regions may differ in width: the narrowest gives the least inwards, the widest outwards.
+                auto reach = [&](size_t walls, double lowest, double highest) {
+                    OuterWallPassReach out { nominal_width - lowest, highest - nominal_width };
+                    out.inwards  += double(walls - 1) * std::max(0., inner_walls.min_width - lowest);
+                    out.outwards += double(walls - 1) * std::max(0., highest - inner_walls.max_width);
+                    return out;
+                };
+                auto fits = [&](size_t walls, double lowest, double highest) {
+                    return outer_wall_passes_fit(slices.mid, slices.passes, reach(walls, lowest, highest), with_holes);
+                };
+                // As few walls as the layer needs within the range they keep to. All of them go up to the limits
+                // only where that range does not suffice.
+                const size_t max_walls = inner_walls.max_walls;
+                const bool   wider     = max_walls > 1 || slices.limit_min_width < min_width || slices.limit_max_width > max_width;
+                size_t       walls     = 0;
+                if (fits(1, min_width, max_width))
+                    walls = 1;
+                else if (wider && fits(max_walls, slices.limit_min_width, slices.limit_max_width)) {
+                    walls = max_walls;
+                    for (size_t fewer = 2; fewer < max_walls; ++ fewer)
+                        if (fits(fewer, min_width, max_width)) {
+                            walls = fewer;
+                            break;
+                        }
+                }
+                if (walls > 1 && inner_walls.max_step >= 0.) {
+                    // What lies over the top pass: the lowest pass of the layer above, nothing over the last layer.
+                    const ExPolygons *above = nullptr;
+                    if (candidate_idx + 1 < candidates.size() && candidates[candidate_idx + 1] == layer_idx + 1)
+                        above = &outlines[first + zs_per_candidate];
+                    else if (layer_idx + 1 == num_layers)
+                        above = &nothing_above;
+                    if (! outer_wall_pass_steps_fit(slices.passes, above, inner_walls.max_step, with_holes))
+                        walls = 0;
+                }
+                if (walls > 0) {
+                    slices.walls = walls;
                     fitting[candidate_idx] = std::make_shared<const OuterWallPassSlices>(std::move(slices));
+                }
             }
         });
 

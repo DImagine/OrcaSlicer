@@ -2699,6 +2699,10 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return { Slic3r::format(_u8L("Split outer wall: the maximum pass width is too large. It must not exceed %1% nozzle diameters."),
                                         int(MAX_LINE_WIDTH_MULTIPLIER)),
                          print_object, "split_outer_wall_max_width" };
+            if (object_config.split_outer_wall_limit_max_width.get_abs_value(nozzle) > nozzle * MAX_LINE_WIDTH_MULTIPLIER)
+                return { Slic3r::format(_u8L("Split outer wall: the upper limit of the pass width is too large. It must not exceed %1% nozzle diameters."),
+                                        int(MAX_LINE_WIDTH_MULTIPLIER)),
+                         print_object, "split_outer_wall_limit_max_width" };
             if (pass_height < print_object->slicing_parameters().min_layer_height - EPSILON)
                 return { L("Split outer wall: the height of a pass (the layer height divided by the number of passes) "
                            "is below the minimum layer height of the printer."),

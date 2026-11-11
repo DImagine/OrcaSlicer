@@ -62,6 +62,8 @@ DynamicPrintConfig passes_config(const char *fallback)
         { "split_outer_wall_max_width",  "0.6" },
         { "split_outer_wall_fallback",   fallback },
         { "split_outer_wall_holes",      true },
+        // The outer wall alone, unless a test asks for more walls.
+        { "split_outer_wall_walls",      1 },
         { "wall_generator",              "classic" },
         { "nozzle_diameter",             "0.4" },
         { "layer_height",                layer_height },
@@ -103,6 +105,17 @@ size_t count_pass_loops(const ExtrusionEntityCollection &collection)
         else if (entity->is_loop() && static_cast<const ExtrusionLoop*>(entity)->outer_wall_pass)
             ++ count;
     return count;
+}
+
+// Widths of the paths of the passes in a collection: of the outer wall and of the inner walls.
+void collect_pass_widths(const ExtrusionEntityCollection &collection, std::vector<double> &outer, std::vector<double> &inner)
+{
+    for (const ExtrusionEntity *entity : collection.entities)
+        if (entity->is_collection())
+            collect_pass_widths(*static_cast<const ExtrusionEntityCollection*>(entity), outer, inner);
+        else if (entity->is_loop() && static_cast<const ExtrusionLoop*>(entity)->outer_wall_pass)
+            for (const ExtrusionPath &path : static_cast<const ExtrusionLoop*>(entity)->paths)
+                (path.role() == erExternalPerimeter ? outer : inner).emplace_back(path.width);
 }
 
 // Outer edge of the passes in a collection: half the extent of their loops along X plus half their width.
@@ -467,6 +480,7 @@ TEST_CASE("The filament of the split outer wall is printed first on a layer", "[
         { "split_outer_wall_min_width",       "0.4" },
         { "split_outer_wall_max_width",       "0.6" },
         { "split_outer_wall_fallback",        "regular" },
+        { "split_outer_wall_walls",           1 },
         { "wall_generator",                   "classic" },
         { "layer_height",                     layer_height },
         { "initial_layer_print_height",       layer_height },
@@ -583,6 +597,7 @@ TEST_CASE("Nothing is purged into a layer printed in passes", "[OuterWallPasses]
             { "split_outer_wall_min_width",       "0.4" },
             { "split_outer_wall_max_width",       "0.6" },
             { "split_outer_wall_fallback",        "regular" },
+            { "split_outer_wall_walls",           1 },
             { "wall_generator",                   "classic" },
             { "layer_height",                     layer_height },
             { "initial_layer_print_height",       layer_height },
@@ -875,4 +890,79 @@ TEST_CASE("A wall cut for the bridge of a neighbouring region keeps no pass belo
                 ++ layers_with_passes;
         }
     REQUIRE(layers_with_passes > 10);
+}
+
+TEST_CASE("A slope too shallow for the outer wall alone takes the inner wall into the passes", "[OuterWallPasses]")
+{
+    // A square frustum narrowing by 2.6 mm a side per mm of height, that is by 0.26 mm per pass: the outlines of the
+    // passes lie 0.13 mm off the outline at the middle of the layer. The outer wall takes 0.1 mm within 0.4 to
+    // 0.6 mm, an inner wall 0.45 mm wide 0.15 mm outwards and 0.05 mm inwards.
+    DynamicPrintConfig config = passes_config("regular");
+    config.set_deserialize_strict({ { "inner_wall_line_width", "0.45" } });
+
+    SECTION("with the outer wall alone the layer is printed the regular way") {
+        Print print;
+        init_and_process_print({ frustum(10., 4.8, 2.) }, print, config);
+        REQUIRE_FALSE(print.objects().front()->layers()[5]->outer_wall_pass_slices);
+    }
+
+    SECTION("with all the walls allowed both are printed in passes and share the offset") {
+        config.set_deserialize_strict({ { "split_outer_wall_walls", 0 } });
+        Print print;
+        init_and_process_print({ frustum(10., 4.8, 2.) }, print, config);
+        // The layer from 1.0 to 1.2 mm.
+        const Layer &layer = *print.objects().front()->layers()[5];
+        REQUIRE_THAT(layer.height, WithinAbs(layer_height, 1e-6));
+        REQUIRE(layer.outer_wall_pass_slices);
+        REQUIRE(layer.outer_wall_pass_slices->walls == 2);
+        std::vector<double> low_outer, low_inner, top_outer, top_inner;
+        double              low_reach = 0.;
+        for (const LayerRegion *region : layer.regions()) {
+            REQUIRE(region->outer_wall_lower_passes.size() == 1);
+            collect_pass_widths(region->outer_wall_lower_passes.front(), low_outer, low_inner);
+            collect_pass_widths(region->perimeters, top_outer, top_inner);
+            low_reach = std::max(low_reach, pass_reach(region->outer_wall_lower_passes.front()));
+        }
+        REQUIRE_FALSE(low_outer.empty());
+        REQUIRE_FALSE(low_inner.empty());
+        REQUIRE_FALSE(top_outer.empty());
+        REQUIRE_FALSE(top_inner.empty());
+        // Outwards the walls share 0.13 mm as 0.1 to 0.15, inwards as 0.1 to 0.05.
+        for (double width : low_outer)
+            REQUIRE_THAT(width, WithinAbs(nominal_width + 0.052, 0.01));
+        for (double width : low_inner)
+            REQUIRE_THAT(width, WithinAbs(0.45 + 0.078, 0.01));
+        for (double width : top_outer)
+            REQUIRE_THAT(width, WithinAbs(nominal_width - 0.087, 0.01));
+        for (double width : top_inner)
+            REQUIRE_THAT(width, WithinAbs(0.45 - 0.043, 0.01));
+        // The outer edge of the low pass lies on the frustum at the middle of that pass, 1.05 mm high.
+        REQUIRE_THAT(low_reach, WithinAbs(10. - 2.6 * 1.05, 0.01));
+    }
+}
+
+TEST_CASE("A single wall on top surfaces limits the step of the passes of several walls", "[OuterWallPasses]")
+{
+    // A frustum narrowing by 0.6 mm a side per pass, within the reach of two walls going down to 0.2 mm and up to
+    // 0.8 mm. Each pass uncovers 0.6 mm of the pass below it: more than the outer wall of 0.5 mm, so the joint of
+    // the walls shows. With a single wall on top surfaces and its threshold at zero that is not allowed.
+    DynamicPrintConfig config = passes_config("regular");
+    config.set_deserialize_strict({
+        { "split_outer_wall_walls",           0 },
+        { "split_outer_wall_limit_min_width", "0.2" },
+        { "split_outer_wall_limit_max_width", "0.8" },
+        { "inner_wall_line_width",            "0.45" },
+        { "min_width_top_surface",            "0" },
+    });
+    for (const bool one_wall : { false, true }) {
+        CAPTURE(one_wall);
+        config.set_deserialize_strict({ { "only_one_wall_top", one_wall } });
+        Print print;
+        init_and_process_print({ frustum(10., 4., 1.) }, print, config);
+        // The layer from 0.4 to 0.6 mm.
+        const Layer &layer = *print.objects().front()->layers()[2];
+        REQUIRE(bool(layer.outer_wall_pass_slices) == ! one_wall);
+        if (! one_wall)
+            REQUIRE(layer.outer_wall_pass_slices->walls == 2);
+    }
 }

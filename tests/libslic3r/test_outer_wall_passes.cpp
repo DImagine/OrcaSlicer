@@ -67,6 +67,32 @@ ExtrusionEntityCollection wall_loop(double side, bool hole = false)
     return wall_loop(std::move(points), hole);
 }
 
+// Inner wall 0.45 mm wide as one loop along a square of the given side, counter-clockwise.
+ExtrusionLoop inner_wall_loop(double side)
+{
+    const coord_t half = scaled<coord_t>(0.5 * side);
+    ExtrusionPath path(erPerimeter, 0.1, 0.45f, 0.2f);
+    path.polyline = Polyline3(Polyline(Points{ Point(-half, -half), Point(half, -half), Point(half, half), Point(-half, half),
+                                               Point(-half, -half) }));
+    ExtrusionLoop loop(path);
+    loop.inset_idx = 1;
+    return loop;
+}
+
+// Half the extent of a loop along X and the width of its widest path.
+std::pair<double, double> reach_and_width(const ExtrusionEntity *entity)
+{
+    const ExtrusionLoop &loop  = *static_cast<const ExtrusionLoop*>(entity);
+    const Polygon        polygon = loop.polygon();
+    double               reach = 0.;
+    double               width = 0.;
+    for (const Point &point : polygon.points)
+        reach = std::max(reach, std::abs(unscaled<double>(point.x())));
+    for (const ExtrusionPath &path : loop.paths)
+        width = std::max(width, double(path.width));
+    return { reach, width };
+}
+
 } // namespace
 
 TEST_CASE("Passes within the width range fit", "[OuterWallPasses]")
@@ -222,6 +248,113 @@ TEST_CASE("A concave corner of the wall of a contour follows the contour", "[Out
             corner = std::min(corner, std::min(x, y));
     }
     REQUIRE_THAT(corner, WithinAbs(9.78, 0.01));
+}
+
+TEST_CASE("An inner wall behind the outer wall shares its offset", "[OuterWallPasses]")
+{
+    // A square of 20 mm narrowing upwards by 0.13 mm a side per pass: more than the 0.1 mm the outer wall takes
+    // within 0.4 to 0.6 mm. An inner wall 0.45 mm wide, its middle 0.45 mm behind the middle of the outer wall,
+    // takes 0.15 mm outwards and 0.05 mm inwards.
+    OuterWallPassSlices slices;
+    slices.mid       = { square(20.) };
+    slices.passes    = { { square(20.26) }, { square(19.74) } };
+    slices.min_width = min_width;
+    slices.max_width = max_width;
+    slices.walls     = 2;
+    const OuterWallPassInnerWalls inner_walls { Flow(0.45f, 0.1f, 0.4f), 0.45, 0.4 };
+
+    SECTION("both walls are printed in passes, each within the width range") {
+        ExtrusionEntityCollection perimeters = wall_loop(19.5);
+        perimeters.append(inner_wall_loop(18.6));
+        std::vector<ExtrusionEntityCollection> lower_passes;
+        split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), true, &inner_walls);
+        REQUIRE(lower_passes.size() == 1);
+        REQUIRE(lower_passes.front().entities.size() == 2);
+        REQUIRE(perimeters.entities.size() == 2);
+        // Outwards the walls share 0.13 mm as 0.1 to 0.15, inwards as 0.1 to 0.05. The outer wall moves by what the
+        // inner wall takes and by a half of its own share, the inner wall by a half of its share.
+        const auto [low_outer_reach, low_outer_width] = reach_and_width(lower_passes.front().entities[0]);
+        const auto [low_inner_reach, low_inner_width] = reach_and_width(lower_passes.front().entities[1]);
+        const auto [top_outer_reach, top_outer_width] = reach_and_width(perimeters.entities[0]);
+        const auto [top_inner_reach, top_inner_width] = reach_and_width(perimeters.entities[1]);
+        REQUIRE_THAT(low_outer_width, WithinAbs(0.5 + 0.052, 0.003));
+        REQUIRE_THAT(low_inner_width, WithinAbs(0.45 + 0.078, 0.003));
+        REQUIRE_THAT(top_outer_width, WithinAbs(0.5 - 0.0867, 0.003));
+        REQUIRE_THAT(top_inner_width, WithinAbs(0.45 - 0.0433, 0.003));
+        REQUIRE_THAT(low_outer_reach, WithinAbs(9.75 + 0.078 + 0.026, 0.003));
+        REQUIRE_THAT(low_inner_reach, WithinAbs(9.3 + 0.039, 0.003));
+        REQUIRE_THAT(top_outer_reach, WithinAbs(9.75 - 0.0433 - 0.0433, 0.003));
+        REQUIRE_THAT(top_inner_reach, WithinAbs(9.3 - 0.0217, 0.003));
+        // The outer edge of the outer wall follows the outlines, the inner edge of the inner wall stays.
+        REQUIRE_THAT(low_outer_reach + 0.5 * low_outer_width, WithinAbs(10.13, 0.005));
+        REQUIRE_THAT(top_outer_reach + 0.5 * top_outer_width, WithinAbs(9.87, 0.005));
+        REQUIRE_THAT(low_inner_reach - 0.5 * low_inner_width, WithinAbs(9.075, 0.005));
+        REQUIRE_THAT(top_inner_reach - 0.5 * top_inner_width, WithinAbs(9.075, 0.005));
+    }
+
+    SECTION("an outer wall with no inner wall behind it takes what it can alone") {
+        ExtrusionEntityCollection              perimeters = wall_loop(19.5);
+        std::vector<ExtrusionEntityCollection> lower_passes;
+        split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), true, &inner_walls);
+        REQUIRE(lower_passes.size() == 1);
+        REQUIRE(lower_passes.front().entities.size() == 1);
+        const auto [low_reach, low_width] = reach_and_width(lower_passes.front().entities[0]);
+        REQUIRE_THAT(low_width, WithinAbs(0.6, 0.003));
+        REQUIRE_THAT(low_reach, WithinAbs(9.8, 0.003));
+    }
+
+    SECTION("an inner wall behind a regular outer wall stays regular") {
+        // The outer wall is not of the nominal width, so it is not printed in passes.
+        ExtrusionEntityCollection perimeters = wall_loop(19.5);
+        static_cast<ExtrusionLoop*>(perimeters.entities.front())->paths.front().width = 0.42f;
+        perimeters.append(inner_wall_loop(18.6));
+        std::vector<ExtrusionEntityCollection> lower_passes;
+        split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), true, &inner_walls);
+        REQUIRE(lower_passes.size() == 1);
+        REQUIRE(lower_passes.front().entities.empty());
+    }
+}
+
+TEST_CASE("Walls go up to the limits of the width together", "[OuterWallPasses]")
+{
+    // The outlines of the passes lie 0.35 mm off the middle one. Within 0.4 to 0.6 mm the two walls take 0.25 mm
+    // outwards; the limits of 0.3 and 0.8 mm let the outer wall take 0.3 mm and the inner wall 0.35 mm.
+    OuterWallPassSlices slices;
+    slices.mid             = { square(20.) };
+    slices.passes          = { { square(20.7) }, { square(19.3) } };
+    slices.min_width       = min_width;
+    slices.max_width       = max_width;
+    slices.limit_min_width = 0.3;
+    slices.limit_max_width = 0.8;
+    slices.walls           = 2;
+    const OuterWallPassInnerWalls inner_walls { Flow(0.45f, 0.1f, 0.4f), 0.45, 0.4 };
+    ExtrusionEntityCollection     perimeters = wall_loop(19.5);
+    perimeters.append(inner_wall_loop(18.6));
+    std::vector<ExtrusionEntityCollection> lower_passes;
+    split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), true, &inner_walls);
+    REQUIRE(lower_passes.size() == 1);
+    REQUIRE(lower_passes.front().entities.size() == 2);
+    // Of the 0.1 mm beyond the range the outer wall takes 0.2 / 0.4 and the inner wall the rest.
+    const auto [low_outer_reach, low_outer_width] = reach_and_width(lower_passes.front().entities[0]);
+    const auto [low_inner_reach, low_inner_width] = reach_and_width(lower_passes.front().entities[1]);
+    REQUIRE_THAT(low_outer_width, WithinAbs(0.5 + 0.1 + 0.05, 0.003));
+    REQUIRE_THAT(low_inner_width, WithinAbs(0.45 + 0.15 + 0.05, 0.003));
+    REQUIRE_THAT(low_outer_reach + 0.5 * low_outer_width, WithinAbs(10.35, 0.005));
+    REQUIRE_THAT(low_inner_reach - 0.5 * low_inner_width, WithinAbs(9.075, 0.005));
+}
+
+TEST_CASE("A pass may step back from the pass below it by the given step at most", "[OuterWallPasses]")
+{
+    // The upper pass steps back by 0.3 mm a side.
+    const std::vector<ExPolygons> passes { { square(20.6) }, { square(20.) } };
+    REQUIRE(outer_wall_pass_steps_fit(passes, nullptr, 0.35, true));
+    REQUIRE_FALSE(outer_wall_pass_steps_fit(passes, nullptr, 0.25, true));
+    // What lies over the top pass counts as well: an outline stepping back by 0.5 mm a side, or nothing at all.
+    const ExPolygons above { square(19.) };
+    const ExPolygons nothing;
+    REQUIRE(outer_wall_pass_steps_fit(passes, &above, 0.55, true));
+    REQUIRE_FALSE(outer_wall_pass_steps_fit(passes, &above, 0.35, true));
+    REQUIRE_FALSE(outer_wall_pass_steps_fit(passes, &nothing, 0.35, true));
 }
 
 TEST_CASE("Holes count only when asked for", "[OuterWallPasses]")

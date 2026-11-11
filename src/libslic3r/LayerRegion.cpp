@@ -185,10 +185,28 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
 void LayerRegion::split_outer_wall()
 {
     this->outer_wall_lower_passes.clear();
-    if (const OuterWallPassSlices *pass_slices = this->layer()->outer_wall_pass_slices.get(); pass_slices != nullptr)
-        split_outer_wall_loops(this->perimeters, this->outer_wall_lower_passes, *pass_slices, this->layer()->lslices,
-                               this->flow(frExternalPerimeter, this->layer()->height / double(pass_slices->count())),
-                               this->layer()->object()->config().split_outer_wall_holes.value);
+    const OuterWallPassSlices *pass_slices = this->layer()->outer_wall_pass_slices.get();
+    if (pass_slices == nullptr)
+        return;
+    const double             pass_height = this->layer()->height / double(pass_slices->count());
+    const PrintRegionConfig &config      = this->region().config();
+    // The inner walls are printed in passes along with the outer wall only with its filament.
+    const bool               with_inner_walls = pass_slices->walls > 1 &&
+                                                config.inner_wall_filament_id.value == config.outer_wall_filament_id.value;
+    OuterWallPassInnerWalls  inner_walls;
+    if (with_inner_walls) {
+        const Flow outer_flow = this->flow(frExternalPerimeter);
+        const Flow inner_flow = this->flow(frPerimeter);
+        inner_walls.pass_flow = this->flow(frPerimeter, pass_height);
+        // The distances the classic wall generator puts the walls at.
+        inner_walls.first_spacing = config.precise_outer_wall.value && config.wall_sequence.value == WallSequence::InnerOuter ?
+            0.5 * double(outer_flow.width() + inner_flow.width()) : 0.5 * double(outer_flow.spacing() + inner_flow.spacing());
+        inner_walls.spacing = double(inner_flow.spacing());
+    }
+    split_outer_wall_loops(this->perimeters, this->outer_wall_lower_passes, *pass_slices, this->layer()->lslices,
+                           this->flow(frExternalPerimeter, pass_height),
+                           this->layer()->object()->config().split_outer_wall_holes.value,
+                           with_inner_walls ? &inner_walls : nullptr);
 }
 
 #if 1
