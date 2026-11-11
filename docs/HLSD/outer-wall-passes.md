@@ -86,10 +86,11 @@ of the outlines, which has to be the edge the loop follows: the distance to
 `S_mid` and to every `S_k` is probed on both sides of the loop, and a loop whose
 outer side a probe contradicts or none confirms is left as it is. So is a loop the XY compensations moved
 beside another edge of the outlines, such as the hole of a thin wall they
-thickened. Where the loop runs along the border of another region of the layer,
-further inside the outline of the layer than half its width, it is neither
-offset nor checked: its passes are plain thin loops there. A loop with no part
-along the outline of the layer is left as it is. The top pass takes the place of the
+thickened. Where the outline of the layer does not lie half the wall width off
+the loop on its outer side, at a corner along the miter, the loop runs along the
+border of another region of the layer. There it is neither offset nor checked:
+its passes are plain thin loops. A loop with no part along the outline of the
+layer is left as it is. The top pass takes the place of the
 original loop in `LayerRegion::perimeters`. The passes below it are kept in
 `LayerRegion::outer_wall_lower_passes`, bottom pass first.
 

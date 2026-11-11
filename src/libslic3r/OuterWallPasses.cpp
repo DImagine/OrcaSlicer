@@ -148,16 +148,20 @@ bool make_passes(const ExtrusionLoop                 &loop,
             return 0;
         return (distance_left > distance_right) == (side > 0.) ? 1 : -1;
     };
-    // The middle of the outer wall runs half its width inside the outline of the layer where it follows the surface
-    // of the object. Further in it runs along the border of another region of the layer: there it is neither
-    // offset nor checked against the outlines, whose nearest edge is the far side of the object.
-    const double surface_reach  = scaled<double>(0.5 * nominal_width + 0.05);
+    // Where the outer wall follows the surface of the object, the outline of the layer lies half the wall width
+    // off its middle on its outer side, at a corner along the miter: the distance alone would take the corner of
+    // a hole, further from the outline than the sides of the loop, for something else. Where the outline is not
+    // there, the loop runs along the border of another region of the layer: it is neither offset nor checked
+    // against the outlines, whose nearest edge is the far side of the object.
+    const double surface_offset    = side * 0.5 * scaled<double>(nominal_width);
+    const double surface_tolerance = scaled<double>(0.05);
     for (LoopSample &sample : samples) {
         double surface_distance;
         Vec2d  surface_nearest;
-        if (! signed_distance(layer_outline, sample.point, surface_distance, surface_nearest))
+        if (! signed_distance(layer_outline, Point((sample.point.cast<double>() + surface_offset * sample.outward).cast<coord_t>()),
+                              surface_distance, surface_nearest))
             return false;
-        if (surface_distance > surface_reach) {
+        if (std::abs(surface_distance) > surface_tolerance) {
             sample.offsets.assign(num_passes, 0.);
             continue;
         }

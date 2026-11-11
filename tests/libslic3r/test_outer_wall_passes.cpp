@@ -44,14 +44,18 @@ ExPolygon square(double side, double hole_side = 0.)
 const double min_width = 0.4;
 const double max_width = 0.6;
 
-// Outer wall of the nominal width as one loop along a square of the given side, counter-clockwise.
-ExtrusionEntityCollection wall_loop(double side)
+// Outer wall of the nominal width as one loop along a square of the given side: counter-clockwise around
+// a contour, clockwise around a hole.
+ExtrusionEntityCollection wall_loop(double side, bool hole = false)
 {
     const coord_t half = scaled<coord_t>(0.5 * side);
+    Points        points { Point(-half, -half), Point(half, -half), Point(half, half), Point(-half, half) };
+    if (hole)
+        std::reverse(points.begin(), points.end());
+    points.emplace_back(points.front());
     ExtrusionPath path(erExternalPerimeter, 0.1, float(0.5 * (min_width + max_width)), 0.2f);
-    path.polyline = Polyline3(Polyline(Points{ Point(-half, -half), Point(half, -half), Point(half, half), Point(-half, half),
-                                               Point(-half, -half) }));
-    ExtrusionLoop loop(path);
+    path.polyline = Polyline3(Polyline(std::move(points)));
+    ExtrusionLoop loop(path, hole ? elrHole : elrDefault);
     loop.inset_idx = 0;
     ExtrusionEntityCollection out;
     out.append(loop);
@@ -155,6 +159,29 @@ TEST_CASE("A loop along the border of another region is split, but not offset th
     }
     REQUIRE_THAT(surface_x, WithinAbs(-9.7625, 0.003));
     REQUIRE_THAT(border_x, WithinAbs(9.75, 0.003));
+}
+
+TEST_CASE("The corners of the wall of a hole follow the hole", "[OuterWallPasses]")
+{
+    // A square hole of 8 mm widening upwards by 0.25 mm a side per pass, in a square of 20 mm. The wall of the
+    // hole runs along a square of 8.5 mm, its corners further from the corners of the hole than its sides from
+    // the sides of the hole.
+    OuterWallPassSlices slices;
+    slices.mid       = { square(20., 8.) };
+    slices.passes    = { { square(20., 7.5) }, { square(20., 8.5) } };
+    slices.min_width = 0.2;
+    slices.max_width = 0.8;
+    REQUIRE(outer_wall_passes_fit(slices.mid, slices.passes, slices.min_width, slices.max_width, true));
+    ExtrusionEntityCollection              perimeters = wall_loop(8.5, true);
+    std::vector<ExtrusionEntityCollection> lower_passes;
+    split_outer_wall_loops(perimeters, lower_passes, slices, { square(20., 8.) }, Flow(0.5f, 0.1f, 0.4f), true);
+    REQUIRE(lower_passes.size() == 1);
+    REQUIRE(lower_passes.front().entities.size() == 1);
+    // The low pass is 0.75 mm wide, its middle 0.125 mm nearer to the middle of the hole: at the corners as well.
+    double reach = 0.;
+    for (const Point &point : static_cast<const ExtrusionLoop*>(lower_passes.front().entities.front())->polygon().points)
+        reach = std::max(reach, std::max(std::abs(unscaled<double>(point.x())), std::abs(unscaled<double>(point.y()))));
+    REQUIRE_THAT(reach, WithinAbs(4.125, 0.003));
 }
 
 TEST_CASE("Holes count only when asked for", "[OuterWallPasses]")
