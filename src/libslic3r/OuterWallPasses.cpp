@@ -50,53 +50,70 @@ bool signed_distance(const OutlineDistancer &outline, const Point &point, double
     return true;
 }
 
-// Whether two lines of an outline belong to one ring of it, a contour or a hole: the lines of a ring follow one
-// another.
-bool same_ring(const OutlineDistancer &outline, size_t line_a, size_t line_b)
+// The ring, a contour or a hole, of every line of an outline, in the order of to_lines().
+std::vector<size_t> rings_of_lines(const ExPolygons &outline)
 {
-    if (line_a > line_b)
-        std::swap(line_a, line_b);
-    for (size_t line = line_a; line < line_b; ++ line)
-        if (outline.get_line(line).b != outline.get_line(line + 1).a)
-            return false;
-    return true;
+    std::vector<size_t> rings;
+    size_t              ring = 0;
+    for (const ExPolygon &expoly : outline)
+        for (size_t i = 0; i <= expoly.holes.size(); ++ i, ++ ring)
+            rings.insert(rings.end(), (i == 0 ? expoly.contour : expoly.holes[i - 1]).points.size(), ring);
+    return rings;
 }
 
-// Where the material of an outline ends on the way out of it from a point, in the units of the outward vector:
-// the crossing nearest to the expected one between the given two, on the ring of the given line only. Finds the
-// edge a loop follows where another edge of the same ring is nearer to the point. Returns false if the material
-// does not end there.
-bool edge_on_way_out(const OutlineDistancer &outline, size_t ring_line, const Vec2d &point, const Vec2d &outward, double expected,
-                     double lowest, double highest, double &at)
+// Where the material of an outline ends on the way out of it from a point, in the units of the outward vector,
+// between the given two. Finds the edge a loop follows where another edge of the same ring is nearer to the point:
+// the material has to end there once only, on the given ring. Returns false otherwise.
+bool edge_on_way_out(const OutlineDistancer &outline, const std::vector<size_t> &rings, size_t ring, const Vec2d &point,
+                     const Vec2d &outward, double lowest, double highest, double &at)
 {
     const Line way(Point((point + lowest * outward).cast<coord_t>()), Point((point + highest * outward).cast<coord_t>()));
-    // Where the way crosses the ring and whether the material ends there.
-    std::vector<std::pair<double, bool>> crossings;
+    // Crossings of the way with the outline.
+    struct Crossing
+    {
+        size_t ring;
+        double at;
+        // Whether the material ends there, and whether the way goes through an end of the edge.
+        bool   out;
+        bool   vertex;
+        bool operator<(const Crossing &rhs) const { return this->ring < rhs.ring || (this->ring == rhs.ring && this->at < rhs.at); }
+    };
+    const double          same_point = scaled<double>(0.0001);
+    std::vector<Crossing> crossings;
     for (const auto &[crossing, line_idx] : outline.intersections_with_line<false>(way)) {
         // The material lies to the left of an edge of the outlines: it ends where the way out leaves to the right.
         const Line  &edge = outline.get_line(line_idx);
         const Vec2d  dir  = (edge.b - edge.a).cast<double>();
         const double turn = dir.x() * outward.y() - dir.y() * outward.x();
-        if (turn != 0. && same_ring(outline, line_idx, ring_line))
-            crossings.emplace_back((crossing.cast<double>() - point).dot(outward) / outward.squaredNorm(), turn < 0.);
+        if (turn == 0.)
+            continue;
+        const Vec2d where = crossing.cast<double>();
+        crossings.push_back({ rings[line_idx], (where - point).dot(outward) / outward.squaredNorm(), turn < 0.,
+                              (where - edge.a.cast<double>()).norm() <= same_point || (where - edge.b.cast<double>()).norm() <= same_point });
     }
     std::sort(crossings.begin(), crossings.end());
-    const double same_point = scaled<double>(0.0001) / outward.norm();
-    bool         found      = false;
+    size_t ways_out = 0;
     for (size_t begin = 0; begin < crossings.size();) {
         // Through a vertex the way crosses both its edges at one point. Where it only touches the vertex, it leaves
         // the material and enters it at once: that is no way out.
         size_t end  = begin;
         int    ends = 0;
-        for (; end < crossings.size() && crossings[end].first - crossings[begin].first <= same_point; ++ end)
-            ends += crossings[end].second ? 1 : -1;
-        if (ends > 0 && (! found || std::abs(crossings[begin].first - expected) < std::abs(at - expected))) {
-            at    = crossings[begin].first;
-            found = true;
+        for (; end < crossings.size() && crossings[end].ring == crossings[begin].ring &&
+               (crossings[end].at - crossings[begin].at) * outward.norm() <= same_point; ++ end)
+            ends += crossings[end].out ? 1 : -1;
+        // A vertex crossed along one of its edges only: the other one runs along the way, which tells nothing.
+        if (end == begin + 1 && crossings[begin].vertex)
+            return false;
+        if (ends > 0) {
+            // A hole, a notch or another part beside the wall gives the way more than one end of the material, or
+            // one on another ring: which of them the loop follows is not known.
+            if (++ ways_out > 1 || crossings[begin].ring != ring)
+                return false;
+            at = crossings[begin].at;
         }
         begin = end;
     }
-    return found;
+    return ways_out == 1;
 }
 
 // Point of a wall loop the passes are derived from.
@@ -175,6 +192,8 @@ bool sample_loop(WallLoop                            &wall_loop,
                  const OutlineDistancer              &layer_outline,
                  const OutlineDistancer              &mid_outline,
                  const std::vector<OutlineDistancer> &pass_outlines,
+                 const std::vector<size_t>           &mid_rings,
+                 const std::vector<std::vector<size_t>> &pass_rings,
                  bool                                 with_holes)
 {
     const ExtrusionLoop &loop          = wall_loop.loop();
@@ -327,20 +346,20 @@ bool sample_loop(WallLoop                            &wall_loop,
                 return refuse("no_pass_distance");
             // The nearest edge may be another one in the outline of a pass only. Where it is the far side of a part
             // tapering off, the same ring of the outline coming round, the edge the loop follows is looked up on
-            // the way out of the material, in the middle outline as well, as far as the walls may move it. A loop
-            // beside an edge of another ring, a hole or another part, or with no edge on the way out is left as it
-            // is: which edge it follows there is not known.
+            // the way out of the material, in the middle outline as well, as far as the walls may move it. The
+            // planning keeps the edge within that, so the only end of the material there is the one the loop
+            // follows. A loop beside an edge of another ring, a hole or another part, or with none or several ends
+            // of the material on the way out is left as it is: which edge it follows there is not known.
             if (outline_side(pass_outline, measured_at, sample.outward) < 0) {
-                const Vec2d  way_out   = side * sample.outward;
-                const Point  from(measured_at.cast<coord_t>());
-                const size_t mid_line  = std::get<1>(mid_outline.distance_from_lines_extra<false>(from));
-                const size_t pass_line = std::get<1>(pass_outline.distance_from_lines_extra<false>(from));
-                double       mid_at    = 0.;
-                double       pass_at   = 0.;
-                if (! edge_on_way_out(mid_outline, mid_line, measured_at, way_out, mid_distance, 0., 4. * mid_distance + edge_tolerance,
-                                      mid_at) ||
-                    ! edge_on_way_out(pass_outline, pass_line, measured_at, way_out, mid_at, mid_at - most_inwards, mid_at + most_outwards,
-                                      pass_at))
+                const Vec2d                way_out = side * sample.outward;
+                const Point                from(measured_at.cast<coord_t>());
+                const std::vector<size_t> &rings   = pass_rings[&pass_outline - pass_outlines.data()];
+                double                     mid_at  = 0.;
+                double                     pass_at = 0.;
+                if (! edge_on_way_out(mid_outline, mid_rings, mid_rings[std::get<1>(mid_outline.distance_from_lines_extra<false>(from))],
+                                      measured_at, way_out, 0., 4. * mid_distance + edge_tolerance, mid_at) ||
+                    ! edge_on_way_out(pass_outline, rings, rings[std::get<1>(pass_outline.distance_from_lines_extra<false>(from))],
+                                      measured_at, way_out, mid_at - most_inwards, mid_at + most_outwards, pass_at))
                     return refuse("pass_side");
                 sample.offsets.emplace_back(pass_at - mid_at);
                 continue;
@@ -580,6 +599,12 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
     pass_outlines.reserve(num_passes);
     for (const ExPolygons &pass : slices.passes)
         pass_outlines.emplace_back(to_lines(pass));
+    // The rings of the lines of these outlines.
+    const std::vector<size_t>        mid_rings = rings_of_lines(slices.mid);
+    std::vector<std::vector<size_t>> pass_rings;
+    pass_rings.reserve(num_passes);
+    for (const ExPolygons &pass : slices.passes)
+        pass_rings.emplace_back(rings_of_lines(pass));
 
     // The walls printed in passes: the outer wall of the nominal width and the inner walls behind it.
     WallSet      walls;
@@ -602,7 +627,8 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
     std::vector<WallLoop> wall_loops;
     collect_wall_loops(perimeters, num_walls, wall_loops);
     for (WallLoop &wall_loop : wall_loops)
-        wall_loop.valid = sample_loop(wall_loop, walls, slices, layer_outline_lines, mid_outline, pass_outlines, with_holes);
+        wall_loop.valid = sample_loop(wall_loop, walls, slices, layer_outline_lines, mid_outline, pass_outlines, mid_rings, pass_rings,
+                                      with_holes);
     // The walls share the offsets only with the walls printed in passes: once a loop drops out, the shares of the
     // loops beside it change.
     for (bool changed = true; changed;) {

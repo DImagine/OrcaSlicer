@@ -94,11 +94,13 @@ outer side a probe of `S_mid` contradicts or none confirms is left as it is.
 Where only a probe of some `S_k` contradicts it, another edge is nearest in the
 outline of that pass. If that is the far side of a part tapering off, the same
 ring of the outline coming round, the edge the loop follows is looked up along
-the way out of the material: where the material ends on that ring, nearest to
-where that of `S_mid` does, no further than all the walls may move the edge.
-The offset is the difference of the two. A loop beside an edge of another ring,
-a hole or another part of the model, or with no edge on the way out, is left as
-it is: which edge it follows there is not known. So is a loop the XY compensations moved
+the way out of the material: where the material ends, no further from where
+that of `S_mid` does than all the walls may move the edge. The planning keeps
+the edge within that, so the material has to end there once only, and on that
+ring. The offset is the difference of the two. A loop beside an edge of another
+ring, a hole or another part of the model, or with none or several ends of the
+material on the way out, as beside a notch, is left as it is: which edge it
+follows there is not known. So is a loop the XY compensations moved
 beside another edge of the outlines, such as the hole of a thin wall they
 thickened. Where the outline of the layer does not lie half the wall width off
 the loop on its outer side, at a corner along the miter, the loop is taken to

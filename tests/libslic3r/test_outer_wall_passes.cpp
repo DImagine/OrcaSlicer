@@ -140,12 +140,13 @@ TEST_CASE("A loop is split only along the edge of the outlines it follows", "[Ou
 {
     // Number of the low passes made of a wall loop running along a square of 19.5 mm, for the outline of the layer
     // the wall was generated in and the outlines of the model at the middle of the layer and of its two passes.
-    auto low_passes = [](const ExPolygon &layer, const ExPolygon &mid, const ExPolygon &low, const ExPolygon &high) {
+    auto low_passes = [](const ExPolygon &layer, const ExPolygon &mid, const ExPolygon &low, const ExPolygon &high,
+                         double narrowest = min_width, double widest = max_width) {
         OuterWallPassSlices slices;
         slices.mid       = { mid };
         slices.passes    = { { low }, { high } };
-        slices.min_width = min_width;
-        slices.max_width = max_width;
+        slices.min_width = narrowest;
+        slices.max_width = widest;
         ExtrusionEntityCollection              perimeters = wall_loop(19.5);
         std::vector<ExtrusionEntityCollection> lower_passes;
         split_outer_wall_loops(perimeters, lower_passes, slices, { layer }, Flow(0.5f, 0.1f, 0.4f), true);
@@ -177,6 +178,24 @@ TEST_CASE("A loop is split only along the edge of the outlines it follows", "[Ou
         return out;
     };
     REQUIRE(low_passes(square(20.), leaning(0.), leaning(0.2), leaning(-0.2)) == 0);
+    // A square moving by 0.2 mm per pass along X, the passes 0.2 to 0.8 mm wide. A hole 0.03 mm wide in the low
+    // pass lies 0.01 mm off the loop: the material ends on the way out at the far side of the hole and at the
+    // side of the square.
+    auto moved = [](double shift) {
+        ExPolygon out = square(20.);
+        out.translate(Point(scaled<coord_t>(shift), 0));
+        return out;
+    };
+    auto point = [](double x, double y) { return Point(scaled<coord_t>(x), scaled<coord_t>(y)); };
+    ExPolygon pinhole = moved(0.2);
+    pinhole.holes.emplace_back(Polygon({ point(9.71, 0.15), point(9.71, 0.35), point(9.74, 0.35), point(9.74, 0.15) }));
+    REQUIRE(low_passes(square(20.), square(20.), moved(0.2), moved(-0.2), 0.2, 0.8) == 1);
+    REQUIRE(low_passes(square(20.), square(20.), pinhole, moved(-0.2), 0.2, 0.8) == 0);
+    // A notch of the low pass open to the right side of the square above the point of the loop it runs behind:
+    // one ring, and the material ends on the way out at the back of the notch and at the side of the square.
+    const ExPolygon notch(Polygon({ point(-9.8, -10.), point(10.2, -10.), point(10.2, 0.45), point(9.72, 0.45), point(9.72, 0.15),
+                                    point(9.67, 0.15), point(9.67, 0.55), point(10.2, 0.55), point(10.2, 10.), point(-9.8, 10.) }));
+    REQUIRE(low_passes(square(20.), square(20.), notch, moved(-0.2), 0.2, 0.8) == 0);
 }
 
 TEST_CASE("A wall follows its edge beside the far side of a part tapering off", "[OuterWallPasses]")
