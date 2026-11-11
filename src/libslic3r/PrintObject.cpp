@@ -1598,7 +1598,8 @@ bool PrintObject::invalidate_state_by_config_options(
             steps.emplace_back(posSlice);
         } else if (m_config.split_outer_wall.value &&
                    (opt_key == "fuzzy_skin" || opt_key == "outer_wall_filament_id" || opt_key == "enable_support" ||
-                    opt_key == "support_filament" || opt_key == "support_interface_filament")) {
+                    opt_key == "enforce_support_layers" || opt_key == "support_filament" ||
+                    opt_key == "support_interface_filament")) {
             // Orca: the outer wall printed in thin passes is planned with the layers. Fuzzy skin rules it out,
             // the nozzle of the outer wall gives its widths in percent, and the nozzles of the object and of its
             // supports the minimum layer height. Checked ahead of the branches of these keys below.

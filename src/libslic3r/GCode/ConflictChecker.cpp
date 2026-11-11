@@ -185,6 +185,9 @@ ExtrusionLayers getExtrusionPathsFromLayer(const LayerRegionPtrs layerRegionPtrs
         perimeters[i].bottom_z = regionPtr->layer()->bottom_z();
         perimeters[i].height   = regionPtr->layer()->height;
         getExtrusionPathsFromEntity(&regionPtr->perimeters, perimeters[i].paths);
+        // Orca: the lower passes of a split outer wall, printed within the height of the layer.
+        for (const ExtrusionEntityCollection &pass : regionPtr->outer_wall_lower_passes)
+            getExtrusionPathsFromEntity(&pass, perimeters[i].paths);
         getExtrusionPathsFromEntity(&regionPtr->fills, perimeters[i].paths);
         ++i;
     }

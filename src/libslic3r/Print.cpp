@@ -2653,15 +2653,19 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 const std::vector<coordf_t> layers = generate_object_layers(object.slicing_parameters(), layer_height_profile(print_object_idx),
                                                                             object.config().precise_z_height.value);
                 const coordf_t              zmin   = object.slicing_parameters().object_print_z_min;
+                double                      min_width = 0.;
+                double                      max_width = 0.;
                 const size_t                splits = object.outer_wall_passes_enabled() &&
-                    object.config().split_outer_wall_fallback.value == SplitOuterWallFallback::SplitLayer ?
+                    object.config().split_outer_wall_fallback.value == SplitOuterWallFallback::SplitLayer &&
+                    object.outer_wall_pass_width_range(min_width, max_width) ?
                     size_t(object.config().split_outer_wall_count.value) : 1;
                 tops.planned.reserve(layers.size() / 2);
                 for (size_t i = 1; i < layers.size(); i += 2) {
                     tops.planned.emplace_back(layers[i] + zmin);
-                    // The first layer is never split.
-                    for (size_t split = 1; i > 1 && split < splits; ++ split)
-                        tops.possible.emplace_back(layers[i - 1] + (layers[i] - layers[i - 1]) * coordf_t(split) / coordf_t(splits) + zmin);
+                    // Only a layer the planner takes for a candidate may be split.
+                    if (splits > 1 && object.outer_wall_pass_candidate(i / 2, layers[i] - layers[i - 1], min_width, max_width))
+                        for (size_t split = 1; split < splits; ++ split)
+                            tops.possible.emplace_back(layers[i - 1] + (layers[i] - layers[i - 1]) * coordf_t(split) / coordf_t(splits) + zmin);
                     tops.possible.emplace_back(layers[i] + zmin);
                 }
             }

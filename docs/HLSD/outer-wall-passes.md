@@ -19,8 +19,9 @@ A layer that does not fit is either split into `n` regular thin layers or printe
 the regular way (`split_outer_wall_fallback`).
 
 Only the classic wall generator is supported. The option is off with the spiral
-vase mode, a raft, fuzzy skin, Z contouring, objects painted with several
-filaments and belt printers; `Print::validate()` warns about it.
+vase mode, a raft, fuzzy skin, Z contouring, Make overhang printable, objects
+painted with several filaments and belt printers; `Print::validate()` warns
+about it. Make overhang printable reshapes the layers after they are planned.
 
 ## Geometry
 
@@ -37,7 +38,9 @@ For a layer between `lo` and `hi`:
 
 The layer fits if `-(W_nom - W_min) <= d_k <= W_max - W_nom` holds along the
 whole outline for every pass (`outer_wall_passes_fit()`). A part appearing or
-vanishing between the passes does not fit. With `D = W_max - W_min` the steepest
+vanishing between the passes does not fit, as far as it reaches out of the band
+the widths allow. A change of the outline within that band, such as a narrow gap
+closing, is not told from a slope. With `D = W_max - W_min` the steepest
 slope that fits is `atan((n - 1) * (h / n) / D)` from the horizontal, about 21°
 for a 0.2 mm layer in two passes and the default range of a 0.4 mm nozzle.
 
@@ -51,12 +54,15 @@ produced, which carries the compensations.
 generating the object layers and slicing the volumes. It slices the outlines of
 every candidate layer, applies the criterion and returns the object layers, with
 the layers that do not fit split in `n` if configured so. A layer printed in
-passes keeps its slices in `Layer::outer_wall_pass_slices`.
+passes keeps its slices in `Layer::outer_wall_pass_slices`. The outlines are put
+together from the volumes in the order of the model, a negative volume cutting
+the parts ahead of it only, the way the regions of a layer are.
 
 The first layer, the layers shrunk by the elephant foot compensation and the
 layers whose pass would be thinner than the minimum layer height of the printer
 are not candidates. Neither is a layer whose narrowest pass would not be wider
-than the pass is high, or whose nominal width would not exceed the layer height.
+than the pass is high, or whose nominal width would not exceed the layer height
+(`PrintObject::outer_wall_pass_candidate()`, shared with `Print::validate()`).
 
 The layer itself is sliced as usual, at its middle. Everything but the outer
 wall is generated from that slice.
@@ -74,7 +80,9 @@ regions are cut away: a cut wall is not a loop any more and stays as it is.
 `split_outer_wall_loops()` replaces every loop of the outer wall
 (`OuterWallPasses.cpp`): the loop is sampled, the offsets `d_k` are measured at
 the samples as differences of signed distances to `S_k` and `S_mid`, and each
-pass is built as a variable width loop. The top pass takes the place of the
+pass is built as a variable width loop. The outer side of the loop is found by
+probing the distance to `S_mid` on both sides of it; a loop that does not tell
+is left as it is. The top pass takes the place of the
 original loop in `LayerRegion::perimeters`. The passes below it are kept in
 `LayerRegion::outer_wall_lower_passes`, bottom pass first.
 
@@ -93,8 +101,8 @@ descends on the travel to a pass the way it does at a layer change and returns
 to the layer height afterwards. The Z offset of the printer is kept.
 
 All the passes of an outer wall start at the same point: the seam is placed once
-and looked up by the first point of the stored loop. A scarf joint is not used on
-the passes, as it would start inside the pass below.
+and looked up by the layer of the object and the first point of the stored loop.
+A scarf joint is not used on the passes, as it would start inside the pass below.
 
 The overhang speed and cooling of a pass are measured against what it leans on:
 the pass below it, and for the lowest pass the top pass of the layer below, or
@@ -107,7 +115,12 @@ On a layer with passes the filament of the split outer walls is printed first
 (`LayerTools::outer_wall_passes_region`, the wrapper of `get_custom_seq` in
 `ToolOrdering::reorder_extruders_for_minimum_flush_volume()` and
 `enforce_outer_wall_passes_order()`). A support interface of another filament
-would otherwise stand at the full layer height beside the passes.
+would otherwise stand at the full layer height beside the passes. A filament
+sequence of the user that leaves that filament out gets it back in front.
+
+The price: the tool order cannot alternate from layer to layer any more. With a
+support or an interface of another filament on every layer the filament changes
+about double, and the purged filament and the time with them.
 
 Nothing of such a layer is offered for wiping into the object
 (`WipingExtrusions::is_overriddable()`): the walls keep their filament, and an
@@ -167,6 +180,9 @@ out, as it is with a prime tower.
 - The criterion offsets the middle outline with a miter limit, so a sloped layer
   with a convex corner sharper than about 30° to 40° may be taken for not
   fitting. This only sends the layer to the fallback.
+- A prime tower of type 1 on a printer without a tool change G-code primes the
+  nozzle beside the object and travels to the tower at the layer height, as it
+  does without the option; a lower pass may then be printed below that thread.
 
 ## Tests
 

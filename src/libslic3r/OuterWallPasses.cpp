@@ -122,14 +122,23 @@ bool make_passes(const ExtrusionLoop                 &loop,
     // Measure the offsets of the pass outlines and find out, which side of the loop the material is on.
     const double min_offset = scaled<double>(slices.min_width - nominal_width);
     const double max_offset = scaled<double>(slices.max_width - nominal_width);
+    // The distance from the middle outline, positive inside, falls towards the outside. It is probed on both sides
+    // of the loop, which tells the outer side even of a loop running along the outline itself, as it does with
+    // an XY size compensation of half the wall width.
+    const double side_probe = scaled<double>(0.05);
     double       side_votes = 0.;
     for (LoopSample &sample : samples) {
         double mid_distance;
         Vec2d  mid_nearest;
         if (! signed_distance(mid_outline, sample.point, mid_distance, mid_nearest))
             return false;
-        if (const Vec2d to_outline = mid_nearest - sample.point.cast<double>(); to_outline.norm() > scaled<double>(0.01))
-            side_votes += (mid_distance >= 0. ? 1. : -1.) * to_outline.normalized().dot(sample.outward);
+        const Vec2d right = side_probe * sample.outward.normalized();
+        double      distance_right;
+        double      distance_left;
+        if (signed_distance(mid_outline, Point((sample.point.cast<double>() + right).cast<coord_t>()), distance_right, mid_nearest) &&
+            signed_distance(mid_outline, Point((sample.point.cast<double>() - right).cast<coord_t>()), distance_left, mid_nearest) &&
+            std::abs(distance_left - distance_right) > 0.5 * side_probe)
+            side_votes += distance_left > distance_right ? 1. : -1.;
         sample.offsets.reserve(num_passes);
         for (const OutlineDistancer &pass_outline : pass_outlines) {
             double pass_distance;
@@ -139,8 +148,11 @@ bool make_passes(const ExtrusionLoop                 &loop,
             sample.offsets.emplace_back(std::clamp(pass_distance - mid_distance, min_offset, max_offset));
         }
     }
+    // The samples do not tell the outer side of the loop: it stays as it is.
+    if (side_votes == 0.)
+        return false;
     // The normals point to the right of the loop. Flip them if the material is there.
-    const double side = side_votes >= 0. ? 1. : -1.;
+    const double side = side_votes > 0. ? 1. : -1.;
     // A loop with the material outside of it runs around a hole.
     if (! with_holes && (side > 0.) != polygon.is_counter_clockwise())
         return false;

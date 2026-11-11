@@ -3113,7 +3113,17 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume(bool reorder_first
             std::transform(out_seq.begin(), out_seq.end(), std::back_inserter(ordered), [](int item) { return (unsigned int)(item - 1); });
         else
             ordered = layer_filaments[size_t(layer_idx)];
-        if (! m_layer_tools[size_t(layer_idx)].outer_wall_passes_first(ordered))
+        const LayerTools &layer_tools = m_layer_tools[size_t(layer_idx)];
+        if (custom && layer_tools.outer_wall_passes_region != nullptr) {
+            // A sequence of the user that leaves the filament of the split outer walls out would print the other
+            // filaments at the layer height ahead of the lower passes. The filament is put back, if the layer uses it.
+            const unsigned int wall_filament = layer_tools.wall_extruder_id(*layer_tools.outer_wall_passes_region);
+            const auto        &used          = layer_filaments[size_t(layer_idx)];
+            if (std::find(ordered.begin(), ordered.end(), wall_filament) == ordered.end() &&
+                std::find(used.begin(), used.end(), wall_filament) != used.end())
+                ordered.insert(ordered.begin(), wall_filament);
+        }
+        if (! layer_tools.outer_wall_passes_first(ordered))
             return custom;
         out_seq.resize(ordered.size());
         std::transform(ordered.begin(), ordered.end(), out_seq.begin(), [](unsigned int item) { return int(item) + 1; });

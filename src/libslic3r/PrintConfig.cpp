@@ -4433,7 +4433,9 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Quality");
     def->tooltip  = L("Print the outer wall of every layer in several thin passes, so the outer surface looks like a print "
                       "with a thinner layer height. Inner walls and infill are printed after the outer wall at the full "
-                      "layer height. The outer edge of every pass follows the model at the height of that pass.");
+                      "layer height. The outer edge of every pass follows the model at the height of that pass.\n\n"
+                      "A scarf seam is not used on the passes. With several filaments the filament of the outer wall "
+                      "is printed first on every layer with passes, which may add filament changes.");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -10619,7 +10621,8 @@ t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int us
             const auto *raft   = this->option<ConfigOptionInt>("raft_layers");
             const auto *zaa    = this->option<ConfigOptionBool>("zaa_enabled");
             const auto *fuzzy  = this->option<ConfigOptionEnum<FuzzySkinType>>("fuzzy_skin");
-            return split != nullptr && split->value &&
+            const auto *cone   = this->option<ConfigOptionBool>("make_overhang_printable");
+            return split != nullptr && split->value && ! (cone != nullptr && cone->value) &&
                    walls != nullptr && walls->value == PerimeterGeneratorType::Classic &&
                    ! (spiral != nullptr && spiral->value) && ! (belt != nullptr && belt->value) &&
                    ! (raft != nullptr && raft->value > 0) && ! (zaa != nullptr && zaa->value) &&

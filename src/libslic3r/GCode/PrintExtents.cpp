@@ -125,6 +125,9 @@ BoundingBoxf get_print_object_extrusions_extents(const PrintObject &print_object
         BoundingBoxf bbox_this;
         for (const LayerRegion *layerm : layer->regions()) {
             bbox_this.merge(extrusionentity_extents(layerm->perimeters));
+            // Orca: the lower passes of a split outer wall may reach further out than its top pass among the perimeters.
+            for (const ExtrusionEntityCollection &pass : layerm->outer_wall_lower_passes)
+                bbox_this.merge(extrusionentity_extents(pass));
             for (const ExtrusionEntity *ee : layerm->fills.entities)
                 // fill represents infill extrusions of a single island.
                 bbox_this.merge(extrusionentity_extents(*dynamic_cast<const ExtrusionEntityCollection*>(ee)));

@@ -273,8 +273,8 @@ static std::vector<VolumeSlices> slice_volumes_inner(
     return out;
 }
 
-// Orca: outlines of the object at the given heights: the model parts less the negative volumes, without the size
-// compensations. Used to plan the passes of a split outer wall, see OuterWallPasses.hpp.
+// Orca: outlines of the object at the given heights: the model parts less the negative volumes that follow them,
+// without the size compensations. Used to plan the passes of a split outer wall, see OuterWallPasses.hpp.
 static std::vector<ExPolygons> slice_object_outlines(
     const PrintObject                                        &print_object,
     const std::vector<PrintObjectRegions::LayerRangeRegions> &layer_ranges,
@@ -291,21 +291,33 @@ static std::vector<ExPolygons> slice_object_outlines(
         [&](const tbb::blocked_range<size_t> &range) {
             for (size_t z_idx = range.begin(); z_idx < range.end(); ++ z_idx) {
                 throw_on_cancel_callback();
+                // The volumes are taken in the order of the model: a negative volume cuts the parts ahead of it
+                // only, as it does where the regions of a layer are put together, see slices_to_regions().
+                ExPolygons outline;
                 ExPolygons parts;
-                ExPolygons negatives;
-                for (const VolumeSlices &slices : volume_slices) {
-                    if (z_idx >= slices.slices.size() || slices.slices[z_idx].empty())
+                auto merge_parts = [&outline, &parts]() {
+                    if (! parts.empty()) {
+                        append(parts, std::move(outline));
+                        outline = union_ex(parts);
+                        parts.clear();
+                    }
+                };
+                for (const ModelVolume *model_volume : model_volumes) {
+                    if (! model_volume->is_model_part() && ! model_volume->is_negative_volume())
                         continue;
-                    const auto volume = std::find_if(model_volumes.begin(), model_volumes.end(),
-                        [&slices](const ModelVolume *model_volume) { return model_volume->id() == slices.volume_id; });
-                    if (volume == model_volumes.end())
+                    const auto slices = std::find_if(volume_slices.begin(), volume_slices.end(),
+                        [model_volume](const VolumeSlices &volume) { return volume.volume_id == model_volume->id(); });
+                    if (slices == volume_slices.end() || z_idx >= slices->slices.size() || slices->slices[z_idx].empty())
                         continue;
-                    if ((*volume)->is_model_part())
-                        append(parts, slices.slices[z_idx]);
-                    else if ((*volume)->is_negative_volume())
-                        append(negatives, slices.slices[z_idx]);
+                    if (model_volume->is_model_part())
+                        append(parts, slices->slices[z_idx]);
+                    else {
+                        merge_parts();
+                        outline = diff_ex(outline, slices->slices[z_idx]);
+                    }
                 }
-                outlines[z_idx] = negatives.empty() ? union_ex(parts) : diff_ex(parts, negatives);
+                merge_parts();
+                outlines[z_idx] = std::move(outline);
             }
         });
     return outlines;
@@ -338,6 +350,9 @@ bool PrintObject::outer_wall_passes_enabled(std::string *why_not) const
         const FuzzySkinType fuzzy_skin = region_config.fuzzy_skin.value;
         if (region_config.zaa_enabled.value)
             reason = L("Split outer wall is not applied: it is not supported with Z contouring.");
+        // Make overhang printable reshapes the layers after they are planned, by the nominal layer height.
+        else if (region_config.make_overhang_printable.value)
+            reason = L("Split outer wall is not applied: it is not supported with Make overhang printable.");
         else if (fuzzy_skin != FuzzySkinType::None && fuzzy_skin != FuzzySkinType::Disabled_fuzzy)
             reason = L("Split outer wall is not applied: it is not supported with fuzzy skin.");
     }
@@ -361,6 +376,22 @@ bool PrintObject::outer_wall_pass_width_range(double &min_width, double &max_wid
     return min_width > 0. && max_width >= min_width;
 }
 
+bool PrintObject::outer_wall_pass_candidate(size_t layer_idx, coordf_t layer_height, double min_width, double max_width) const
+{
+    // The first layer and the layers shrunk by the elephant foot compensation are printed the regular way.
+    size_t first_candidate = 1;
+    if (m_config.elefant_foot_compensation.value > 0.)
+        first_candidate = std::max(first_candidate, size_t(std::max(0, m_config.elefant_foot_compensation_layers.value)));
+    if (layer_idx < first_candidate)
+        return false;
+    const coordf_t pass_height = layer_height / coordf_t(m_config.split_outer_wall_count.value);
+    if (pass_height < m_slicing_params.min_layer_height - EPSILON)
+        return false;
+    // A line has to be wider than it is high: the narrowest pass at the pass height, and the outer wall
+    // of the nominal width the wall generator works with at the layer height.
+    return min_width > pass_height && 0.5 * (min_width + max_width) > layer_height;
+}
+
 std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t>                                     object_layers,
                                                           std::vector<std::shared_ptr<const OuterWallPassSlices>> &pass_slices) const
 {
@@ -375,11 +406,6 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
     const size_t num_passes = size_t(m_config.split_outer_wall_count.value);
     const bool   with_holes = m_config.split_outer_wall_holes.value;
 
-    // The first layer and the layers shrunk by the elephant foot compensation are printed the regular way.
-    size_t first_candidate = 1;
-    if (m_config.elefant_foot_compensation.value > 0.)
-        first_candidate = std::max(first_candidate, size_t(std::max(0, m_config.elefant_foot_compensation_layers.value)));
-
     // Slice the outline of each candidate layer at the middle of each pass and at the middle of the layer.
     // With an odd number of passes the middle pass is sliced at the middle of the layer.
     const size_t        num_layers       = object_layers.size() / 2;
@@ -387,15 +413,11 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
     const size_t        zs_per_candidate = num_passes + (separate_mid ? 1 : 0);
     std::vector<size_t> candidates;
     std::vector<float>  zs;
-    for (size_t layer_idx = first_candidate; layer_idx < num_layers; ++ layer_idx) {
+    for (size_t layer_idx = 0; layer_idx < num_layers; ++ layer_idx) {
         const coordf_t lo          = object_layers[2 * layer_idx];
         const coordf_t hi          = object_layers[2 * layer_idx + 1];
         const coordf_t pass_height = (hi - lo) / coordf_t(num_passes);
-        if (pass_height < m_slicing_params.min_layer_height - EPSILON)
-            continue;
-        // A line has to be wider than it is high: the narrowest pass at the pass height, and the outer wall
-        // of the nominal width the wall generator works with at the layer height.
-        if (min_width <= pass_height || 0.5 * (min_width + max_width) <= hi - lo)
+        if (! this->outer_wall_pass_candidate(layer_idx, hi - lo, min_width, max_width))
             continue;
         candidates.emplace_back(layer_idx);
         for (size_t pass = 0; pass < num_passes; ++ pass) {

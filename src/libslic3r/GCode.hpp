@@ -942,9 +942,10 @@ protected:
     // reports that sub-height as the effective extrusion height. Reset to 0 afterwards.
     double   m_sub_layer_flow_ratio = 0.0;
     double   m_sub_layer_height     = 0.0;
-    // Orca: start points of the split outer walls of the current layer, by the first points of the loops of
-    // their passes as stored in the layer, so that all the passes of an outer wall start at the same point.
-    std::unordered_map<Point, Point, PointHash> m_outer_wall_pass_seams;
+    // Orca: start points of the split outer walls of the current layer, by the layer of the object and the first
+    // points of the loops of their passes as stored in it, so that all the passes of an outer wall start at the
+    // same point. The loops of equal objects have equal points, hence the layer.
+    std::map<std::pair<const Layer*, Point>, Point> m_outer_wall_pass_seams;
     // Orca: set while the passes of the split outer walls below the layer height are being printed.
     bool m_printing_outer_wall_lower_passes = false;
     // Orca: outlines the passes of the split outer walls of the current layer lean on, by layer and pass.

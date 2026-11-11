@@ -5,6 +5,7 @@
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -13,10 +14,12 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/OuterWallPasses.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <initializer_list>
@@ -93,6 +96,24 @@ size_t count_pass_loops(const ExtrusionEntityCollection &collection)
         else if (entity->is_loop() && static_cast<const ExtrusionLoop*>(entity)->outer_wall_pass)
             ++ count;
     return count;
+}
+
+// Outer edge of the passes in a collection: half the extent of their loops along X plus half their width.
+double pass_reach(const ExtrusionEntityCollection &collection)
+{
+    double reach = 0.;
+    for (const ExtrusionEntity *entity : collection.entities)
+        if (entity->is_collection())
+            reach = std::max(reach, pass_reach(*static_cast<const ExtrusionEntityCollection*>(entity)));
+        else if (entity->is_loop() && static_cast<const ExtrusionLoop*>(entity)->outer_wall_pass) {
+            const ExtrusionLoop &loop = *static_cast<const ExtrusionLoop*>(entity);
+            const BoundingBox    box(loop.polygon().points);
+            double               width = 0.;
+            for (const ExtrusionPath &path : loop.paths)
+                width = std::max(width, double(path.width));
+            reach = std::max(reach, 0.5 * unscaled<double>(box.size().x()) + 0.5 * width);
+        }
+    return reach;
 }
 
 // What the G-code extrudes at which height.
@@ -201,6 +222,36 @@ TEST_CASE("Passes of a sloped wall differ in width by the slope", "[OuterWallPas
         REQUIRE_THAT(width, WithinAbs(nominal_width - 0.025, 0.01));
 }
 
+TEST_CASE("Passes follow the slope whichever way the wall runs", "[OuterWallPasses]")
+{
+    // How much further out the outer edge of the bottom pass lies than that of the top pass, on a cone narrowing
+    // by 0.05 mm per pass.
+    auto reach_difference = [](std::initializer_list<ConfigBase::SetDeserializeItem> items) {
+        DynamicPrintConfig config = passes_config("split_layer");
+        config.set_deserialize_strict(items);
+        Print print;
+        init_and_process_print({ make_cone(10., 20.) }, print, config);
+        const Layer &layer = *print.objects().front()->layers()[30];
+        REQUIRE(layer.outer_wall_pass_slices);
+        double lower = 0.;
+        double top   = 0.;
+        for (const LayerRegion *region : layer.regions()) {
+            REQUIRE(region->outer_wall_lower_passes.size() == 1);
+            lower = std::max(lower, pass_reach(region->outer_wall_lower_passes.front()));
+            top   = std::max(top, pass_reach(region->perimeters));
+        }
+        REQUIRE(lower > 0.);
+        REQUIRE(top > 0.);
+        return lower - top;
+    };
+    REQUIRE_THAT(reach_difference({}), WithinAbs(0.05, 0.02));
+    REQUIRE_THAT(reach_difference({ { "wall_direction", "cw" } }), WithinAbs(0.05, 0.02));
+    // With an XY compensation of half the wall width the outer loop runs along the outline of the model itself,
+    // which leaves the distance to it no say in what side of the loop the material is on.
+    REQUIRE_THAT(reach_difference({ { "xy_contour_compensation", 0.25 } }), WithinAbs(0.05, 0.02));
+    REQUIRE_THAT(reach_difference({ { "xy_contour_compensation", 0.25 }, { "wall_direction", "cw" } }), WithinAbs(0.05, 0.02));
+}
+
 TEST_CASE("Layers of a slope out of the pass width range follow the fallback setting", "[OuterWallPasses]")
 {
     // A cone of radius 10 and height 2 narrows by 5 mm per mm of height, that is by 0.5 mm per pass:
@@ -304,6 +355,61 @@ TEST_CASE("All the passes of an outer wall start at the same point", "[OuterWall
         const double distance = (levels.first_start.at(layer_z) - levels.first_start.at(layer_z - 100)).norm();
         REQUIRE(distance < 0.1);
     }
+}
+
+TEST_CASE("Equal objects place the seams of their passes on their own", "[OuterWallPasses]")
+{
+    // Two equal cubes, the seam of one at the back and of the other one at random. Their loops have equal points.
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides {
+        { { "seam_position", "back" } }, { { "seam_position", "random" } } };
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{ cube(20.), cube(20.) }, print, model, passes_config("split_layer"), &overrides);
+    print.process();
+    const std::string gcode = Slic3r::Test::gcode(print);
+
+    // Start of each run of extrusion at the heights of a few low passes, relative to the middle of the run.
+    // Nothing but the low passes is printed there, one loop per cube.
+    const std::set<int>               low_levels { 5100, 5300, 5500, 5700, 5900 };
+    std::map<int, std::vector<Vec2d>> starts;
+    bool                              in_run = false;
+    int                               run_z  = 0;
+    Vec2d                             run_start, run_min, run_max;
+    auto close_run = [&]() {
+        if (in_run && low_levels.count(run_z) == 1)
+            starts[run_z].emplace_back(run_start - 0.5 * (run_min + run_max));
+        in_run = false;
+    };
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.dist_XY(self) <= 0.)
+            return;
+        if (! line.extruding(self)) {
+            close_run();
+            return;
+        }
+        const Vec2d from(self.x(), self.y());
+        const Vec2d to(line.new_X(self), line.new_Y(self));
+        if (! in_run) {
+            in_run    = true;
+            run_z     = int(std::lround(line.new_Z(self) * 1000.));
+            run_start = from;
+            run_min   = from;
+            run_max   = from;
+        }
+        run_min = run_min.cwiseMin(to);
+        run_max = run_max.cwiseMax(to);
+    });
+    close_run();
+
+    double max_distance = 0.;
+    for (const int level : low_levels) {
+        CAPTURE(level);
+        REQUIRE(starts[level].size() == 2);
+        max_distance = std::max(max_distance, (starts[level].front() - starts[level].back()).norm());
+    }
+    // The second cube does not take the seam of the first one layer after layer.
+    REQUIRE(max_distance > 1.);
 }
 
 TEST_CASE("The filament of the split outer wall is printed first on a layer", "[OuterWallPasses]")
@@ -499,6 +605,51 @@ TEST_CASE("Nothing is purged into a layer printed in passes", "[OuterWallPasses]
     REQUIRE_FALSE(infill_before_top_pass);
 }
 
+TEST_CASE("Make overhang printable rules the passes out", "[OuterWallPasses]")
+{
+    // It reshapes the layers after they are planned, by the nominal layer height.
+    DynamicPrintConfig config = passes_config("split_layer");
+    config.set_deserialize_strict({ { "make_overhang_printable", true } });
+    Print print;
+    init_and_process_print({ cube(20.) }, print, config);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.layers().size() == 100);
+    for (const Layer *layer : object.layers())
+        REQUIRE_FALSE(layer->outer_wall_pass_slices);
+}
+
+TEST_CASE("A part behind a negative volume in the model is planned as it is sliced", "[OuterWallPasses]")
+{
+    // A cube, a negative volume around the place of a cone, and the cone itself, in this order. A negative volume
+    // cuts the parts ahead of it only, so the cone is printed, and its slope is out of the width range.
+    TriangleMesh negative = make_cube(24., 24., 4.);
+    negative.translate(18.f, -2.f, 0.f);
+    TriangleMesh cone = make_cone(10., 2.);
+    cone.translate(30.f, 10.f, 0.f);
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "parts.stl";
+    object->add_volume(cube(10.));
+    object->add_volume(std::move(negative), ModelVolumeType::NEGATIVE_VOLUME);
+    object->add_volume(std::move(cone));
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.apply(model, passes_config("regular"));
+    print.set_status_silent();
+    print.process();
+
+    const auto &layers = print.objects().front()->layers();
+    REQUIRE(layers.size() == 50);
+    // The cube and the cone.
+    REQUIRE(layers[5]->lslices.size() == 2);
+    // The cone does not fit the widths, so the layer is printed the regular way.
+    REQUIRE_FALSE(layers[5]->outer_wall_pass_slices);
+    // Above the cone the cube alone is printed in passes.
+    REQUIRE(layers[20]->lslices.size() == 1);
+    REQUIRE(layers[20]->outer_wall_pass_slices);
+}
+
 TEST_CASE("Changing fuzzy skin plans the layers again", "[OuterWallPasses]")
 {
     DynamicPrintConfig config = passes_config("split_layer");
@@ -588,6 +739,25 @@ TEST_CASE("Settings the passes cannot be printed safely with are rejected", "[Ou
         // cube or at its layer height, but the thin layers it may be split into end in between.
         REQUIRE_THAT(validate_second_cube("split_layer", { "layer_height", 0.1 }), ContainsSubstring("above the lowest pass"));
         REQUIRE(validate_second_cube("regular", { "layer_height", 0.1 }).empty());
+    }
+    SECTION("only the layers another object may really split count as split") {
+        // What validate() says about a cube and a plate three layers high, printed at half the layer height, with
+        // the given number of its layers shrunk by the elephant foot compensation.
+        auto validate_plate = [](int compensated_layers) {
+            DynamicPrintConfig config = passes_config("split_layer");
+            config.set_deserialize_strict({ { "layer_change_gcode", "G92 E0\n" }, { "min_layer_height", "0.04" } });
+            const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides { {}, {
+                { "layer_height", 0.1 }, { "elefant_foot_compensation", 0.1 },
+                { "elefant_foot_compensation_layers", compensated_layers } } };
+            Print print;
+            Model model;
+            init_print(std::vector<TriangleMesh>{ cube(20.), make_cube(20., 20., 0.4) }, print, model, config, &overrides);
+            return print.validate().string;
+        };
+        // None of the layers of the plate is a candidate for the passes, so none of them is split.
+        REQUIRE(validate_plate(3).empty());
+        // Its last layer is: split, it would end at 0.35 mm, above the low pass of the cube at 0.3 mm.
+        REQUIRE_THAT(validate_plate(1), ContainsSubstring("above the lowest pass"));
     }
     SECTION("a raft under another object has layers of heights of its own") {
         REQUIRE_THAT(validate_second_cube("regular", { "raft_layers", 3 }), ContainsSubstring("raft under another object"));

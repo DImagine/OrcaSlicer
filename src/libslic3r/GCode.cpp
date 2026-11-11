@@ -8577,7 +8577,8 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
         assert(m_layer != nullptr);
         // Orca: the passes of a split outer wall start at the point chosen for its lowest pass.
         // The loop is looked up by its original first point: it may be a clone of the loop stored in the layer.
-        const auto pass_seam = loop_ref.outer_wall_pass ? m_outer_wall_pass_seams.find(loop_ref.first_point()) : m_outer_wall_pass_seams.end();
+        const auto pass_seam = loop_ref.outer_wall_pass ? m_outer_wall_pass_seams.find({ m_layer, loop_ref.first_point() }) :
+                                                          m_outer_wall_pass_seams.end();
         if (pass_seam != m_outer_wall_pass_seams.end())
             loop.split_at(pass_seam->second, false);
         else
@@ -8988,32 +8989,12 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
         const InstanceToPrint *instance;
         size_t                 pass;
     };
-    std::vector<PassLevel> levels;
-    for (const InstanceToPrint &instance : instances_to_print) {
-        const Layer *layer = layers[instance.layer_id].object_layer;
-        if (layer == nullptr || ! layer->outer_wall_pass_slices)
-            continue;
-        const size_t count = layer->outer_wall_pass_slices->count();
-        for (size_t pass = 0; pass + 1 < count; ++ pass)
-            levels.push_back({ layer_z - layer->height * double(count - 1 - pass) / double(count), &instance, pass });
-    }
-    if (levels.empty())
-        return {};
-    std::stable_sort(levels.begin(), levels.end(), [](const PassLevel &lhs, const PassLevel &rhs) { return lhs.z < rhs.z; });
-
-    m_printing_outer_wall_lower_passes = true;
-    std::string gcode;
-    for (const PassLevel &level : levels) {
-        const InstanceToPrint &instance_to_print = *level.instance;
-        const PrintObject     &print_object      = instance_to_print.print_object;
-        const PrintInstance   &inst              = print_object.instances()[instance_to_print.instance_id];
-        const Layer           &layer             = *layers[instance_to_print.layer_id].object_layer;
-
-        // Regions whose outer wall is printed by this extruder.
+    // Regions of a layer whose pass is printed by this extruder.
+    auto pass_regions = [&print, &layer_tools, extruder_id](const Layer &layer, size_t pass) {
         std::vector<const LayerRegion*> layerms;
         for (const LayerRegion *layerm : layer.regions()) {
-            if (layerm == nullptr || level.pass >= layerm->outer_wall_lower_passes.size() ||
-                layerm->outer_wall_lower_passes[level.pass].entities.empty())
+            if (layerm == nullptr || pass >= layerm->outer_wall_lower_passes.size() ||
+                layerm->outer_wall_lower_passes[pass].entities.empty())
                 continue;
             unsigned int wall_extruder = layer_tools.wall_extruder_id(print.get_print_region(layerm->region().print_region_id()));
             if (! layer_tools.has_extruder(wall_extruder))
@@ -9021,16 +9002,43 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
             if (wall_extruder == extruder_id)
                 layerms.emplace_back(layerm);
         }
-        if (layerms.empty())
+        return layerms;
+    };
+    std::vector<PassLevel> levels;
+    for (const InstanceToPrint &instance : instances_to_print) {
+        const Layer *layer = layers[instance.layer_id].object_layer;
+        if (layer == nullptr || ! layer->outer_wall_pass_slices)
             continue;
+        const size_t count = layer->outer_wall_pass_slices->count();
+        for (size_t pass = 0; pass + 1 < count; ++ pass)
+            if (! pass_regions(*layer, pass).empty())
+                levels.push_back({ layer_z - layer->height * double(count - 1 - pass) / double(count), &instance, pass });
+    }
+    if (levels.empty())
+        return {};
+    std::stable_sort(levels.begin(), levels.end(), [](const PassLevel &lhs, const PassLevel &rhs) { return lhs.z < rhs.z; });
+
+    m_printing_outer_wall_lower_passes = true;
+    std::string  gcode;
+    // Layer the avoiding of crossing walls is set up for: the instances and the passes of an object share it.
+    const Layer *avoid_crossing_layer = nullptr;
+    for (const PassLevel &level : levels) {
+        const InstanceToPrint &instance_to_print = *level.instance;
+        const PrintObject     &print_object      = instance_to_print.print_object;
+        const PrintInstance   &inst              = print_object.instances()[instance_to_print.instance_id];
+        const Layer           &layer             = *layers[instance_to_print.layer_id].object_layer;
+
+        const std::vector<const LayerRegion*> layerms = pass_regions(layer, level.pass);
 
         // The same setup of an instance as for its regular extrusions in process_layer().
         m_config.apply(print.default_region_config());
         m_config.apply(print_object.config(), true);
         m_layer = &layer;
         m_object_layer_over_raft = false;
-        if (m_config.reduce_crossing_wall)
+        if (m_config.reduce_crossing_wall && avoid_crossing_layer != &layer) {
             m_avoid_crossing_perimeters.init_layer(*m_layer);
+            avoid_crossing_layer = &layer;
+        }
         if (this->config().gcode_label_objects)
             gcode += std::string("; printing object ") + print_object.model_object()->name + " id:" + std::to_string(print_object.get_id()) +
                      " copy " + std::to_string(inst.id) + "\n";
@@ -9086,7 +9094,8 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
                 // Choose the start point of the outer wall once and use it for all its passes.
                 const ExtrusionLoop *top_pass = closest < top_passes.size() ? top_passes[closest] : nullptr;
                 Point                seam;
-                const auto           known    = top_pass != nullptr ? m_outer_wall_pass_seams.find(top_pass->first_point()) : m_outer_wall_pass_seams.end();
+                const auto           known    = top_pass != nullptr ? m_outer_wall_pass_seams.find({ &layer, top_pass->first_point() }) :
+                                                                      m_outer_wall_pass_seams.end();
                 if (known != m_outer_wall_pass_seams.end()) {
                     seam = known->second;
                 } else {
@@ -9095,9 +9104,9 @@ std::string GCode::extrude_outer_wall_lower_passes(const Print &print, const std
                     m_seam_placer.place_seam(m_layer, placed, this->last_pos(), seam_overhang);
                     seam = placed.first_point();
                     if (top_pass != nullptr)
-                        m_outer_wall_pass_seams.emplace(top_pass->first_point(), seam);
+                        m_outer_wall_pass_seams.emplace(std::make_pair(&layer, top_pass->first_point()), seam);
                 }
-                m_outer_wall_pass_seams.emplace(loop.first_point(), seam);
+                m_outer_wall_pass_seams.emplace(std::make_pair(&layer, loop.first_point()), seam);
                 gcode += this->extrude_loop(loop, "perimeter", -1.);
             }
         }

@@ -611,6 +611,9 @@ private:
     // Allowed width of a pass, unscaled, and the diameter of the nozzle the widths are derived from.
     // Returns false if the configured range is not valid.
     bool outer_wall_pass_width_range(double &min_width, double &max_width, double *nozzle_diameter = nullptr) const;
+    // Whether the outer wall of a layer of the given index and height may be printed in passes of the given widths.
+    // The other layers are neither printed in passes nor split into thin layers.
+    bool outer_wall_pass_candidate(size_t layer_idx, coordf_t layer_height, double min_width, double max_width) const;
     // Decide for each object layer (pairs of bottom / top Z), whether its outer wall is printed in passes.
     // Returns the object layers with the layers that do not fit the pass width range split into thin layers if
     // configured so, and for each returned layer the slices of its passes, or nullptr for a layer printed without them.
