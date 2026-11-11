@@ -385,6 +385,7 @@ static void remove_extrusions_over(ExtrusionEntityCollection &collection, const 
 void Layer::make_perimeters()
 {
     BOOST_LOG_TRIVIAL(trace) << "Generating perimeters for layer " << this->id();
+    this->outer_wall_pass_refused = false;
 
     const auto clear_generated_extrusions = [](LayerRegion *layer_region) {
         layer_region->perimeters.clear();

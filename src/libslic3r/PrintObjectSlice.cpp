@@ -584,7 +584,8 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
         const bool     is_candidate = candidate_idx < candidates.size() && candidates[candidate_idx] == layer_idx;
         // A layer the wall generator could not split a loop of the outer wall of is left to the fallback.
         if (is_candidate && fitting[candidate_idx] &&
-            std::any_of(m_outer_wall_pass_refused.begin(), m_outer_wall_pass_refused.end(), [hi](coordf_t z) { return std::abs(z - hi) < EPSILON; }))
+            (m_outer_wall_passes_off ||
+             std::any_of(m_outer_wall_pass_refused.begin(), m_outer_wall_pass_refused.end(), [hi](coordf_t z) { return std::abs(z - hi) < EPSILON; })))
             fitting[candidate_idx].reset();
         if (is_candidate && ! fitting[candidate_idx] && split_layers) {
             // Print the whole layer as thin layers of the pass height.
@@ -1227,14 +1228,12 @@ void PrintObject::slice()
 {
     if (! this->set_started(posSlice))
         return;
-    m_outer_wall_pass_refused.clear();
-    this->slice_layers();
-    // BBS
-    this->set_done(posSlice);
-}
-
-void PrintObject::slice_layers()
-{
+    // Orca: the layers the walls refused to print in passes are kept only for the slicing the walls asked for.
+    if (! m_outer_wall_pass_reslice) {
+        m_outer_wall_pass_refused.clear();
+        m_outer_wall_passes_off = false;
+    }
+    m_outer_wall_pass_reslice = false;
     //BBS: add flag to reload scene for shell rendering
     m_print->set_status(5, L("Slicing mesh"), PrintBase::SlicingStatus::RELOAD_SCENE);
     std::vector<coordf_t> layer_height_profile;
@@ -1410,6 +1409,8 @@ void PrintObject::slice_layers()
         }
     }
 
+    // BBS
+    this->set_done(posSlice);
 }
 
 template<typename ThrowOnCancel>

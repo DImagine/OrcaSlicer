@@ -590,6 +590,50 @@ TEST_CASE("A loop of the outer wall left as it is is reported unless the holes a
     REQUIRE(split(false, false));
     REQUIRE_FALSE(split(true, true));
     REQUIRE_FALSE(split(true, false));
+    // So it is whatever else is there to the wall of the hole: another width, or printing after the infill.
+    for (const bool after_infill : { false, true }) {
+        CAPTURE(after_infill);
+        auto split_with_hole = [&slices, after_infill](bool with_holes) {
+            ExtrusionEntityCollection perimeters = wall_loop(19.5);
+            perimeters.append(wall_loop(8.5, true));
+            ExtrusionLoop &hole = *static_cast<ExtrusionLoop*>(perimeters.entities.back());
+            if (after_infill)
+                hole.print_after_infill = true;
+            else
+                hole.paths.front().width = 0.3f;
+            std::vector<ExtrusionEntityCollection> lower_passes;
+            return split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), with_holes);
+        };
+        REQUIRE(split_with_hole(false));
+        REQUIRE_FALSE(split_with_hole(true));
+    }
+}
+
+TEST_CASE("An outer wall is left as it is where it cannot take the offset without the inner wall", "[OuterWallPasses]")
+{
+    // A square of 20 mm, its low pass moved by 0.4 mm along X, the passes 0.2 to 0.8 mm wide: the outer wall of
+    // 0.5 mm takes 0.3 mm, the inner wall of 0.45 mm the rest.
+    ExPolygon moved = square(20.);
+    moved.translate(Point(scaled<coord_t>(0.4), 0));
+    OuterWallPassSlices slices;
+    slices.mid       = { square(20.) };
+    slices.passes    = { { moved }, slices.mid };
+    slices.min_width = 0.2;
+    slices.max_width = 0.8;
+    slices.walls     = 2;
+    const OuterWallPassInnerWalls inner_walls { Flow(0.45f, 0.1f, 0.4f), 0.475, 0.4 };
+    auto split = [&slices, &inner_walls](bool narrow_inner_wall) {
+        ExtrusionEntityCollection perimeters = wall_loop(19.5);
+        ExtrusionLoop             inner      = inner_wall_loop(18.55);
+        if (narrow_inner_wall)
+            inner.paths.front().width = 0.3f;
+        perimeters.append(inner);
+        std::vector<ExtrusionEntityCollection> lower_passes;
+        return split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), true, &inner_walls);
+    };
+    REQUIRE(split(false));
+    // An inner wall of another width is not printed in passes.
+    REQUIRE_FALSE(split(true));
 }
 
 TEST_CASE("Holes count only when asked for", "[OuterWallPasses]")

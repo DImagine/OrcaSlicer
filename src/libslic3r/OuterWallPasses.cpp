@@ -221,6 +221,12 @@ bool sample_loop(WallLoop                            &wall_loop,
     const size_t         wall          = wall_loop.wall;
     const double         regular_width = walls.widths[wall];
     const ExtrusionRole  role          = wall == 0 ? erExternalPerimeter : erPerimeter;
+    // The wall of a hole with the holes off is left as it is on purpose, whatever else is there to it.
+    const bool           is_hole       = (loop.loop_role() & elrHole) == elrHole;
+    if (! with_holes && is_hole) {
+        wall_loop.on_purpose = true;
+        return false;
+    }
     // Only a wall of its regular width is split, and a wall held back until the infill is printed must not be
     // printed first. The stretches the wall generator took for hanging in the air are split with the rest of the
     // loop: the wall is taken for hanging by the whole layer, while a pass reaches out half as far over the pass
@@ -287,11 +293,6 @@ bool sample_loop(WallLoop                            &wall_loop,
 
     // Measure the offsets of the pass outlines and find out, which side of the loop the material is on.
     // The material is inside a contour and outside a hole. The normals point to the right of the loop.
-    const bool is_hole = (loop.loop_role() & elrHole) == elrHole;
-    if (! with_holes && is_hole) {
-        wall_loop.on_purpose = true;
-        return false;
-    }
     const double side = wall_loop.polygon.is_counter_clockwise() != is_hole ? 1. : -1.;
     wall_loop.side = side;
     wall_loop.hole = is_hole;
@@ -395,7 +396,8 @@ bool sample_loop(WallLoop                            &wall_loop,
 // Split the offsets of the pass outlines between the walls running one behind another at each point of the loop.
 // wall_lines: for this wall, the loops of every other wall printed in passes moved to where this wall runs along them.
 // Returns false if the loop takes none: an inner wall with no wall printed in passes in front of it, or one that
-// has nothing to take, which is then better printed in one piece.
+// has nothing to take, which is then better printed in one piece. Returns false as well if the walls running
+// together cannot take an offset: the planning counted on a wall that is not printed in passes there.
 bool share_offsets(WallLoop &wall_loop, const WallSet &walls, const std::vector<OutlineDistancer> &wall_lines, size_t num_passes)
 {
     const size_t wall      = wall_loop.wall;
@@ -430,6 +432,8 @@ bool share_offsets(WallLoop &wall_loop, const WallSet &walls, const std::vector<
                 within += out ? walls.reach[other].outwards : walls.reach[other].inwards;
                 limit  += out ? walls.reach[other].limit_outwards : walls.reach[other].limit_inwards;
             }
+            if (std::abs(offset) > limit + tolerance)
+                return false;
             // The walls reach the end of the range they keep to together, and then their limits together.
             const double amount = std::min(std::abs(offset), limit);
             auto share = [&](size_t other) {

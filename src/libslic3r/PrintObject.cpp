@@ -535,19 +535,44 @@ static void anchor_bridges_in_neighbours(const LayerPtrs &layers, ThrowOnCancel 
 // 3) Generates perimeters, gap fills and fill regions (fill regions of type stInternal).
 void PrintObject::make_perimeters()
 {
+    // Orca: a layer printed with the outer wall in passes, a loop of whose outer wall could not be split, goes to
+    // the fallback: the object is sliced again with such layers left to it and the walls are generated anew.
+    // That is repeated as the new walls may refuse other layers; after a few rounds no layer of the object is
+    // printed in passes. The slicing step and the steps depending on it are invalidated for that, so a run
+    // canceled half way starts over from the slicing.
+    auto slice_again = [this]() {
+        m_outer_wall_pass_reslice = true;
+        this->invalidate_steps_from_worker({ posSlice, posPerimeters, posPrepareInfill, posInfill, posIroning, posContouring,
+                                             posSupportMaterial, posSimplifyPath, posSimplifyInfill, posSimplifySupportPath,
+                                             posDetectOverhangsForLift });
+    };
+    bool sliced_again = false;
+    for (size_t rounds = 0;;) {
+
     // prerequisites
     this->slice();
+    if (sliced_again && m_print->m_pipeline_plugin_active) {
+        // As Print::process() does after slicing an object.
+        m_print->run_pipeline_hook(SlicingPipelineStepPlugin::posSlice, this);
+        for (Layer *layer : m_layers)
+            layer->backup_untyped_slices();
+    }
 
     if (! this->set_started(posPerimeters))
         return;
 
+    if (! sliced_again && (! m_outer_wall_pass_refused.empty() || m_outer_wall_passes_off)) {
+        // Layers left to the fallback by the walls of an earlier run, which may come out another way now: the
+        // layers are planned anew.
+        m_outer_wall_pass_refused.clear();
+        m_outer_wall_passes_off = false;
+        slice_again();
+        sliced_again = true;
+        continue;
+    }
+
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
-
-    // Orca: a layer printed with the outer wall in passes, a loop of whose outer wall could not be split, goes to
-    // the fallback: the object is sliced again with such layers left to it and the walls are generated anew.
-    // That is repeated as the new walls may refuse other layers, a few times at most.
-    for (size_t attempt = 0;; ++ attempt) {
 
     // Revert the typed slices into untyped slices, together with the anchors handed to bridges by a previous run.
     for (Layer *layer : m_layers) {
@@ -645,10 +670,12 @@ void PrintObject::make_perimeters()
     for (const Layer *layer : m_layers)
         if (layer->outer_wall_pass_slices && layer->outer_wall_pass_refused)
             m_outer_wall_pass_refused.emplace_back(layer->print_z);
-    if (m_outer_wall_pass_refused.size() == refused_before || attempt == 3)
+    if (m_outer_wall_pass_refused.size() == refused_before)
         break;
-    this->slice_layers();
-    m_print->throw_if_canceled();
+    if (++ rounds > 3)
+        m_outer_wall_passes_off = true;
+    slice_again();
+    sliced_again = true;
     }
 
     this->set_done(posPerimeters);

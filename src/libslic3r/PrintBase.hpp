@@ -669,6 +669,12 @@ protected:
         { return m_state.invalidate_all(PrintObjectBase::cancel_callback(m_print)); }
     bool            invalidate_all_steps_without_cancel()
         { return m_state.invalidate_all([](){}); }
+    // invalidate_steps() for the background processing thread, about the steps it runs or finished itself. It skips
+    // the cancel callback, which stops the background processing and so would wait for this very thread.
+    bool            invalidate_steps_from_worker(std::initializer_list<PrintObjectStepEnum> il) {
+        std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+        return m_state.invalidate_multiple(il.begin(), il.end(), []() {});
+    }
 
     bool            is_step_started_unguarded(PrintObjectStepEnum step) const { return m_state.is_started_unguarded(step); }
     bool            is_step_done_unguarded(PrintObjectStepEnum step) const { return m_state.is_done_unguarded(step); }

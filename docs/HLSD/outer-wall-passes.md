@@ -163,10 +163,20 @@ A layer with a loop of the outer wall that could not be split, for any reason
 but the holes being off, does not keep that loop at the layer height among the
 passes: `PrintObject::make_perimeters()` notes such layers, slices the object
 again with them left to the fallback and generates the walls anew
-(`PrintObject::slice_layers()`, `m_outer_wall_pass_refused`). The new walls may
-refuse other layers, so this is repeated, three times at most; a loop still
-refused after that stays at the layer height. The noted layers are forgotten
-when the object is sliced for another reason.
+(`m_outer_wall_pass_refused`). The new walls may refuse other layers, so this
+is repeated; after three rounds no layer of the object is printed in passes
+(`m_outer_wall_passes_off`), so no loop of the outer wall is ever left at the
+layer height among the passes. The object is sliced again through
+`PrintObject::slice()` itself: the slicing step and the steps depending on it
+are invalidated from the worker thread, so a run canceled half way starts over
+from the slicing, the supports and the overhangs are computed for the new
+layers, and the Slice hook of a pipeline plugin runs on them. The noted layers
+are forgotten when the object is sliced for another reason, and when the walls
+are generated again without it: they may come out another way, so the layers
+are planned anew. The wall of a hole with the holes off is left as it is
+before any other check. A loop whose offset the walls running together there
+cannot take, an inner wall the planning counted on being left regular, is
+refused as well.
 
 A loop with stretches the wall generator took for hanging in the air is printed
 in passes like any other. The wall generator judges by the whole layer, while
