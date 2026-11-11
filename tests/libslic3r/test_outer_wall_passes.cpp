@@ -595,18 +595,36 @@ TEST_CASE("A loop of the outer wall left as it is is reported unless the holes a
         CAPTURE(after_infill);
         auto split_with_hole = [&slices, after_infill](bool with_holes) {
             ExtrusionEntityCollection perimeters = wall_loop(19.5);
-            perimeters.append(wall_loop(8.5, true));
-            ExtrusionLoop &hole = *static_cast<ExtrusionLoop*>(perimeters.entities.back());
+            ExtrusionEntityCollection hole_wall  = wall_loop(8.5, true);
+            ExtrusionLoop            &hole       = *static_cast<ExtrusionLoop*>(hole_wall.entities.front());
             if (after_infill)
                 hole.print_after_infill = true;
             else
                 hole.paths.front().width = 0.3f;
+            perimeters.append(hole_wall.entities);
             std::vector<ExtrusionEntityCollection> lower_passes;
             return split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), with_holes);
         };
         REQUIRE(split_with_hole(false));
         REQUIRE_FALSE(split_with_hole(true));
     }
+}
+
+TEST_CASE("A loop of the outer wall all along the border of another region is left as it is on purpose", "[OuterWallPasses]")
+{
+    // A square of 20 mm, and the outer wall of a region of 10 mm in the middle of it, far from its outline.
+    OuterWallPassSlices slices;
+    slices.mid       = { square(20.) };
+    slices.passes    = { { square(20.05) }, { square(19.95) } };
+    slices.min_width = min_width;
+    slices.max_width = max_width;
+    ExtrusionEntityCollection perimeters = wall_loop(19.5);
+    perimeters.append(wall_loop(9.5).entities);
+    std::vector<ExtrusionEntityCollection> lower_passes;
+    REQUIRE(split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), true));
+    // The loop along the outline alone is printed in passes.
+    REQUIRE(lower_passes.size() == 1);
+    REQUIRE(lower_passes.front().entities.size() == 1);
 }
 
 TEST_CASE("An outer wall is left as it is where it cannot take the offset without the inner wall", "[OuterWallPasses]")

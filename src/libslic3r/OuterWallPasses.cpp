@@ -390,6 +390,12 @@ bool sample_loop(WallLoop                            &wall_loop,
             sample.offsets.emplace_back(pass_distance - mid_distance);
         }
     }
+    // A loop with no part along the outline of the layer, all of it along the border of another region, is left
+    // as it is on purpose: it is not seen.
+    if (std::none_of(samples.begin(), samples.end(), [](const LoopSample &sample) { return sample.on_surface; })) {
+        wall_loop.on_purpose = true;
+        return false;
+    }
     return side_confirmed;
 }
 
@@ -397,7 +403,7 @@ bool sample_loop(WallLoop                            &wall_loop,
 // wall_lines: for this wall, the loops of every other wall printed in passes moved to where this wall runs along them.
 // Returns false if the loop takes none: an inner wall with no wall printed in passes in front of it, or one that
 // has nothing to take, which is then better printed in one piece. Returns false as well if the walls running
-// together cannot take an offset: the planning counted on a wall that is not printed in passes there.
+// together, fewer than planned, cannot take an offset: the planning counted on a wall not printed in passes there.
 bool share_offsets(WallLoop &wall_loop, const WallSet &walls, const std::vector<OutlineDistancer> &wall_lines, size_t num_passes)
 {
     const size_t wall      = wall_loop.wall;
@@ -432,7 +438,8 @@ bool share_offsets(WallLoop &wall_loop, const WallSet &walls, const std::vector<
                 within += out ? walls.reach[other].outwards : walls.reach[other].inwards;
                 limit  += out ? walls.reach[other].limit_outwards : walls.reach[other].limit_inwards;
             }
-            if (std::abs(offset) > limit + tolerance)
+            // Fewer walls run here than the layer was planned with: they have to take the offset all the same.
+            if (last + 1 < walls.count() && std::abs(offset) > limit + tolerance)
                 return false;
             // The walls reach the end of the range they keep to together, and then their limits together.
             const double amount = std::min(std::abs(offset), limit);
