@@ -65,6 +65,8 @@ struct LoopSample
     bool   vertex;
     // Whether the wall follows the surface of the object here.
     bool   on_surface { false };
+    // Whether the wall generator took the wall for hanging in the air here.
+    bool   overhang { false };
 };
 
 // How much narrower and wider than its regular width a pass of a wall may get, scaled: within the range the walls keep
@@ -127,17 +129,22 @@ bool sample_loop(WallLoop                            &wall_loop,
     const size_t         wall          = wall_loop.wall;
     const double         regular_width = walls.widths[wall];
     const ExtrusionRole  role          = wall == 0 ? erExternalPerimeter : erPerimeter;
-    // Only a plain wall of its regular width is split: overhanging parts keep their bridging flow and
-    // a wall held back until the infill is printed must not be printed first. A short overhanging stretch is
-    // printed in passes like the rest of the loop.
+    // Only a wall of its regular width is split, and a wall held back until the infill is printed must not be
+    // printed first. The stretches the wall generator took for hanging in the air are split with the rest of the
+    // loop: the wall is taken for hanging by the whole layer, while a pass reaches out half as far over the pass
+    // below it. They keep their role, that is their speed and cooling, but not their flow.
     if (loop.print_after_infill)
         return false;
+    Lines overhangs;
     for (const ExtrusionPath &path : loop.paths) {
-        if (path.role() == erOverhangPerimeter && path.length() <= scaled<double>(outer_wall_pass_short_overhang))
+        if (path.role() == erOverhangPerimeter) {
+            append(overhangs, path.polyline.to_polyline().lines());
             continue;
+        }
         if (path.role() != role || std::abs(double(path.width) - regular_width) > 1e-3)
             return false;
     }
+    const OutlineDistancer overhang_lines(std::move(overhangs));
 
     wall_loop.polygon = loop.polygon();
     wall_loop.polygon.remove_duplicate_points();
@@ -175,6 +182,10 @@ bool sample_loop(WallLoop                            &wall_loop,
                     sample.outward = n_next;
             } else
                 sample.outward = n_next;
+            {
+                const auto [dist, line_idx, nearest_point] = overhang_lines.distance_from_lines_extra<false>(sample.point);
+                sample.overhang = std::isfinite(dist) && dist <= scaled<double>(0.01);
+            }
             samples.emplace_back(std::move(sample));
         }
     }
@@ -332,12 +343,15 @@ bool build_passes(WallLoop &wall_loop, const WallSet &walls, size_t num_passes)
     const float  width_tolerance  = scaled<float>(0.02);
     wall_loop.passes.clear();
     wall_loop.passes.reserve(num_passes);
+    const ExtrusionRole role = wall == 0 ? erExternalPerimeter : erPerimeter;
     for (size_t pass = 0; pass < num_passes; ++ pass) {
         ThickPolyline polyline;
         std::vector<coordf_t> widths;
+        std::vector<char>     hanging;
         auto append = [&](const LoopSample &sample) {
             polyline.points.emplace_back((sample.point.cast<double>() + wall_loop.side * sample.shifts[pass] * sample.outward).cast<coord_t>());
             widths.emplace_back(regular_width + sample.gains[pass] - width_correction);
+            hanging.emplace_back(sample.overhang);
         };
         for (size_t i = 0; i < samples.size();) {
             // Samples of one edge: [i, edge_end), the next vertex is at edge_end.
@@ -351,7 +365,9 @@ bool build_passes(WallLoop &wall_loop, const WallSet &walls, size_t num_passes)
             bool              linear   = true;
             for (size_t j = i + 1; j < edge_end && linear; ++ j) {
                 const double t = double(j - i) / double(edge_end - i);
-                linear = std::abs(samples[j].shifts[pass] - (sample_a.shifts[pass] + t * (sample_b.shifts[pass] - sample_a.shifts[pass]))) <= 0.5 * linear_tolerance &&
+                // An overhanging stretch may begin and end inside the edge.
+                linear = samples[j].overhang == sample_a.overhang && samples[j].overhang == sample_b.overhang &&
+                         std::abs(samples[j].shifts[pass] - (sample_a.shifts[pass] + t * (sample_b.shifts[pass] - sample_a.shifts[pass]))) <= 0.5 * linear_tolerance &&
                          std::abs(samples[j].gains[pass] - (sample_a.gains[pass] + t * (sample_b.gains[pass] - sample_a.gains[pass]))) <= linear_tolerance;
             }
             if (! linear)
@@ -362,16 +378,28 @@ bool build_passes(WallLoop &wall_loop, const WallSet &walls, size_t num_passes)
         // Close the loop.
         polyline.points.emplace_back(polyline.points.front());
         widths.emplace_back(widths.front());
-        polyline.width.reserve(2 * (polyline.points.size() - 1));
-        for (size_t i = 0; i + 1 < polyline.points.size(); ++ i) {
-            polyline.width.emplace_back(widths[i]);
-            polyline.width.emplace_back(widths[i + 1]);
-        }
+        hanging.emplace_back(hanging.front());
 
-        // Split the pass into paths of a constant width. The steps are finer than those of thin walls
-        // to keep the outer surface smooth.
-        ExtrusionPaths paths = thick_polyline_to_multi_path(polyline, wall == 0 ? erExternalPerimeter : erPerimeter, pass_flow,
-                                                            width_tolerance, width_tolerance).paths;
+        // Split the pass into paths of a constant width, the stretches taken for hanging in the air apart from the
+        // rest: a segment hangs if either of its ends does. The steps of the width are finer than those of thin
+        // walls to keep the outer surface smooth.
+        ExtrusionPaths paths;
+        for (size_t begin = 0; begin + 1 < polyline.points.size();) {
+            const bool hangs = hanging[begin] || hanging[begin + 1];
+            size_t     end   = begin + 1;
+            while (end + 1 < polyline.points.size() && (hanging[end] || hanging[end + 1]) == hangs)
+                ++ end;
+            ThickPolyline stretch;
+            stretch.points.assign(polyline.points.begin() + begin, polyline.points.begin() + end + 1);
+            stretch.width.reserve(2 * (end - begin));
+            for (size_t i = begin; i < end; ++ i) {
+                stretch.width.emplace_back(widths[i]);
+                stretch.width.emplace_back(widths[i + 1]);
+            }
+            Slic3r::append(paths, thick_polyline_to_multi_path(stretch, hangs ? erOverhangPerimeter : role, pass_flow, width_tolerance,
+                                                       width_tolerance).paths);
+            begin = end;
+        }
         if (paths.empty() || paths.front().first_point() != paths.back().last_point())
             return false;
         ExtrusionLoop pass_loop(std::move(paths), loop.loop_role());

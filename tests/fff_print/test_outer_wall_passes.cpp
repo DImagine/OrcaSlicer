@@ -969,10 +969,10 @@ TEST_CASE("A layer with a single wall on its top surface takes the outer wall al
         }
 }
 
-TEST_CASE("A layer with an outer wall hanging in the air follows the fallback", "[OuterWallPasses]")
+TEST_CASE("A wall taken for hanging in the air is printed in passes with the role of an overhanging wall", "[OuterWallPasses]")
 {
-    // A frustum widening upwards by 0.26 mm a side per pass, that is by 0.52 mm per layer: its outer wall hangs
-    // over the layer below by more than half the nozzle. Two walls would take the offset.
+    // A frustum widening upwards by 0.26 mm a side per pass, that is by 0.52 mm per layer: the wall generator takes
+    // its outer wall for hanging over the layer below. Two walls take the offset.
     DynamicPrintConfig config = passes_config("split_layer");
     config.set_deserialize_strict({ { "split_outer_wall_walls", 0 }, { "inner_wall_line_width", "0.45" } });
     for (const bool detect : { true, false }) {
@@ -980,10 +980,21 @@ TEST_CASE("A layer with an outer wall hanging in the air follows the fallback", 
         config.set_deserialize_strict({ { "detect_overhang_wall", detect } });
         Print print;
         init_and_process_print({ frustum(4.8, 10., 2.) }, print, config);
-        const PrintObject &object = *print.objects().front();
-        // With the detection on the layers above the first two are split into thin layers.
-        const Layer &layer = *object.layers().back();
-        REQUIRE(bool(layer.outer_wall_pass_slices) == ! detect);
-        REQUIRE_THAT(layer.height, WithinAbs(detect ? pass_height : layer_height, 1e-6));
+        const Layer &layer = *print.objects().front()->layers()[5];
+        REQUIRE_THAT(layer.height, WithinAbs(layer_height, 1e-6));
+        REQUIRE(layer.outer_wall_pass_slices);
+        // The passes of the outer wall are there, as overhanging walls with the detection on, at the pass height.
+        size_t hanging = 0;
+        size_t plain   = 0;
+        for (const LayerRegion *region : layer.regions()) {
+            REQUIRE(region->outer_wall_lower_passes.size() == 1);
+            for (const ExtrusionEntity *entity : region->outer_wall_lower_passes.front().entities)
+                for (const ExtrusionPath &path : static_cast<const ExtrusionLoop*>(entity)->paths) {
+                    REQUIRE_THAT(path.height, WithinAbs(pass_height, 1e-4));
+                    ++ (path.role() == erOverhangPerimeter ? hanging : plain);
+                }
+        }
+        REQUIRE(hanging + plain > 0);
+        REQUIRE((hanging > 0) == detect);
     }
 }

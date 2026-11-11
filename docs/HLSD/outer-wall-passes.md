@@ -100,10 +100,8 @@ outline of the layer is left as it is. The top pass takes the place of the
 original loop in `LayerRegion::perimeters`. The passes below it are kept in
 `LayerRegion::outer_wall_lower_passes`, bottom pass first.
 
-A loop is left as it is if it has an overhanging part, if it is held back until
-the infill is printed, or if it runs around a hole and `split_outer_wall_holes`
-is off. A layer stepping out over the layer below has vertical walls and passes
-the criterion, but its loop hangs in the air and must not be thinned.
+A loop is left as it is if it is held back until the infill is printed, or if
+it runs around a hole and `split_outer_wall_holes` is off.
 
 ## Several walls in passes
 
@@ -147,13 +145,12 @@ the outer wall and the threshold, which would uncover the joint of its walls
 With the option off the joints of the walls may show from above, as they do on
 regular layers.
 
-A layer whose outer wall hangs in the air follows the fallback: the wall
-generator prints such a stretch with a flow of its own, and a pass below it
-would hang lower still. The planning takes the middle line of the outer wall
-against the layer below grown by half the nozzle, as the wall generator does
-with overhang detection on. A stretch no longer than
-`outer_wall_pass_short_overhang` does not count, and a loop with such stretches
-is printed in passes as a whole. Each stretch is measured on its own.
+A loop with stretches the wall generator took for hanging in the air is printed
+in passes like any other. The wall generator judges by the whole layer, while a
+pass reaches out over the pass below it half as far, so most of such stretches
+do not hang as passes at all. Along these stretches the passes keep the role of
+an overhanging wall, which gives them its speed and cooling; their flow is that
+of a pass of their width and height, not the bridging flow.
 
 `split_outer_wall_loops()` samples every loop of these walls, an inner wall
 being measured at the point of the outer wall in front of it, so that the walls
@@ -250,7 +247,6 @@ out, as it is with a prime tower.
 
 ## Limitations
 
-- A loop with an overhanging part is printed as one regular loop.
 - A model with shallow parts prints many of its layers by the fallback: only the
   layers steeper than the limit all around get the passes.
 - The slicing cache of the command line (`export_cached_data`) does not store

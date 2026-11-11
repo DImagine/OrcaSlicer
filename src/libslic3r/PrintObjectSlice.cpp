@@ -408,8 +408,6 @@ struct InnerPassWalls
     // How far the layer above is grown to find the top surfaces left with a single wall, as the classic wall
     // generator does. Negative without a single wall on top surfaces.
     double top_reach { -1. };
-    // Whether the walls hanging in the air are detected and printed in a way of their own.
-    bool   overhangs { false };
 };
 
 InnerPassWalls inner_pass_walls(const PrintObject &object, double nominal_width)
@@ -438,7 +436,6 @@ InnerPassWalls inner_pass_walls(const PrintObject &object, double nominal_width)
             out.max_step  = out.max_step < 0. ? step : std::min(out.max_step, step);
             out.top_reach = out.top_reach < 0. ? reach : std::min(out.top_reach, reach);
         }
-        out.overhangs |= config.detect_overhang_wall.value;
     }
     if (any)
         out.max_walls = std::max<size_t>(1, walls);
@@ -526,21 +523,11 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
                 auto fits = [&](size_t walls, double lowest, double highest) {
                     return outer_wall_passes_fit(slices.mid, slices.passes, reach(walls, lowest, highest), with_holes);
                 };
-                // The middle line of the outer wall of the layer, as the wall generator sees it against the layers
-                // below and above. How those end up printed is not known yet: a neighbour is taken both as printed
-                // at its middle and as split into thin layers.
+                // The middle line of the outer wall of the layer, as the wall generator sees it against the layer
+                // above. How that ends up printed is not known yet: it is taken both as printed at its middle and
+                // as split into thin layers.
                 const ExPolygons wall_line   = offset_ex(slices.mid, - scaled<float>(0.5 * nominal_width));
-                const bool       below_known = candidate_idx > 0 && candidates[candidate_idx - 1] + 1 == layer_idx;
                 const bool       above_known = candidate_idx + 1 < candidates.size() && candidates[candidate_idx + 1] == layer_idx + 1;
-                // An outer wall hanging in the air is printed with a flow of its own, and a pass below it would hang
-                // lower still: such a layer follows the fallback, unless the stretches are short.
-                bool             overhangs   = false;
-                if (inner_walls.overhangs && below_known)
-                    for (const size_t below : { first - zs_per_candidate + num_passes / 2, first - 1 })
-                        for (const Polyline &hanging : diff_pl(to_polylines(wall_line), offset(outlines[below], scaled<float>(0.5 * nozzle))))
-                            overhangs |= hanging.length() > scaled<double>(outer_wall_pass_short_overhang);
-                if (overhangs)
-                    continue;
                 // Where the wall generator leaves a single wall on a top surface, there are no inner walls to share
                 // the offset with: such a layer takes the outer wall alone.
                 bool single_wall = false;

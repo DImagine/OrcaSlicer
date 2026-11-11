@@ -43,10 +43,6 @@ struct OuterWallPassSlices
     double highest_width() const { return std::max(this->limit_max_width, this->max_width); }
 };
 
-// A stretch of a wall hanging in the air no longer than this is printed in passes along with the rest of its loop,
-// unscaled. A layer with a longer one is not printed in passes.
-constexpr double outer_wall_pass_short_overhang = 2.;
-
 // Inner walls of a layer region, which may be printed in passes behind its outer wall.
 struct OuterWallPassInnerWalls
 {
@@ -85,7 +81,8 @@ bool outer_wall_pass_steps_fit(const std::vector<ExPolygons> &passes, const ExPo
 // collection per pass, bottom pass first. pass_flow is the outer wall flow at the pass height.
 // layer_outline is the outline of the layer the walls were generated in, with the XY compensations: the outer wall
 // follows the surface of the object where it runs along it, and the border of another region of the layer elsewhere.
-// Loops which cannot be split (overhangs, another width, holes when with_holes == false) are left as they are.
+// Loops which cannot be split (another width, holes when with_holes == false) are left as they are. The passes keep
+// the role of an overhanging wall where the loop has it, for its speed and cooling, with the flow of a pass.
 // With slices.walls above one the loops of the inner walls behind the outer wall are split as well, which takes
 // inner_walls.
 void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
