@@ -178,8 +178,9 @@ TEST_CASE("The corners of the wall of a hole follow the hole", "[OuterWallPasses
     REQUIRE(lower_passes.size() == 1);
     REQUIRE(lower_passes.front().entities.size() == 1);
     // The low pass is 0.75 mm wide, its middle 0.125 mm nearer to the middle of the hole: at the corners as well.
-    double reach = 0.;
-    for (const Point &point : static_cast<const ExtrusionLoop*>(lower_passes.front().entities.front())->polygon().points)
+    const Polygon polygon = static_cast<const ExtrusionLoop*>(lower_passes.front().entities.front())->polygon();
+    double        reach   = 0.;
+    for (const Point &point : polygon.points)
         reach = std::max(reach, std::max(std::abs(unscaled<double>(point.x())), std::abs(unscaled<double>(point.y()))));
     REQUIRE_THAT(reach, WithinAbs(4.125, 0.003));
 }
