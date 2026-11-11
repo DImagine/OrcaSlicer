@@ -544,6 +544,11 @@ void PrintObject::make_perimeters()
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
 
+    // Orca: a layer printed with the outer wall in passes, a loop of whose outer wall could not be split, goes to
+    // the fallback: the object is sliced again with such layers left to it and the walls are generated anew.
+    // That is repeated as the new walls may refuse other layers, a few times at most.
+    for (size_t attempt = 0;; ++ attempt) {
+
     // Revert the typed slices into untyped slices, together with the anchors handed to bridges by a previous run.
     for (Layer *layer : m_layers) {
         layer->restore_untyped_slices();
@@ -635,6 +640,16 @@ void PrintObject::make_perimeters()
     );
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
+
+    const size_t refused_before = m_outer_wall_pass_refused.size();
+    for (const Layer *layer : m_layers)
+        if (layer->outer_wall_pass_slices && layer->outer_wall_pass_refused)
+            m_outer_wall_pass_refused.emplace_back(layer->print_z);
+    if (m_outer_wall_pass_refused.size() == refused_before || attempt == 3)
+        break;
+    this->slice_layers();
+    m_print->throw_if_canceled();
+    }
 
     this->set_done(posPerimeters);
 }

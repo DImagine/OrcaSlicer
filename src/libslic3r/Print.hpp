@@ -619,6 +619,11 @@ private:
     // configured so, and for each returned layer the slices of its passes, or nullptr for a layer printed without them.
     std::vector<coordf_t> plan_outer_wall_passes(std::vector<coordf_t>                                     object_layers,
                                                  std::vector<std::shared_ptr<const OuterWallPassSlices>> &pass_slices) const;
+    // Top Z of the layers a loop of whose outer wall could not be split into passes: they are left to the fallback
+    // when the object is sliced again. Cleared with every slicing of the object.
+    std::vector<coordf_t> m_outer_wall_pass_refused;
+    // The work of slice(), run again by make_perimeters() once such layers are found.
+    void slice_layers();
     // Belt mode: shift the sliced layer grid (layer print_z and the belt floor
     // clipping shift) by delta, used by Print::_align_belt_purge_layers() to
     // snap the purge prism's layers onto the printed objects' layer grid.

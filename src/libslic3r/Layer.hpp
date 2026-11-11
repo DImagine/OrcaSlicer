@@ -163,6 +163,8 @@ public:
     bool                slicing_errors;
     // Orca: set on a layer whose outer wall is printed in several thin passes, see OuterWallPasses.hpp.
     std::shared_ptr<const OuterWallPassSlices> outer_wall_pass_slices;
+    // Orca: set by the wall generator if a loop of the outer wall of this layer could not be split into passes.
+    bool                                       outer_wall_pass_refused { false };
     coordf_t            slice_z;       // Z used for slicing in unscaled coordinates
     coordf_t            print_z;       // Z used for printing in unscaled coordinates
     coordf_t            height;        // layer height in unscaled coordinates

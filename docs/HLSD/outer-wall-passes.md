@@ -159,6 +159,15 @@ the outer wall and the threshold, which would uncover the joint of its walls
 With the option off the joints of the walls may show from above, as they do on
 regular layers.
 
+A layer with a loop of the outer wall that could not be split, for any reason
+but the holes being off, does not keep that loop at the layer height among the
+passes: `PrintObject::make_perimeters()` notes such layers, slices the object
+again with them left to the fallback and generates the walls anew
+(`PrintObject::slice_layers()`, `m_outer_wall_pass_refused`). The new walls may
+refuse other layers, so this is repeated, three times at most; a loop still
+refused after that stays at the layer height. The noted layers are forgotten
+when the object is sliced for another reason.
+
 A loop with stretches the wall generator took for hanging in the air is printed
 in passes like any other. The wall generator judges by the whole layer, while
 on a slope a pass reaches out over the pass below it by a part of that only, so

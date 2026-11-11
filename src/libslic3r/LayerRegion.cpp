@@ -213,6 +213,11 @@ void LayerRegion::split_outer_wall()
                            this->flow(frExternalPerimeter, pass_height),
                            this->layer()->object()->config().split_outer_wall_holes.value,
                            with_inner_walls ? &inner_walls : nullptr, &rejections);
+    // A loop of the outer wall left as it is sends the layer to the fallback, unless left so on purpose: the
+    // wall of a hole with the holes off.
+    for (const std::string &rejection : rejections)
+        if (rejection.rfind("holes_off", 0) != 0)
+            this->layer()->outer_wall_pass_refused = true;
     // The log of the command line run is not captured: the lines go to the file named by OWP_DIAG.
     if (const char *diag = std::getenv("OWP_DIAG"); diag != nullptr && ! rejections.empty()) {
         static std::mutex           diag_mutex;
