@@ -203,7 +203,8 @@ TEST_CASE("A wall follows its edge beside the far side of a part tapering off", 
     REQUIRE(lower_passes.size() == 1);
     REQUIRE(lower_passes.front().entities.size() == 1);
     // The widths along the two sides of a pass by the middles of its segments, away from the base: on the lower
-    // side up to the tip.
+    // side up to the tip. The loop runs towards the tip along the lower side and back along the upper one, which
+    // crosses the axis of the wedge near the tip once moved inwards.
     auto check = [](const ExtrusionEntity *entity, double lower_width, double upper_width) {
         size_t lower = 0;
         size_t upper = 0;
@@ -213,10 +214,11 @@ TEST_CASE("A wall follows its edge beside the far side of a part tapering off", 
                 const Vec2d middle = 0.5 * (points[i].cast<double>() + points[i + 1].cast<double>());
                 if (middle.x() < scaled<double>(2.))
                     continue;
-                if (middle.y() < 0. && middle.x() < scaled<double>(17.3)) {
+                const bool towards_tip = points[i + 1].x() > points[i].x();
+                if (towards_tip && middle.x() < scaled<double>(17.3)) {
                     REQUIRE_THAT(double(path.width), WithinAbs(lower_width, 0.02));
                     ++ lower;
-                } else if (middle.y() > 0. && middle.x() < scaled<double>(15.)) {
+                } else if (! towards_tip && middle.x() < scaled<double>(15.)) {
                     REQUIRE_THAT(double(path.width), WithinAbs(upper_width, 0.02));
                     ++ upper;
                 }
