@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string>
 #include <vector>
 
 #include "ExPolygon.hpp"
@@ -91,6 +92,8 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
                             const ExPolygons                       &layer_outline,
                             const Flow                             &pass_flow,
                             bool                                    with_holes,
-                            const OuterWallPassInnerWalls          *inner_walls = nullptr);
+                            const OuterWallPassInnerWalls          *inner_walls = nullptr,
+                            // TEMP diagnostics: the loops of the outer wall left as they are, and why.
+                            std::vector<std::string>               *rejections = nullptr);
 
 } // namespace Slic3r

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -111,6 +112,8 @@ struct WallLoop
     std::vector<LoopSample>     samples;
     std::vector<ExtrusionLoop>  passes;
     bool                        valid { false };
+    // TEMP diagnostics: why the loop is left as it is.
+    const char                 *reject { nullptr };
 
     const ExtrusionLoop& loop() const { return *static_cast<const ExtrusionLoop*>(*this->slot); }
 };
@@ -127,6 +130,7 @@ bool sample_loop(WallLoop                            &wall_loop,
 {
     const ExtrusionLoop &loop          = wall_loop.loop();
     const size_t         wall          = wall_loop.wall;
+    auto                 refuse        = [&wall_loop](const char *why) { wall_loop.reject = why; return false; };
     const double         regular_width = walls.widths[wall];
     const ExtrusionRole  role          = wall == 0 ? erExternalPerimeter : erPerimeter;
     // Only a wall of its regular width is split, and a wall held back until the infill is printed must not be
@@ -134,7 +138,7 @@ bool sample_loop(WallLoop                            &wall_loop,
     // loop: the wall is taken for hanging by the whole layer, while a pass reaches out half as far over the pass
     // below it. They keep their role, that is their speed and cooling, but not their flow.
     if (loop.print_after_infill)
-        return false;
+        return refuse("after_infill");
     Lines overhangs;
     for (const ExtrusionPath &path : loop.paths) {
         if (path.role() == erOverhangPerimeter) {
@@ -142,7 +146,7 @@ bool sample_loop(WallLoop                            &wall_loop,
             continue;
         }
         if (path.role() != role || std::abs(double(path.width) - regular_width) > 1e-3)
-            return false;
+            return refuse("width_or_role");
     }
     const OutlineDistancer overhang_lines(std::move(overhangs));
 
@@ -150,7 +154,7 @@ bool sample_loop(WallLoop                            &wall_loop,
     wall_loop.polygon.remove_duplicate_points();
     const Points &points = wall_loop.polygon.points;
     if (points.size() < 3)
-        return false;
+        return refuse("degenerate");
 
     // Sample the loop densely enough to follow a slope changing along a straight edge.
     const double             max_segment = scaled<double>(0.5);
@@ -197,7 +201,7 @@ bool sample_loop(WallLoop                            &wall_loop,
     // The material is inside a contour and outside a hole. The normals point to the right of the loop.
     const bool is_hole = (loop.loop_role() & elrHole) == elrHole;
     if (! with_holes && is_hole)
-        return false;
+        return refuse("holes_off");
     const double side = wall_loop.polygon.is_counter_clockwise() != is_hole ? 1. : -1.;
     wall_loop.side = side;
     wall_loop.hole = is_hole;
@@ -241,7 +245,7 @@ bool sample_loop(WallLoop                            &wall_loop,
         if (wall == 0 ? ! signed_distance(layer_outline, Point((point + surface_offset * sample.outward).cast<coord_t>()), surface_distance,
                                           surface_nearest) :
                         ! signed_distance(walls.surface_lines[wall], sample.point, surface_distance, surface_nearest))
-            return false;
+            return refuse("no_surface_distance");
         if (std::abs(surface_distance) > surface_tolerance) {
             sample.offsets.assign(num_passes, 0.);
             continue;
@@ -251,10 +255,10 @@ bool sample_loop(WallLoop                            &wall_loop,
         double      mid_distance;
         Vec2d       mid_nearest;
         if (! signed_distance(mid_outline, wall == 0 ? sample.point : measured, mid_distance, mid_nearest))
-            return false;
+            return refuse("no_mid_distance");
         const int mid_side = outline_side(mid_outline, measured_at, sample.outward);
         if (mid_side < 0)
-            return false;
+            return refuse("mid_side");
         side_confirmed |= mid_side > 0;
         sample.on_surface = true;
         sample.offsets.reserve(num_passes);
@@ -262,14 +266,14 @@ bool sample_loop(WallLoop                            &wall_loop,
             double pass_distance;
             Vec2d  pass_nearest;
             if (! signed_distance(pass_outline, wall == 0 ? sample.point : measured, pass_distance, pass_nearest))
-                return false;
+                return refuse("no_pass_distance");
             // The nearest edge may be another one in the outline of a pass only.
             if (outline_side(pass_outline, measured_at, sample.outward) < 0)
-                return false;
+                return refuse("pass_side");
             sample.offsets.emplace_back(pass_distance - mid_distance);
         }
     }
-    return side_confirmed;
+    return side_confirmed || refuse("side_unconfirmed");
 }
 
 // Split the offsets of the pass outlines between the walls running one behind another at each point of the loop.
@@ -488,7 +492,8 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
                             const ExPolygons                       &layer_outline,
                             const Flow                             &pass_flow,
                             bool                                    with_holes,
-                            const OuterWallPassInnerWalls          *inner_walls)
+                            const OuterWallPassInnerWalls          *inner_walls,
+                            std::vector<std::string>               *rejections)
 {
     const size_t num_passes = slices.count();
     if (num_passes < 2)
@@ -550,6 +555,7 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
         }
         for (WallLoop &wall_loop : wall_loops)
             if (wall_loop.valid && ! share_offsets(wall_loop, walls, wall_lines[wall_loop.wall], num_passes)) {
+                wall_loop.reject = "no_share";
                 wall_loop.valid = false;
                 changed         = true;
             }
@@ -557,14 +563,22 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
             continue;
         for (WallLoop &wall_loop : wall_loops)
             if (wall_loop.valid && ! build_passes(wall_loop, walls, num_passes)) {
+                wall_loop.reject = "build";
                 wall_loop.valid = false;
                 changed         = true;
             }
     }
 
     for (WallLoop &wall_loop : wall_loops) {
-        if (! wall_loop.valid)
+        if (! wall_loop.valid) {
+            if (rejections != nullptr && wall_loop.wall == 0) {
+                const Point at = wall_loop.loop().first_point();
+                rejections->emplace_back(std::string(wall_loop.reject != nullptr ? wall_loop.reject : "unknown") +
+                    " len " + std::to_string(unscaled<double>(wall_loop.loop().length())) +
+                    " at " + std::to_string(unscaled<double>(at.x())) + " " + std::to_string(unscaled<double>(at.y())));
+            }
             continue;
+        }
         for (size_t pass = 0; pass + 1 < num_passes; ++ pass)
             lower_passes[pass].entities.emplace_back(new ExtrusionLoop(std::move(wall_loop.passes[pass])));
         // The top pass is printed at the layer height and takes the place of the regular wall.

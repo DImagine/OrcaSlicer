@@ -203,10 +203,14 @@ void LayerRegion::split_outer_wall()
             0.5 * double(outer_flow.width() + inner_flow.width()) : 0.5 * double(outer_flow.spacing() + inner_flow.spacing());
         inner_walls.spacing = double(inner_flow.spacing());
     }
+    // TEMP diagnostics.
+    std::vector<std::string> rejections;
     split_outer_wall_loops(this->perimeters, this->outer_wall_lower_passes, *pass_slices, this->layer()->lslices,
                            this->flow(frExternalPerimeter, pass_height),
                            this->layer()->object()->config().split_outer_wall_holes.value,
-                           with_inner_walls ? &inner_walls : nullptr);
+                           with_inner_walls ? &inner_walls : nullptr, &rejections);
+    for (const std::string &rejection : rejections)
+        BOOST_LOG_TRIVIAL(error) << "OWP_REJECT z " << this->layer()->print_z << " walls " << pass_slices->walls << " " << rejection;
 }
 
 #if 1
