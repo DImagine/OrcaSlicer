@@ -339,14 +339,26 @@ TEST_CASE("Layers of a slope out of the pass width range follow the fallback set
 
 TEST_CASE("A layer with an outer wall that cannot be split follows the fallback setting", "[OuterWallPasses]")
 {
-    // A box with an XY compensation of 0.4 mm, more than half the outer wall: the wall runs outside the outline
-    // of the model the passes are planned by, so its loop cannot be split on any layer.
+    // A box of 20 mm hollowed by a negative volume to a frame 0.2 mm thick, which an XY compensation of the hole
+    // thickens inwards to 1.2 mm. The outer wall runs in the hole of the outlines of the model the passes are
+    // planned by, their nearest edge is not the one it follows, and its loop cannot be split on any layer.
     DynamicPrintConfig config = passes_config(GENERATE("split_layer", "regular"));
-    config.set_deserialize_strict({ { "xy_contour_compensation", 0.4 } });
+    config.set_deserialize_strict({ { "xy_hole_compensation", -1. } });
     const bool split_layers = config.opt_serialize("split_outer_wall_fallback") == "split_layer";
     CAPTURE(split_layers);
+    TriangleMesh hollow = make_cube(19.6, 19.6, 2.);
+    hollow.translate(0.2f, 0.2f, 0.f);
+    Model model;
+    ModelObject *model_object = model.add_object();
+    model_object->name = "frame.stl";
+    model_object->add_volume(make_cube(20., 20., 2.));
+    model_object->add_volume(std::move(hollow), ModelVolumeType::NEGATIVE_VOLUME);
+    model_object->add_instance();
+    model_object->ensure_on_bed();
     Print print;
-    init_and_process_print({ frustum(10., 10., 2.) }, print, config);
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
     const PrintObject &object = *print.objects().front();
     // 2 mm of layers of 0.2 mm, all but the first one halved by the split.
     REQUIRE(object.layers().size() == (split_layers ? 19 : 10));
