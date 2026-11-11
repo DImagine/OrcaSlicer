@@ -87,10 +87,10 @@ of the outlines, which has to be the edge the loop follows: the distance to
 outer side a probe contradicts or none confirms is left as it is. So is a loop the XY compensations moved
 beside another edge of the outlines, such as the hole of a thin wall they
 thickened. Where the outline of the layer does not lie half the wall width off
-the loop on its outer side, at a corner along the miter, the loop runs along the
-border of another region of the layer. There it is neither offset nor checked:
-its passes are plain thin loops. A loop with no part along the outline of the
-layer is left as it is. The top pass takes the place of the
+the loop on its outer side, at a corner along the miter, the loop is taken to
+run along the border of another region of the layer. There it is neither offset
+nor checked: its passes are plain thin loops. A loop with no part along the
+outline of the layer is left as it is. The top pass takes the place of the
 original loop in `LayerRegion::perimeters`. The passes below it are kept in
 `LayerRegion::outer_wall_lower_passes`, bottom pass first.
 
@@ -183,7 +183,14 @@ out, as it is with a prime tower.
 - With `split_outer_wall_holes` off the walls of holes are printed in one pass at
   the layer height, but still with the nominal width.
 - At corners sharper than about 41° the miter of the offset is limited and the
-  outer edge of a pass deviates from the outline by up to half the offset.
+  outer edge of a pass deviates from the outline by up to half the offset. The
+  corner point of such a loop is not found on the outline of the layer and is
+  not offset.
+- At a concave corner of the object, such as the corner of a hole, the offset is
+  measured to the corner of the outlines and comes out `1 / sin(a / 2)` times the
+  offset of the sides, `a` being the angle of the corner, within the width
+  range. The corner of a pass deviates from the outline by a fraction of the
+  offset.
 - The passes are measured against outlines without the XY size compensations.
 - The criterion offsets the middle outline with a miter limit, so a sloped layer
   with a convex corner sharper than about 30° to 40° may be taken for not
