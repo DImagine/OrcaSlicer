@@ -87,6 +87,9 @@ struct WallSet
     std::vector<WallReach> reach;
     // Flow of a wall at the height of a pass.
     std::vector<Flow>      pass_flows;
+    // Where the middle line of an inner wall runs along the surface of the object: the outline of the layer offset
+    // by the depth of the wall. Empty for the outer wall.
+    std::vector<OutlineDistancer> surface_lines;
 
     size_t count() const { return this->widths.size(); }
 };
@@ -211,8 +214,12 @@ bool sample_loop(WallLoop                            &wall_loop,
         const Vec2d point = sample.point.cast<double>();
         double      surface_distance;
         Vec2d       surface_nearest;
-        if (! signed_distance(layer_outline, Point((point + surface_offset * sample.outward).cast<coord_t>()), surface_distance,
-                              surface_nearest))
+        // The sides of an inner wall run past the ends of the sides of a hole it goes around, where a point moved
+        // by the depth of the wall misses the outline. An inner wall is thus looked up on the outline offset by
+        // its depth, as the wall generator makes it.
+        if (wall == 0 ? ! signed_distance(layer_outline, Point((point + surface_offset * sample.outward).cast<coord_t>()), surface_distance,
+                                          surface_nearest) :
+                        ! signed_distance(walls.surface_lines[wall], sample.point, surface_distance, surface_nearest))
             return false;
         if (std::abs(surface_distance) > surface_tolerance) {
             sample.offsets.assign(num_passes, 0.);
@@ -470,6 +477,7 @@ void split_outer_wall_loops(ExtrusionEntityCollection              &perimeters,
         reach.limit_inwards  = std::max(reach.inwards, scaled<double>(width - slices.lowest_width()));
         reach.limit_outwards = std::max(reach.outwards, scaled<double>(slices.highest_width() - width));
         walls.reach.emplace_back(reach);
+        walls.surface_lines.emplace_back(wall == 0 ? Lines() : to_lines(offset_ex(layer_outline, - float(walls.depths.back()))));
     }
 
     std::vector<WallLoop> wall_loops;

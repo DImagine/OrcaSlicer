@@ -67,14 +67,18 @@ ExtrusionEntityCollection wall_loop(double side, bool hole = false)
     return wall_loop(std::move(points), hole);
 }
 
-// Inner wall 0.45 mm wide as one loop along a square of the given side, counter-clockwise.
-ExtrusionLoop inner_wall_loop(double side)
+// Inner wall 0.45 mm wide as one loop along a square of the given side: counter-clockwise around a contour,
+// clockwise around a hole.
+ExtrusionLoop inner_wall_loop(double side, bool hole = false)
 {
     const coord_t half = scaled<coord_t>(0.5 * side);
+    Points        points { Point(-half, -half), Point(half, -half), Point(half, half), Point(-half, half) };
+    if (hole)
+        std::reverse(points.begin(), points.end());
+    points.emplace_back(points.front());
     ExtrusionPath path(erPerimeter, 0.1, 0.45f, 0.2f);
-    path.polyline = Polyline3(Polyline(Points{ Point(-half, -half), Point(half, -half), Point(half, half), Point(-half, half),
-                                               Point(-half, -half) }));
-    ExtrusionLoop loop(path);
+    path.polyline = Polyline3(Polyline(std::move(points)));
+    ExtrusionLoop loop(path, hole ? elrHole : elrDefault);
     loop.inset_idx = 1;
     return loop;
 }
@@ -313,6 +317,32 @@ TEST_CASE("An inner wall behind the outer wall shares its offset", "[OuterWallPa
         REQUIRE(lower_passes.size() == 1);
         REQUIRE(lower_passes.front().entities.empty());
     }
+}
+
+TEST_CASE("An inner wall around a hole shares the offset along its whole sides", "[OuterWallPasses]")
+{
+    // A square hole of 8 mm widening upwards by 0.13 mm a side per pass. The walls around it run along squares of
+    // 8.5 mm and, at the distance the wall generator keeps, of 9.364 mm: the sides of the inner wall reach 0.68 mm
+    // past the ends of the sides of the hole.
+    OuterWallPassSlices slices;
+    slices.mid       = { square(20., 8.) };
+    slices.passes    = { { square(20., 7.74) }, { square(20., 8.26) } };
+    slices.min_width = min_width;
+    slices.max_width = max_width;
+    slices.walls     = 2;
+    const double                  first_spacing = 0.5 * (0.5 + 0.45) - 0.2 * (1. - 0.25 * PI);
+    const OuterWallPassInnerWalls inner_walls { Flow(0.45f, 0.1f, 0.4f), first_spacing, 0.45 - 0.2 * (1. - 0.25 * PI) };
+    ExtrusionEntityCollection     perimeters = wall_loop(8.5, true);
+    perimeters.append(inner_wall_loop(8.5 + 2. * first_spacing, true));
+    std::vector<ExtrusionEntityCollection> lower_passes;
+    split_outer_wall_loops(perimeters, lower_passes, slices, slices.mid, Flow(0.5f, 0.1f, 0.4f), true, &inner_walls);
+    REQUIRE(lower_passes.size() == 1);
+    REQUIRE(lower_passes.front().entities.size() == 2);
+    // The low pass of the inner wall takes its share of the 0.13 mm everywhere: nowhere it is left 0.45 mm wide.
+    double narrowest = 1.;
+    for (const ExtrusionPath &path : static_cast<const ExtrusionLoop*>(lower_passes.front().entities[1])->paths)
+        narrowest = std::min(narrowest, double(path.width));
+    REQUIRE(narrowest > 0.45 + 0.06);
 }
 
 TEST_CASE("Walls go up to the limits of the width together", "[OuterWallPasses]")

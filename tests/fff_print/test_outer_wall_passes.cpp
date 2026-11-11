@@ -954,15 +954,18 @@ TEST_CASE("A single wall on top surfaces limits the step of the passes of severa
         { "inner_wall_line_width",            "0.45" },
         { "min_width_top_surface",            "0" },
     });
-    for (const bool one_wall : { false, true }) {
-        CAPTURE(one_wall);
-        config.set_deserialize_strict({ { "only_one_wall_top", one_wall } });
-        Print print;
-        init_and_process_print({ frustum(10., 4., 1.) }, print, config);
-        // The layer from 0.4 to 0.6 mm.
-        const Layer &layer = *print.objects().front()->layers()[2];
-        REQUIRE(bool(layer.outer_wall_pass_slices) == ! one_wall);
-        if (! one_wall)
-            REQUIRE(layer.outer_wall_pass_slices->walls == 2);
-    }
+    // Without top shell layers the wall generator leaves the walls alone, and so do the passes.
+    for (const int top_shells : { 3, 0 })
+        for (const bool one_wall : { false, true }) {
+            CAPTURE(top_shells, one_wall);
+            config.set_deserialize_strict({ { "only_one_wall_top", one_wall }, { "top_shell_layers", top_shells } });
+            Print print;
+            init_and_process_print({ frustum(10., 4., 1.) }, print, config);
+            // The layer from 0.4 to 0.6 mm.
+            const Layer &layer   = *print.objects().front()->layers()[2];
+            const bool   limited = one_wall && top_shells > 0;
+            REQUIRE(bool(layer.outer_wall_pass_slices) == ! limited);
+            if (! limited)
+                REQUIRE(layer.outer_wall_pass_slices->walls == 2);
+        }
 }

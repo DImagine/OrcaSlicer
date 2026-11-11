@@ -425,7 +425,8 @@ InnerPassWalls inner_pass_walls(const PrintObject &object, double nominal_width)
         out.min_width = any ? std::min(out.min_width, width) : width;
         out.max_width = any ? std::max(out.max_width, width) : width;
         any = true;
-        if (config.only_one_wall_top.value) {
+        // As in the classic wall generator, a single wall on top surfaces takes top shell layers.
+        if (config.only_one_wall_top.value && config.top_shell_layers.value > 0) {
             const double step = nominal_width + config.min_width_top_surface.get_abs_value(width);
             out.max_step = out.max_step < 0. ? step : std::min(out.max_step, step);
         }
@@ -482,9 +483,7 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
     const auto throw_on_cancel_callback = std::function<void()>([this]() { m_print->throw_if_canceled(); });
     std::vector<ExPolygons> outlines = slice_object_outlines(*this, m_shared_regions->layer_ranges, zs, throw_on_cancel_callback);
 
-    // Keep the slices of the layers whose passes fit the width range. The outlines are only read here: a layer
-    // looks at the lowest pass of the layer above it.
-    const ExPolygons nothing_above;
+    // Keep the slices of the layers whose passes fit the width range. The outlines are only read here.
     std::vector<std::shared_ptr<const OuterWallPassSlices>> fitting(candidates.size());
     tbb::parallel_for(tbb::blocked_range<size_t>(0, candidates.size()),
         [&](const tbb::blocked_range<size_t> &range) {
@@ -532,16 +531,10 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
                             break;
                         }
                 }
-                if (walls > 1 && inner_walls.max_step >= 0.) {
-                    // What lies over the top pass: the lowest pass of the layer above, nothing over the last layer.
-                    const ExPolygons *above = nullptr;
-                    if (candidate_idx + 1 < candidates.size() && candidates[candidate_idx + 1] == layer_idx + 1)
-                        above = &outlines[first + zs_per_candidate];
-                    else if (layer_idx + 1 == num_layers)
-                        above = &nothing_above;
-                    if (! outer_wall_pass_steps_fit(slices.passes, above, inner_walls.max_step, with_holes))
-                        walls = 0;
-                }
+                // The passes of the layer among themselves. What lies over the top pass is checked below.
+                if (walls > 1 && inner_walls.max_step >= 0. &&
+                    ! outer_wall_pass_steps_fit(slices.passes, nullptr, inner_walls.max_step, with_holes))
+                    walls = 0;
                 if (walls > 0) {
                     slices.walls = walls;
                     fitting[candidate_idx] = std::make_shared<const OuterWallPassSlices>(std::move(slices));
@@ -550,6 +543,27 @@ std::vector<coordf_t> PrintObject::plan_outer_wall_passes(std::vector<coordf_t> 
         });
 
     const bool split_layers = m_config.split_outer_wall_fallback.value == SplitOuterWallFallback::SplitLayer;
+    if (inner_walls.max_step >= 0.) {
+        // The top pass of a layer with several walls in passes against what lies over it, from the top down, as
+        // that depends on how the layer above ends up: its lowest pass, or its lowest thin layer if it is split,
+        // has the outline of the first pass; printed the regular way it has the outline of its middle. Nothing
+        // lies over the last layer. A layer above that is no candidate is not known here.
+        const ExPolygons nothing_above;
+        for (size_t candidate_idx = candidates.size(); candidate_idx -- > 0;) {
+            const std::shared_ptr<const OuterWallPassSlices> &slices = fitting[candidate_idx];
+            if (! slices || slices->walls < 2)
+                continue;
+            const size_t      layer_idx = candidates[candidate_idx];
+            const ExPolygons *above     = nullptr;
+            if (candidate_idx + 1 < candidates.size() && candidates[candidate_idx + 1] == layer_idx + 1) {
+                const size_t first_above = (candidate_idx + 1) * zs_per_candidate;
+                above = fitting[candidate_idx + 1] || split_layers ? &outlines[first_above] : &outlines[first_above + num_passes / 2];
+            } else if (layer_idx + 1 == num_layers)
+                above = &nothing_above;
+            if (above != nullptr && ! outer_wall_pass_steps_fit({ slices->passes.back() }, above, inner_walls.max_step, with_holes))
+                fitting[candidate_idx].reset();
+        }
+    }
     std::vector<coordf_t> out;
     out.reserve(object_layers.size());
     pass_slices.reserve(num_layers);

@@ -4,8 +4,8 @@
 
 `split_outer_wall` prints the outer wall of every layer as a stack of `n` thin
 loops, the passes, each `h / n` high (`split_outer_wall_count`, layer height
-`h`). The inner walls and the infill are printed afterwards at the full layer
-height. The outside of the print then shows the fine steps of a thin layer
+`h`). The inner walls not printed in passes and the infill are printed
+afterwards at the full layer height. The outside of the print then shows the fine steps of a thin layer
 while the inside prints at the speed of a thick one.
 
 The inner edge of the stack is vertical and common to all the passes. The outer
@@ -14,7 +14,9 @@ pass, so the passes differ in width and reproduce the slope of the surface in
 steps of the pass height.
 
 A layer is printed this way only if the widths of all its passes stay within the
-range `split_outer_wall_min_width` .. `split_outer_wall_max_width` everywhere.
+range `split_outer_wall_min_width` .. `split_outer_wall_max_width` everywhere,
+or within the limits of the width where several walls are printed in passes.
+The geometry below is that of the outer wall alone.
 A layer that does not fit is either split into `n` regular thin layers or printed
 the regular way (`split_outer_wall_fallback`).
 
@@ -106,7 +108,8 @@ the criterion, but its loop hangs in the air and must not be thinned.
 ## Several walls in passes
 
 `split_outer_wall_walls` is the number of walls, counted from the outer one,
-that may be printed in passes; 0 stands for all of them. The vertical edge of
+that may be printed in passes; 0 stands for all the wall loops of the settings,
+without the extra and the alternate ones. The vertical edge of
 the stack is then the inner edge of the last of these walls. The wall generator
 is not changed: the inner walls keep their regular width and spacing, and what
 lies behind the last wall printed in passes is printed at the full layer height.
@@ -132,21 +135,31 @@ wall if a region prints the inner walls with another filament.
 
 With Only one wall on top surfaces on, the regular walls of a top surface give
 way to a single wall where the layer above leaves more than the outer wall and
-One wall threshold uncovered. The passes follow that rule: with more than one
-wall in passes, no pass may step back from the pass below it by more than that,
-and neither may what lies over the top pass (`outer_wall_pass_steps_fit()`).
-A layer that does not keep to it follows the fallback. With the option off the
-joints of the walls may show from above, as they do on regular layers.
+One wall threshold uncovered, provided there are top shell layers. The passes
+follow that rule: with more than one wall in passes, no pass may step back from
+the pass below it by more than that, and neither may what lies over the top
+pass (`outer_wall_pass_steps_fit()`): the lowest pass or thin layer of the
+layer above, or its middle if it ends up printed the regular way. The layers
+are checked against the layer above from the top down. A layer that does not
+keep to the rule follows the fallback. With the option off the joints of the
+walls may show from above, as they do on regular layers.
 
 `split_outer_wall_loops()` samples every loop of these walls, an inner wall
 being measured at the point of the outer wall in front of it, so that the walls
-take the same offset. At every sample it finds the walls running there one
+take the same offset. An inner wall follows the surface where it runs along the
+outline of the layer offset by its depth. At every sample it finds the walls running there one
 behind another: the middle lines of the walls printed in passes are looked up
 at the distances the wall generator puts them at. A wall with no wall in front
 of it there, or a loop the outer wall of which is printed the regular way, is
 not offset; an inner wall loop offset nowhere stays a regular loop. Where the
 walls behind are missing, as in a thin part, the walls that are there take the
 offset alone, up to their limits.
+
+The lower passes of a level are printed nearest loop first, whichever wall a
+loop belongs to. An inner wall of a regular width out of the width range is
+printed in passes, but takes nothing of the offset on the side it is out of
+the range. The limits default to the default range and do not follow a change
+of the range: they only never lie inside it.
 
 ## G-code
 
