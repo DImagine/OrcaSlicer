@@ -120,19 +120,26 @@ BoundingBoxf get_print_object_extrusions_extents(const PrintObject &print_object
 {
     BoundingBoxf bbox;
     for (const Layer *layer : print_object.layers()) {
-        if (layer->print_z > max_print_z)
+        // Orca: of a layer ending above the limit, the lower passes of its split outer walls may still end below it.
+        const bool above = layer->print_z > max_print_z;
+        if (above && layer->bottom_z() > max_print_z)
             break;
         BoundingBoxf bbox_this;
         for (const LayerRegion *layerm : layer->regions()) {
-            bbox_this.merge(extrusionentity_extents(layerm->perimeters));
             // Orca: the lower passes of a split outer wall may reach further out than its top pass among the perimeters.
-            for (const ExtrusionEntityCollection &pass : layerm->outer_wall_lower_passes)
-                bbox_this.merge(extrusionentity_extents(pass));
+            // Pass number pass of num_passes ends at the given share of the layer height below the layer.
+            const size_t num_passes = layerm->outer_wall_lower_passes.size() + 1;
+            for (size_t pass = 0; pass + 1 < num_passes; ++ pass)
+                if (! above || layer->print_z - layer->height * double(num_passes - 1 - pass) / double(num_passes) <= max_print_z)
+                    bbox_this.merge(extrusionentity_extents(layerm->outer_wall_lower_passes[pass]));
+            if (above)
+                continue;
+            bbox_this.merge(extrusionentity_extents(layerm->perimeters));
             for (const ExtrusionEntity *ee : layerm->fills.entities)
                 // fill represents infill extrusions of a single island.
                 bbox_this.merge(extrusionentity_extents(*dynamic_cast<const ExtrusionEntityCollection*>(ee)));
         }
-        const SupportLayer *support_layer = dynamic_cast<const SupportLayer*>(layer);
+        const SupportLayer *support_layer = above ? nullptr : dynamic_cast<const SupportLayer*>(layer);
         if (support_layer)
             for (const ExtrusionEntity *extrusion_entity : support_layer->support_fills.entities)
                 bbox_this.merge(extrusionentity_extents(extrusion_entity));

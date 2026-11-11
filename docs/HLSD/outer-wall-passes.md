@@ -80,9 +80,13 @@ regions are cut away: a cut wall is not a loop any more and stays as it is.
 `split_outer_wall_loops()` replaces every loop of the outer wall
 (`OuterWallPasses.cpp`): the loop is sampled, the offsets `d_k` are measured at
 the samples as differences of signed distances to `S_k` and `S_mid`, and each
-pass is built as a variable width loop. The outer side of the loop is found by
-probing the distance to `S_mid` on both sides of it; a loop that does not tell
-is left as it is. The top pass takes the place of the
+pass is built as a variable width loop. The outer side of the loop follows from
+its being a contour or a hole. The offsets are measured against the nearest edge
+of the outlines, which has to be the edge the loop follows: the distance to
+`S_mid` is probed on both sides of the loop, and a loop whose outer side the
+probe does not confirm is left as it is. So is a loop the XY compensations moved
+beside another edge of the outlines, such as the hole of a thin wall they
+thickened. The top pass takes the place of the
 original loop in `LayerRegion::perimeters`. The passes below it are kept in
 `LayerRegion::outer_wall_lower_passes`, bottom pass first.
 

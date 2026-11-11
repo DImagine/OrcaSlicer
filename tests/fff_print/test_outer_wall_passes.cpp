@@ -9,6 +9,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/GCode/PrintExtents.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
@@ -18,7 +19,9 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/libslic3r.h"
 
+#include <admesh/stl.h>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -114,6 +117,23 @@ double pass_reach(const ExtrusionEntityCollection &collection)
             reach = std::max(reach, 0.5 * unscaled<double>(box.size().x()) + 0.5 * width);
         }
     return reach;
+}
+
+// Square frustum standing on the bed, of the given half sides at the bottom and at the top.
+TriangleMesh frustum(double bottom, double top, double height)
+{
+    indexed_triangle_set its;
+    const double         halves[2]  = { bottom, top };
+    const double         heights[2] = { 0., height };
+    for (int level = 0; level < 2; ++ level)
+        for (const Vec2d &corner : { Vec2d(-1., -1.), Vec2d(1., -1.), Vec2d(1., 1.), Vec2d(-1., 1.) })
+            its.vertices.emplace_back(float(corner.x() * halves[level]), float(corner.y() * halves[level]), float(heights[level]));
+    // The bottom, the top and the four sides, all facing out.
+    const int triangles[12][3] = { { 0, 2, 1 }, { 0, 3, 2 }, { 4, 5, 6 }, { 4, 6, 7 }, { 0, 1, 5 }, { 0, 5, 4 },
+                                   { 1, 2, 6 }, { 1, 6, 5 }, { 2, 3, 7 }, { 2, 7, 6 }, { 3, 0, 4 }, { 3, 4, 7 } };
+    for (const auto &triangle : triangles)
+        its.indices.emplace_back(triangle[0], triangle[1], triangle[2]);
+    return TriangleMesh(std::move(its));
 }
 
 // What the G-code extrudes at which height.
@@ -250,6 +270,21 @@ TEST_CASE("Passes follow the slope whichever way the wall runs", "[OuterWallPass
     // which leaves the distance to it no say in what side of the loop the material is on.
     REQUIRE_THAT(reach_difference({ { "xy_contour_compensation", 0.25 } }), WithinAbs(0.05, 0.02));
     REQUIRE_THAT(reach_difference({ { "xy_contour_compensation", 0.25 }, { "wall_direction", "cw" } }), WithinAbs(0.05, 0.02));
+}
+
+TEST_CASE("The extents of the extrusions count a lower pass by its own height", "[OuterWallPasses]")
+{
+    // A frustum widening by 0.5 mm per mm of height: the low pass of the second layer, printed at 0.3 mm, reaches
+    // further out than the first layer, and the top pass at 0.4 mm further still.
+    Print print;
+    init_and_process_print({ frustum(5., 10., 10.) }, print, passes_config("regular"));
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.layers()[1]->outer_wall_pass_slices);
+    const double first_layer  = get_print_object_extrusions_extents(object, 0.2 + EPSILON).max.x();
+    const double low_pass     = get_print_object_extrusions_extents(object, 0.3 + EPSILON).max.x();
+    const double second_layer = get_print_object_extrusions_extents(object, 0.4 + EPSILON).max.x();
+    REQUIRE(low_pass > first_layer + 0.03);
+    REQUIRE(second_layer > low_pass + 0.01);
 }
 
 TEST_CASE("Layers of a slope out of the pass width range follow the fallback setting", "[OuterWallPasses]")

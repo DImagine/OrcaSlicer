@@ -122,11 +122,18 @@ bool make_passes(const ExtrusionLoop                 &loop,
     // Measure the offsets of the pass outlines and find out, which side of the loop the material is on.
     const double min_offset = scaled<double>(slices.min_width - nominal_width);
     const double max_offset = scaled<double>(slices.max_width - nominal_width);
-    // The distance from the middle outline, positive inside, falls towards the outside. It is probed on both sides
-    // of the loop, which tells the outer side even of a loop running along the outline itself, as it does with
-    // an XY size compensation of half the wall width.
-    const double side_probe = scaled<double>(0.05);
-    double       side_votes = 0.;
+    // The material is inside a contour and outside a hole. The normals point to the right of the loop.
+    const bool is_hole = (loop.loop_role() & elrHole) == elrHole;
+    if (! with_holes && is_hole)
+        return false;
+    const double side = polygon.is_counter_clockwise() != is_hole ? 1. : -1.;
+    // The offsets are measured against the nearest edge of the outlines, which has to be the edge the loop follows:
+    // the distance from the middle outline, positive inside, has to fall towards the outer side of the loop.
+    // It is probed on both sides of the loop, which works even for a loop running along the outline itself, as it
+    // does with an XY size compensation of half the wall width. A loop the compensations moved beside another edge
+    // of the outlines, such as the hole of a thin wall they thickened, is left as it is.
+    const double side_probe     = scaled<double>(0.05);
+    bool         side_confirmed = false;
     for (LoopSample &sample : samples) {
         double mid_distance;
         Vec2d  mid_nearest;
@@ -137,8 +144,11 @@ bool make_passes(const ExtrusionLoop                 &loop,
         double      distance_left;
         if (signed_distance(mid_outline, Point((sample.point.cast<double>() + right).cast<coord_t>()), distance_right, mid_nearest) &&
             signed_distance(mid_outline, Point((sample.point.cast<double>() - right).cast<coord_t>()), distance_left, mid_nearest) &&
-            std::abs(distance_left - distance_right) > 0.5 * side_probe)
-            side_votes += distance_left > distance_right ? 1. : -1.;
+            std::abs(distance_left - distance_right) > 0.5 * side_probe) {
+            if ((distance_left > distance_right) != (side > 0.))
+                return false;
+            side_confirmed = true;
+        }
         sample.offsets.reserve(num_passes);
         for (const OutlineDistancer &pass_outline : pass_outlines) {
             double pass_distance;
@@ -148,13 +158,7 @@ bool make_passes(const ExtrusionLoop                 &loop,
             sample.offsets.emplace_back(std::clamp(pass_distance - mid_distance, min_offset, max_offset));
         }
     }
-    // The samples do not tell the outer side of the loop: it stays as it is.
-    if (side_votes == 0.)
-        return false;
-    // The normals point to the right of the loop. Flip them if the material is there.
-    const double side = side_votes > 0. ? 1. : -1.;
-    // A loop with the material outside of it runs around a hole.
-    if (! with_holes && (side > 0.) != polygon.is_counter_clockwise())
+    if (! side_confirmed)
         return false;
 
     // thick_polyline_to_multi_path() takes the width of the rectangle of the same cross section as the extrusion.
