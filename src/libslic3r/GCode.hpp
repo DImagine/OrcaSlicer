@@ -946,6 +946,9 @@ protected:
     // points of the loops of their passes as stored in it, so that all the passes of an outer wall start at the
     // same point. The loops of equal objects have equal points, hence the layer.
     std::map<std::pair<const Layer*, Point>, Point> m_outer_wall_pass_seams;
+    // Orca: the wall a pass being printed belongs to, erNone otherwise. A stretch of a pass hanging in the air takes
+    // the flow ratio of its wall.
+    ExtrusionRole m_outer_wall_pass_role = erNone;
     // Orca: set while the passes of the split outer walls below the layer height are being printed.
     bool m_printing_outer_wall_lower_passes = false;
     // Orca: outlines the passes of the split outer walls of the current layer lean on, by layer and pass.

@@ -8551,9 +8551,12 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     if (is_top_pass)
         m_extrusion_quality_estimator.set_custom_boundaries(
             this->outer_wall_pass_support(*m_layer, m_layer->outer_wall_pass_slices->count() - 1));
+    if (loop_ref.outer_wall_pass)
+        m_outer_wall_pass_role = loop_ref.inset_idx == 0 ? erExternalPerimeter : erPerimeter;
     ScopeGuard pass_support_guard([this, is_top_pass]() {
         if (is_top_pass)
             m_extrusion_quality_estimator.set_custom_boundaries(nullptr);
+        m_outer_wall_pass_role = erNone;
     });
 
     bool is_hole = (loop.loop_role() & elrHole) == elrHole;
@@ -9722,9 +9725,13 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
     }
 
     if (m_config.set_other_flow_ratios) {
-        if (path.role() == erExternalPerimeter) {
+        // Orca: a stretch of a pass of a split wall hanging in the air has the flow of a pass, not of a bridge:
+        // it takes the ratio of its wall.
+        const ExtrusionRole wall_role = path.role() == erOverhangPerimeter && m_outer_wall_pass_role != erNone ?
+            m_outer_wall_pass_role : path.role();
+        if (wall_role == erExternalPerimeter) {
             _mm3_per_mm *= m_config.outer_wall_flow_ratio;
-        } else if (path.role() == erPerimeter) {
+        } else if (wall_role == erPerimeter) {
             _mm3_per_mm *= m_config.inner_wall_flow_ratio;
         } else if (path.role() == erOverhangPerimeter) {
             _mm3_per_mm *= m_config.overhang_flow_ratio;

@@ -156,7 +156,8 @@ most of such stretches do not hang as passes at all. A stretch stepping out
 over nothing, as the first layer of a shelf, does hang as a pass: its low pass
 is printed thin and first on the layer, with nothing under it. Along these stretches the passes keep the role of
 an overhanging wall, which gives them its speed and cooling; their flow is that
-of a pass of their width and height, not the bridging flow.
+of a pass of their width and height, not the bridging flow, and with the flow
+ratio of their wall, not that of overhangs.
 
 `split_outer_wall_loops()` samples every loop of these walls, an inner wall
 being measured at the point of the outer wall in front of it, so that the walls
