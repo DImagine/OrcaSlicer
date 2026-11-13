@@ -13,6 +13,7 @@
 #include "libslic3r/Print.hpp"
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <boost/log/trivial.hpp>
 #include <optional>
 #include <cstddef>
@@ -46,7 +47,8 @@ ModifierSlices prepare_modifier_slices(std::vector<ExPolygons> slices)
     return cached;
 }
 
-PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter) : polygon(perimeter)
+PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter, coord_t surface_shift, bool is_hole)
+    : polygon(perimeter), shift(surface_shift), hole(is_hole)
 {
     const size_t count = polygon.size();
     if (count < 3)
@@ -62,6 +64,8 @@ PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter) : polygon(perimet
     valid = true;
 }
 
+PreparedPerimeter::~PreparedPerimeter() = default;
+
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
 
@@ -73,6 +77,23 @@ static constexpr double MACHINE_PRECISION_SQUARED = 2.5;
 // scaled units (1 um by default, 10 um on large beds), well above single-precision candidate steps.
 static constexpr coord_t TOLERANCE_LINEAR = 1000;
 static constexpr coord_t TOLERANCE_SQUARED = TOLERANCE_LINEAR * TOLERANCE_LINEAR;
+
+// The surface is reconstructed this much inside the model surface, so a modifier face placed flush against
+// a model face stays clear of it on every layer instead of touching it by rounding noise.
+static constexpr coord_t SURFACE_MARGIN = 5 * TOLERANCE_LINEAR;
+// Maximum sagitta of the chords that approximate the surface arcs around convex vertices.
+static constexpr double SURFACE_ARC_SAGITTA = 10.;
+// The dead-zone offset stays this far inside the surface: above the arc sagitta, the offset's own arc
+// tolerance and the rounding of both, so real surface is never removed. In units, like the tolerances above.
+static constexpr double SURFACE_ZONE_MARGIN = 50.;
+static constexpr double SURFACE_ZONE_ARC_TOLERANCE = 10.;
+
+coord_t surface_shift(double line_width, double compensation)
+{
+    const double shift = scale_(0.5 * line_width - compensation) - double(SURFACE_MARGIN);
+    // A shift within the snapping radius cannot change what insertion produces: keep the centerline path.
+    return shift > double(TOLERANCE_LINEAR) ? coord_t(std::lround(shift)) : 0;
+}
 
 namespace detail {
 
@@ -363,7 +384,147 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
         << " perimeter_points=" << perimeter.size();
     return false;
 }
+
+// Squared distance within which the two ends of a dead stretch count as one point. The zone margin keeps
+// tails up to about sqrt(margin * shift / 8) past a concave corner, so the ends of the shallowest corner
+// that still has a dead stretch lie about twice that apart; this bound keeps a wide margin over it.
+static double surface_join_tolerance_squared(coord_t shift)
+{
+    return 4. * (SURFACE_ZONE_MARGIN + SURFACE_ZONE_ARC_TOLERANCE) * double(shift) + double(TOLERANCE_SQUARED);
+}
+
+SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hole)
+{
+    SurfaceLine surface;
+    const size_t count = perimeter.size();
+    const double distance = double(shift);
+    // Air lies to the right of a counter-clockwise contour and to the left of a counter-clockwise hole;
+    // a clockwise input swaps the sides.
+    const bool ccw = perimeter.is_counter_clockwise();
+    const double side = (hole ? -1. : 1.) * (ccw ? 1. : -1.);
+    const auto round_point = [](const Vec2d &p) { return Point(coord_t(std::lround(p.x())), coord_t(std::lround(p.y()))); };
+    std::vector<Vec2d> normals(count);
+    surface.shifts.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const Vec2d edge = (perimeter[(i + 1) % count] - perimeter[i]).cast<double>();
+        normals[i] = side * Vec2d(edge.y(), -edge.x()) / edge.norm();
+        // One rounded shift per edge keeps each shifted edge an exact translate of its source edge.
+        surface.shifts.push_back(round_point(distance * normals[i]));
+    }
+
+    Points &points = surface.polygon.points;
+    // A point equal to the previous one ends a zero-length element: the new element replaces it.
+    const auto push = [&](const Point &point, SurfaceElement element) {
+        if (!points.empty() && points.back() == point) {
+            surface.elements.back() = element;
+            return;
+        }
+        points.push_back(point);
+        surface.elements.push_back(element);
+    };
+    // Chord angle of an arc of this radius whose sagitta stays within the limit.
+    const double max_step = 2. * std::acos(std::max(-1., 1. - SURFACE_ARC_SAGITTA / distance));
+    for (size_t i = 0; i < count; ++i) {
+        const size_t next = (i + 1) % count;
+        const Point &vertex = perimeter[next];
+        push(perimeter[i] + surface.shifts[i], {i, false});
+        const Point end = vertex + surface.shifts[i];
+        const Point resume = vertex + surface.shifts[next];
+        if (end == resume)
+            continue; // Collinear edges: the shifted edges meet exactly.
+        push(end, {next, true});
+        // The normal turns like the edge; a reversal turns by half a circle around the air side.
+        const double cross = normals[i].x() * normals[next].y() - normals[i].y() * normals[next].x();
+        const double dot = normals[i].dot(normals[next]);
+        const double sweep = cross == 0. && dot < 0. ? side * PI : std::atan2(cross, dot);
+        // Concave towards air: a straight bridge, never real surface, so it needs no shape.
+        if (side * sweep <= 0.)
+            continue;
+        const double start = std::atan2(normals[i].y(), normals[i].x());
+        const size_t steps = size_t(std::ceil(std::abs(sweep) / max_step));
+        for (size_t step = 1; step < steps; ++step) {
+            const double angle = start + sweep * double(step) / double(steps);
+            push(round_point(vertex.cast<double>() + distance * Vec2d(std::cos(angle), std::sin(angle))), {next, true});
+        }
+    }
+    if (points.size() > 1 && points.back() == points.front()) {
+        points.pop_back();
+        surface.elements.pop_back();
+    }
+    if (points.size() < 3)
+        return surface;
+
+    // Remove every part of the line closer than the shift to the centerline, slightly less to keep the
+    // real surface whole: concave bridges, tails past concave corners and parts facing other walls.
+    Polyline line(points);
+    line.points.push_back(points.front());
+    Polygon oriented = perimeter;
+    if (!ccw)
+        oriented.reverse(); // The offset grows a counter-clockwise polygon.
+    const Polygons zone = offset(oriented, float((hole ? -1. : 1.) * (distance - SURFACE_ZONE_MARGIN)), jtRound,
+                                 SURFACE_ZONE_ARC_TOLERANCE);
+    Polylines pieces = hole ? intersection_pl(line, zone) : diff_pl(line, zone);
+    for (Polyline &piece : pieces)
+        if (piece.size() >= 2) {
+            surface.bounds.merge(piece.points);
+            surface.pieces.push_back(std::move(piece));
+        }
+
+    // Order the pieces along the line by their bound ends; any binding failure leaves no gaps, so dead
+    // stretches simply stay uncovered.
+    struct PieceEnds {
+        size_t first_element;
+        double first_parameter;
+        Point first;
+        size_t last_element;
+        double last_parameter;
+        Point last;
+    };
+    std::vector<PieceEnds> ends;
+    for (const Polyline &piece : surface.pieces) {
+        std::vector<ClippedEdgeInterval> bound;
+        FragmentBindingFailure failure;
+        Polyline cleaned = piece;
+        if (!bind_fragment(piece, surface.polygon, bound, failure) &&
+            !(snap_cuts_to_adjacent_vertices(cleaned, surface.polygon) && cleaned.size() >= 2 &&
+              bind_fragment(cleaned, surface.polygon, bound, failure)))
+            return surface;
+        // A piece never crosses the start of the line, so its extreme positions are its ends, whichever
+        // direction clipping returned it in.
+        const ClippedEdgeInterval *first = &bound.front();
+        const ClippedEdgeInterval *last = &bound.front();
+        for (const ClippedEdgeInterval &interval : bound) {
+            if (std::make_pair(interval.edge, interval.begin) < std::make_pair(first->edge, first->begin))
+                first = &interval;
+            if (std::make_pair(interval.edge, interval.end) > std::make_pair(last->edge, last->end))
+                last = &interval;
+        }
+        ends.push_back({first->edge, first->begin, first->first, last->edge, last->end, last->last});
+    }
+    std::sort(ends.begin(), ends.end(), [](const PieceEnds &a, const PieceEnds &b) {
+        return std::make_pair(a.first_element, a.first_parameter) < std::make_pair(b.first_element, b.first_parameter);
+    });
+    const double join_squared = surface_join_tolerance_squared(shift);
+    for (size_t k = 0; k < ends.size(); ++k) {
+        const PieceEnds &before = ends[k];
+        const PieceEnds &after = ends[(k + 1) % ends.size()];
+        // Equal points only at the start of the closed line, where the pieces simply continue.
+        if (before.last == after.first)
+            continue;
+        if ((before.last - after.first).cast<double>().squaredNorm() <= join_squared)
+            surface.gaps.push_back({before.last_element, before.last, after.first_element, after.first});
+    }
+    return surface;
+}
 } // namespace detail
+
+const detail::SurfaceLine &PreparedPerimeter::surface() const
+{
+    assert(valid && shift > 0);
+    if (!m_surface)
+        m_surface = std::make_unique<detail::SurfaceLine>(detail::build_surface_line(polygon, shift, hole));
+    return *m_surface;
+}
 
 // Finalize one joined strong segment; only Center needs temporary per-edge lengths.
 static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mode, bool compare_lengths)
@@ -405,6 +566,109 @@ static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mo
     }
 }
 
+// Clipper returns a single point where a border only touches the line: nothing to bind.
+static void append_fragments(Polylines &&clipped, Polylines &fragments)
+{
+    for (Polyline &fragment : clipped)
+        if (fragment.size() >= 2)
+            fragments.push_back(std::move(fragment));
+}
+
+// Centerline path, used when the surface coincides with the centerline: clip it as an open line, without
+// offsets or contact rules, and bind the fragments to the perimeter itself. The open path keeps
+// self-touching vertices apart.
+static std::vector<detail::ClippedEdgeInterval> centerline_intervals(const PreparedPerimeter &prepared,
+    const std::vector<const ModifierRegion*> &regions, const ExtractionContext &context, size_t &discarded)
+{
+    std::vector<detail::ClippedEdgeInterval> intervals;
+    Polylines fragments;
+    // Clip only accepted regions, with their holes still attached to the exterior.
+    for (const ModifierRegion *region : regions)
+        append_fragments(intersection_pl(prepared.line, region->polygon), fragments);
+    for (size_t i = 0; i < fragments.size(); ++i)
+        if (!detail::append_fragment(fragments[i], prepared.polygon, intervals, context, i))
+            ++discarded;
+    return intervals;
+}
+
+// Surface path: clip the real surface pieces, bind the fragments to the surface line, then carry them onto
+// the centerline along the normal. A shifted edge keeps its parameters, an arc collapses to its vertex,
+// and a dead stretch whose two ends are both covered covers the centerline between them.
+static std::vector<detail::ClippedEdgeInterval> surface_intervals(const PreparedPerimeter &prepared,
+    const std::vector<const ModifierRegion*> &regions, const ExtractionContext &context, size_t &discarded)
+{
+    using detail::ClippedEdgeInterval;
+    std::vector<ClippedEdgeInterval> intervals;
+    const detail::SurfaceLine &surface = prepared.surface();
+    Polylines fragments;
+    for (const ModifierRegion *region : regions)
+        if (surface.bounds.defined && surface.bounds.overlap(region->bounds))
+            append_fragments(intersection_pl(surface.pieces, region->polygon), fragments);
+    std::vector<ClippedEdgeInterval> bound;
+    for (size_t i = 0; i < fragments.size(); ++i)
+        if (!detail::append_fragment(fragments[i], surface.polygon, bound, context, i))
+            ++discarded;
+    if (bound.empty())
+        return intervals;
+
+    const Polygon &perimeter = prepared.polygon;
+    const size_t count = perimeter.size();
+    struct CenterlinePoint {
+        size_t edge;
+        double parameter;
+        Point point;
+    };
+    // Shifted edges are exact translates, so a point moves back by the same integer shift.
+    const auto to_centerline = [&](size_t element, double parameter, const Point &point) -> CenterlinePoint {
+        const detail::SurfaceElement &source = surface.elements[element];
+        if (source.vertex)
+            return {source.source, 0., perimeter[source.source]};
+        return {source.source, parameter, point - surface.shifts[source.source]};
+    };
+    for (const ClippedEdgeInterval &interval : bound) {
+        const CenterlinePoint first = to_centerline(interval.edge, interval.begin, interval.first);
+        const CenterlinePoint last = to_centerline(interval.edge, interval.end, interval.last);
+        // An arc gives a vertex point, a shifted edge the same interval on its source edge.
+        intervals.push_back({first.edge, first.parameter, last.parameter, first.point, last.point});
+    }
+
+    // Covers the centerline forward from `from` to `to`; never around the whole loop.
+    const auto cover = [&](CenterlinePoint from, const CenterlinePoint &to) {
+        if (from.edge == to.edge && from.parameter > to.parameter)
+            return;
+        for (size_t steps = 0; steps <= count; ++steps) {
+            if (from.edge == to.edge && from.parameter <= to.parameter) {
+                if (from.parameter < to.parameter)
+                    intervals.push_back({from.edge, from.parameter, to.parameter, from.point, to.point});
+                return;
+            }
+            const size_t next = (from.edge + 1) % count;
+            if (from.parameter < 1.)
+                intervals.push_back({from.edge, from.parameter, 1., from.point, perimeter[next]});
+            from = {next, 0., perimeter[next]};
+        }
+    };
+    // A stretch counts as reached when coverage ends at its end point on the same element; the snapping
+    // radius absorbs a modifier boundary passing through the corner itself.
+    const auto reaches = [](const Point &a, const Point &b) {
+        return (a - b).cast<double>().squaredNorm() < double(TOLERANCE_SQUARED);
+    };
+    for (const detail::SurfaceGap &gap : surface.gaps) {
+        const ClippedEdgeInterval *before = nullptr;
+        const ClippedEdgeInterval *after = nullptr;
+        for (const ClippedEdgeInterval &interval : bound) {
+            if (interval.edge == gap.end_element && reaches(interval.last, gap.end))
+                before = &interval;
+            if (interval.edge == gap.start_element && reaches(interval.first, gap.start))
+                after = &interval;
+        }
+        if (before != nullptr && after != nullptr)
+            cover(to_centerline(before->edge, before->end, before->last),
+                  to_centerline(after->edge, after->begin, after->first));
+    }
+    return intervals;
+}
+
 SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, const ModifierRegions &modifier,
                                              ModelVolumeType mode, const ExtractionContext &context)
 {
@@ -416,28 +680,20 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     }
     const Polygon &perimeter = prepared.polygon;
     const size_t count = perimeter.size();
-    std::vector<const ExPolygon*> nearby_regions;
+    // The surface of an outer contour reaches the shift beyond the centerline's bounds.
+    BoundingBox reach = prepared.bounds;
+    if (prepared.shift > 0)
+        reach.offset(coordf_t(prepared.shift));
+    std::vector<const ModifierRegion*> nearby_regions;
     for (const ModifierRegion &region : modifier)
-        if (!region.polygon.empty() && prepared.bounds.overlap(region.bounds))
-            nearby_regions.push_back(&region.polygon);
+        if (!region.polygon.empty() && reach.overlap(region.bounds))
+            nearby_regions.push_back(&region);
     if (nearby_regions.empty())
         return result;
 
-    // Clip as an open line, without offsets or contact rules: modifiers should cross the perimeter
-    // clearly, and the open path keeps self-touching vertices apart.
-    std::vector<ClippedEdgeInterval> intervals;
-    Polylines fragments;
-    // Clip only accepted regions, with their holes still attached to the exterior.
-    for (const ExPolygon *region : nearby_regions) {
-        Polylines clipped = intersection_pl(prepared.line, *region);
-        for (Polyline &fragment : clipped)
-            // Clipper returns a single point where a border only touches the line: nothing to bind.
-            if (fragment.size() >= 2)
-                fragments.push_back(std::move(fragment));
-    }
-    for (size_t i = 0; i < fragments.size(); ++i)
-        if (!detail::append_fragment(fragments[i], perimeter, intervals, context, i))
-            ++result.discarded_fragments;
+    std::vector<ClippedEdgeInterval> intervals = prepared.shift > 0 ?
+        surface_intervals(prepared, nearby_regions, context, result.discarded_fragments) :
+        centerline_intervals(prepared, nearby_regions, context, result.discarded_fragments);
 
     std::sort(intervals.begin(), intervals.end(), [](const auto &a, const auto &b) {
         if (a.edge != b.edge) return a.edge < b.edge;
@@ -468,7 +724,18 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     for (const ClippedEdgeInterval &interval : merged) {
         const auto begin = position(interval.edge, interval.begin);
         const auto end = position(interval.edge, interval.end);
-        if (result.segments.empty() || !same_position(result.segments.back().end, begin)) {
+        const bool continues = !result.segments.empty() && same_position(result.segments.back().end, begin);
+        // A vertex point (surface arc) adds no edge: it only starts a zero-length segment if nothing reaches it.
+        if (interval.begin == interval.end) {
+            if (!continues) {
+                PerimeterSegment segment;
+                segment.begin = segment.end = begin;
+                segment.polyline.points.push_back(interval.first);
+                result.segments.push_back(std::move(segment));
+            }
+            continue;
+        }
+        if (!continues) {
             PerimeterSegment segment;
             segment.begin = begin;
             segment.polyline.points.push_back(interval.first);
@@ -489,14 +756,22 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
         tail.end = head.end;
         head = std::move(tail);
     }
-    // A full loop must cover every original edge, not merely have equal endpoint coordinates.
-    result.full_containment = merged.size() == count;
-    for (size_t i = 0; result.full_containment && i < count; ++i)
-        result.full_containment = merged[i].edge == i && merged[i].begin == 0. && merged[i].end == 1.;
+    // A full loop must cover every original edge, not merely have equal endpoint coordinates. Vertex points
+    // carry no coverage of their own.
+    size_t covered_edges = 0;
+    result.full_containment = true;
+    for (const ClippedEdgeInterval &interval : merged)
+        if (interval.begin != interval.end) {
+            result.full_containment = result.full_containment && interval.edge == covered_edges &&
+                                      interval.begin == 0. && interval.end == 1.;
+            ++covered_edges;
+        }
+    result.full_containment = result.full_containment && covered_edges == count;
     // A touch on an inclined edge leaves a sub-micron gap. Treat the single segment as full containment
     // when the gap is shorter than the snapping radius, or spans one vertex with both ends within it
-    // (exact for edges of 2 um and longer). The 2 um end distance is a cheap pre-filter.
-    if (!result.full_containment && result.segments.size() == 1) {
+    // (exact for edges of 2 um and longer). The 2 um end distance is a cheap pre-filter. A zero-length
+    // segment covers nothing, so it never qualifies.
+    if (!result.full_containment && result.segments.size() == 1 && !result.segments.front().edge_indices.empty()) {
         const PerimeterSegment &only = result.segments.front();
         const Point &first = only.polyline.points.front();
         const Point &last = only.polyline.points.back();

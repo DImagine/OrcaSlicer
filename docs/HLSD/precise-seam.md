@@ -42,10 +42,15 @@ retypes, and where needed adds, the candidates inside its intersection, like
 painting does.
 
 An **intersection** is a continuous part of the external perimeter's centerline
-that lies inside the modifier's slice on that layer. It is a portion of the
-perimeter, never a chord through the object. The centerline lies half an
-extrusion width inside the model surface and depends on print settings, so a
-modifier must reach clearly past the surface to cross it unambiguously.
+whose model surface lies inside the modifier's slice on that layer. It is a
+portion of the perimeter, never a chord through the object. The centerline lies
+half an extrusion width inside the printed wall and is invisible to the user,
+who places modifiers against the model surface. Extraction therefore
+reconstructs that surface from the centerline, clips it, and carries the
+result back onto the centerline along the normal (see
+[Surface reconstruction](#surface-reconstruction)). A modifier acts when it
+crosses the model surface, however shallowly, and has no effect when it stays
+inside the body, even if it crosses the centerline.
 
 ### Terms
 
@@ -142,9 +147,30 @@ original points, so ordinary seam candidates are unaffected.
 
 Each polygon is made counter-clockwise. A single `PreparedPerimeter` is then
 built for all modifiers of that perimeter. It holds a validity check (at least
-three points, no consecutive or closing duplicates), the bounding box, and the
-clipping line: the polygon as an open polyline with its first point repeated at
-the end. The preparation borrows the polygon and is used only while the polygon
+three points, no consecutive or closing duplicates), the bounding box, the
+clipping line (the polygon as an open polyline with its first point repeated at
+the end), the side of the air (outside a contour, inside a hole, by the loop
+role) and the surface shift. The surface line is built from it on the first
+request, so perimeters that no modifier approaches never pay for it.
+
+The **surface shift** is the distance from the centerline to the model surface
+the user sees, less a margin: `d = w/2 - c - m`.
+
+- `w` is the region's nominal external perimeter width, the flow the perimeter
+  generator uses for the outer loop on that layer, first layer included.
+- `c` is the XY compensation that moved this wall away from the model,
+  positive towards air: `xy_contour_compensation` for a contour and minus
+  `xy_hole_compensation` for a hole (a positive value enlarges holes). It is
+  zero where slicing skips compensation, for multi-material painting with
+  several filaments. Modifier slices are not compensated, so they stay in the
+  frame of the model.
+- `m` is `SURFACE_MARGIN` (5 µm). A modifier face placed flush against a model
+  face would otherwise touch the reconstructed surface by rounding noise and
+  act on some layers only; the margin moves that unstable position 5 µm deep,
+  where it is not reached by accident.
+
+A shift within the snapping radius is treated as zero: extraction then clips the
+centerline itself. The preparation borrows the polygon and is used only while the polygon
 is unchanged: strong processing returns immediately after inserting its point,
 and weak processing collects all segments before it inserts anything. An
 invalid perimeter receives no Precise Seam processing.
@@ -156,24 +182,61 @@ segments of the perimeter, each with its geometry and its position on the
 source contour. Both modifier kinds consume these segments; the extractor is
 told the modifier type so that it prepares only the data that type needs.
 
+### Surface reconstruction
+
+The surface is the set of points on the air side at the shift `d` from the
+centerline. `build_surface_line()` builds it as a closed line whose every edge
+remembers its source:
+
+- **Shifted edge.** Each source edge moved by `d` along its normal into the air.
+  The shift is rounded once per edge, so the shifted edge is an exact integer
+  translate of its source and keeps its parameters.
+- **Arc.** Where shifted edges diverge (a convex vertex as seen from the air),
+  an arc of radius `d` around the vertex, approximated by chords with a sagitta
+  of at most 10 units. A reversal of direction turns by half a circle.
+- **Bridge.** Where shifted edges cross (a concave vertex), a straight edge
+  between their ends. It is never surface.
+
+Defining the surface by distance discards whatever lies closer than `d` to the
+centerline: bridges, the tails of shifted edges past the crossing point `K` of a
+concave corner, fine tessellation with a radius below `d`, and parts facing
+other walls. Instead of trimming the line itself, the whole line is clipped once
+per perimeter against the centerline polygon offset by `d` less
+`SURFACE_ZONE_MARGIN` (round joins): what remains outside it (inside, for a
+hole) are the **pieces** of real surface. The margin keeps the real surface
+whole despite the arc sagitta, the offset's own arc tolerance and rounding; in
+return, tails of at most a few micrometers past `K` survive.
+
+The pieces are bound to the surface line once and ordered along it. Where one
+piece ends and the next begins at nearly the same point, they are the two ends
+of a **dead stretch** around a concave corner; these pairs are kept as gaps.
+"Nearly" allows for the surviving tails, whose ends lie at most about
+`sqrt(margin * d / 2)` apart at the shallowest corner that still has a dead
+stretch; the tolerance is twice the square root of `(margin + arc tolerance) * d`,
+plus the snapping radius. A general offset of the polygon could not replace the
+surface line: it rounds and cuts corners and loses the link to source edges.
+
 ### Clipping
 
-Regions whose bounding box does not overlap the perimeter's are skipped. The
-clipping line is intersected with each remaining region by `intersection_pl()`,
-which clips an open path against an `ExPolygon` with its holes attached, using
-the nonzero rule. Clipping an open line yields only pieces of the perimeter, so
-a modifier crossing the whole object produces two separate pieces rather than a
-chord through the body. Holes in a modifier and several regions of one modifier
-simply produce more pieces. The line is cut at vertex zero, so a piece crossing
-that vertex arrives as two fragments. A border that only touches the line can
-come back as a single point; such fragments carry no coverage and are dropped
-before binding.
+Regions whose bounding box does not overlap the perimeter's, enlarged by the
+shift, are skipped. The surface pieces are intersected with each remaining
+region by `intersection_pl()`, which clips open paths against an `ExPolygon`
+with its holes attached, using the nonzero rule. Clipping open lines yields only
+pieces of the surface, so a modifier crossing the whole object produces two
+separate pieces rather than a chord through the body. Holes in a modifier and
+several regions of one modifier simply produce more pieces. The surface line is
+cut at its start, so a piece crossing it arrives as two fragments. A border that
+only touches the surface can come back as a single point; such fragments carry
+no coverage and are dropped before binding. With a shift of zero the
+centerline's own clipping line is clipped instead, without offsets or contact
+rules.
 
 ### Binding fragments to source edges
 
 Clipper returns coordinates only. Insertion needs the source edge of every
 point, and coordinates alone are ambiguous where a contour visits the same
-point twice. Each fragment is therefore bound to the source edges it covers,
+point twice. Each fragment is therefore bound to the edges of the line it was
+clipped from (the surface line, or the centerline for a shift of zero),
 producing intervals: an edge index with a parameter range on that edge.
 
 - **Exact path.** For fragments with interior points, the second point is used
@@ -214,11 +277,35 @@ normal path never pays for them:
 Both outcomes are recoveries, not failures: they show no user warning but leave
 a log marker.
 
+### Carrying the surface onto the centerline
+
+Intervals on the surface line are carried onto the centerline along the normal:
+
+| Surface | Centerline |
+| --- | --- |
+| Shifted edge, parameters `t0..t1` | the same source edge, the same parameters |
+| Arc around a vertex | that vertex, as a **vertex point** |
+| Both ends of a dead stretch covered | the whole centerline between them |
+
+The last rule covers the crossing point `K` of a concave corner: when the
+modifier covers the surface on both sides of `K`, the centerline around the
+vertex, which has no surface of its own, joins them. When only one side is
+covered, the segment ends under the modifier's crossing, outside the dead
+stretch. An end counts as covered when coverage ends within the snapping radius
+of it on the same edge of the surface line, so a modifier boundary passing
+exactly through `K` covers it. The rule holds for non-adjacent edges as well,
+for example a concave fillet finer than the shift.
+
 ### Assembling segments
 
 The intervals are sorted by edge and parameter. Intervals on the same occurrence
 of an edge are united when they overlap or meet, by parameter or at the same
-integer point; equal coordinates on different edges are never united. A
+integer point; equal coordinates on different edges are never united. A vertex
+point adds no edge: next to coverage that reaches its vertex it disappears, and
+alone it forms a **zero-length segment**, a single point with no edges, where
+the modifier reached the surface only around a convex corner. Its strong target
+is the vertex in every mode, and as a weak zone it types the one candidate
+there. A
 parameter of 1 is stored as parameter 0 of the next edge, so intervals on
 adjacent edges meet exactly at their shared vertex. Consecutive intervals that
 meet form one `PerimeterSegment`, and the last segment is joined with the first
@@ -250,8 +337,12 @@ Enforced, Neutral and Blocked take part in the usual priority order (see
 [Weak modifiers](#weak-modifiers)).
 
 The perimeter is fully contained when the united intervals cover every source
-edge from parameter 0 to 1. A modifier boundary that merely touches the
-perimeter counts as well:
+edge from parameter 0 to 1, which is the case when the modifier covers the whole
+surface: every shifted edge and every dead stretch. A modifier that covers the
+whole centerline but leaves part of the surface outside gives ordinary segments.
+An uncovered part of a single arc carries onto one vertex, a gap of zero
+length, and so still counts as full containment. A modifier boundary that merely
+touches the perimeter counts as well:
 
 - At a vertex or on an axis-aligned edge, clipping splits the line exactly at the
   touch, the pieces meet at one point, and the coverage is complete.
@@ -270,7 +361,8 @@ where insertion collapses it, exactly up to edges shorter than 2 µm:
   each end then snaps onto it from its own edge.
 
 A cheap filter runs first: both cases bring the segment's ends within 2 µm of
-each other.
+each other. A zero-length segment covers nothing and is never full containment,
+although its ends coincide.
 
 ## Strong modifiers
 
@@ -284,7 +376,7 @@ before anything is inserted, together with the source edge it lies on:
 Arc length is the sum of Euclidean edge lengths, not the chord or a vertex count.
 
 `insert_strong_seam_point()` selects the longest segment of the first modifier
-that has one. Exactly equal lengths are resolved by the prepared target points:
+that has one; a zero-length segment loses to any other. Exactly equal lengths are resolved by the prepared target points:
 greater bed Y first, then smaller X; a complete tie keeps the first segment.
 Slice coordinates already include instance rotation and have the bed axes;
 centering and XY translation do not change this order. Nearly equal lengths are
@@ -363,7 +455,10 @@ larger. The enforced subdivision step is a physical distance and stays 0.2 mm.
 | Value | Role |
 | --- | --- |
 | `MACHINE_PRECISION_SQUARED` (2.5 units², about 1.6 nm) | A point lies on an edge if it is this close. It absorbs Clipper's truncation of cuts to whole units (under √2 units from the edge) and never bridges a real gap: a one-unit uncovered gap stays a gap. |
-| `TOLERANCE_LINEAR` (1000 units, 1 µm) | Insertion snaps points this close to an existing vertex, and helper points are placed this far from boundaries. The same radius bounds the rounding fallback, contacts and the sub-micron full-containment rule, so those decisions match what insertion would produce anyway. |
+| `TOLERANCE_LINEAR` (1000 units, 1 µm) | Insertion snaps points this close to an existing vertex, and helper points are placed this far from boundaries. The same radius bounds the rounding fallback, contacts and the sub-micron full-containment rule, so those decisions match what insertion would produce anyway. It is also the reach of a dead-stretch end and the smallest surface shift. |
+| `SURFACE_MARGIN` (5000 units, 5 µm) | The reconstructed surface lies this far inside the model surface, so a modifier flush with a model face does not act. |
+| `SURFACE_ARC_SAGITTA` (10 units) | Maximum sagitta of the chords of surface arcs. |
+| `SURFACE_ZONE_MARGIN` (50 units), `SURFACE_ZONE_ARC_TOLERANCE` (10 units) | The offset that removes non-surface stays this far inside the surface, with this arc tolerance, above the arc sagitta and rounding. Together with the shift they set the dead-stretch join tolerance. |
 | `enforcer_oversampling_distance` (0.2 mm) | Maximum step of enforced subdivision. |
 
 Raising the on-edge tolerance would not help with cuts beside a vertex: more
@@ -441,12 +536,24 @@ exceeded, one summary marker reports the total and the number omitted.
 
 ## Known limitations
 
-- **The modifier must reach the perimeter centerline.** Contacts are taken as
-  clipping returns them, without offsets or tangency rules, so boundaries that
-  only graze the centerline are the user's responsibility. Several near-touches
-  on inclined edges can leave several segments separated by gaps of a few units;
-  their zones then cover nearly the whole perimeter instead of being treated as
-  full containment.
+- **The surface is reconstructed, not measured.** It follows the nominal
+  external perimeter width; with Arachne the real width varies, and narrow
+  loops of the classic generator may print thinner. Elephant foot compensation
+  is not taken into account: on the first layers the reconstructed surface lies
+  inside the model surface by its amount. With fuzzy skin the centerline is
+  noisy and the surface repeats the noise. An open extrusion (thin wall) takes
+  its side from the loop orientation and gets a surface on that side only.
+- **Grazing contacts.** Contacts are taken as clipping returns them, without
+  tangency rules, so boundaries that only graze the surface are the user's
+  responsibility. Several near-touches on inclined edges can leave several
+  segments separated by gaps of a few units; their zones then cover nearly the
+  whole perimeter instead of being treated as full containment.
+- **Dead stretches.** The zone margin lets a covered segment reach a few
+  micrometers into the dead stretch of a concave corner. A dead stretch whose
+  ends do not meet (two walls of one contour closer than twice the shift, which
+  takes a model gap of about 10 µm) is never covered, so a modifier covering
+  all of the surface there gives one segment with a gap instead of full
+  containment.
 - **Self-touching perimeters.** Extraction keeps distinct visits of one
   coordinate apart through its source-edge bindings, but the consumers locate
   inserted points by coordinates. A weak zone is typed and subdivided from the
@@ -566,6 +673,12 @@ last modifier would.
   type changes and ordering; [3DScene.cpp](../../src/slic3r/GUI/3DScene.cpp)
   defines the colors.
 - [Segment extraction tests](../../tests/libslic3r/test_precise_seam.cpp) cover
+  surface reconstruction (convex and concave corners, holes, holes narrower than
+  the shift), crossing the surface without reaching the centerline, modifiers
+  inside the body, arcs giving zero-length segments, dead stretches covered or
+  not, contacts and flush faces on straight, inclined and tessellated walls,
+  full containment of the surface versus the centerline, fine concave fillets,
+  and independence of contour origin and direction. On the centerline they cover
   clipping and binding: holes and components, contour origin and reversal,
   repeated coordinates, collinear vertices and rounding, rollback and the
   diagnostic limits, the rounding fallback on synthetic and real Clipper
@@ -573,7 +686,9 @@ last modifier would.
   gaps on inclined edges and around vertices.
 - [Precise Seam tests](../../tests/fff_print/test_precise_seam.cpp) cover the
   consumers: strong targets in every mode, including a midpoint on an existing
-  vertex or the closing edge, longest-arc selection and tie order in bed axes,
+  vertex or the closing edge and a zero-length segment, longest-arc selection
+  (also of a longer segment over a zero-length one) and tie order in bed axes,
+  zero-length weak zones,
   priorities, weak boundaries that coincide or share an edge, enforced
   subdivision, whole-perimeter weak zones with painting and priorities, weak
   zones over painting's oversampled candidates, the warning type masks, usage
@@ -582,7 +697,9 @@ last modifier would.
   alignment, raft layer indexing and structured slices. End-to-end tests slice
   a real object with Precise Seam
   volumes and check the outer wall starts in the exported G-code: every strong
-  mode under several seam positions and with a raft, Enforced and Blocked zones,
+  mode under several seam positions and with a raft, a modifier reaching only
+  0.1 mm into the model, contour and hole walls under positive and negative XY
+  compensation, Enforced and Blocked zones,
   a perimeter blocked all round under every seam position, a modifier with a
   hole, and the user warning.
 - [Seam placer tests](../../tests/fff_print/test_seam_placer.cpp) cover

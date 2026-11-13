@@ -682,9 +682,18 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   std::optional<Point> seam_point;
   std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
   if (layer != nullptr && (!strong_volumes.empty() || !weak_volumes.empty())) {
+    // Modifiers act where they cross the model surface the user sees: the centerline lies half a line width
+    // inside the printed wall, which XY compensation moved away from the model (positive towards air).
+    // Multi-material painting disables that compensation, as in PrintObject::slice_volumes().
+    const bool hole = boundary_hole.value_or(was_clockwise);
+    const PrintObject *object = layer->object();
+    const bool compensated = !(object->print()->config().filament_diameter.size() > 1 && object->is_mm_painted());
+    const double compensation = !compensated ? 0. :
+                                hole ? -object->config().xy_hole_compensation.value : object->config().xy_contour_compensation.value;
     // Share validation, bounds and clipping line across all modifiers while the polygon is unchanged.
     // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
-    const PreciseSeam::PreparedPerimeter prepared(polygon);
+    const PreciseSeam::PreparedPerimeter prepared(
+        polygon, PreciseSeam::surface_shift(region->flow(FlowRole::frExternalPerimeter).width(), compensation), hole);
     seam_point = PreciseSeam::insert_strong_seam_point(
         strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
     if (!seam_point.has_value())

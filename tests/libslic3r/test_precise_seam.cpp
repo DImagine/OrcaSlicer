@@ -1055,3 +1055,290 @@ TEST_CASE("Rounded intersections on an inclined edge retain their original edge"
     CHECK_THAT(segment.length, Catch::Matchers::WithinAbs((last - first).norm(), 2. * std::sqrt(2.)));
     CHECK_FALSE(result.full_containment);
 }
+
+namespace {
+// 0.2 mm, the shift of a 0.4 mm line without margin or compensation; keeps the expected points round.
+const coord_t surface_distance = coord_t(scale_(0.2));
+
+// The L-shaped contour has its only concave vertex at (10, 10): edge 2 arrives along y = 10, edge 3 leaves
+// along x = 10, and their shifted copies cross at (10.2, 10.2).
+Polygon l_shape()
+{
+    return Polygon(Points{mm(0, 0), mm(20, 0), mm(20, 10), mm(10, 10), mm(10, 20), mm(0, 20)});
+}
+
+PreciseSeam::SegmentExtraction surface_extraction(const Polygon &perimeter, ExPolygons regions, bool hole = false,
+                                                  ModelVolumeType mode = ModelVolumeType::PRECISE_SEAM_CENTER,
+                                                  coord_t shift = surface_distance)
+{
+    const PreciseSeam::PreparedPerimeter prepared(perimeter, shift, hole);
+    return PreciseSeam::extract_perimeter_segments(prepared, PreciseSeam::prepare_modifier_regions(std::move(regions)), mode);
+}
+
+PreciseSeam::SegmentExtraction surface_extraction(const Polygon &perimeter, const Polygon &region, bool hole = false,
+                                                  ModelVolumeType mode = ModelVolumeType::PRECISE_SEAM_CENTER,
+                                                  coord_t shift = surface_distance)
+{
+    return surface_extraction(perimeter, ExPolygons{ExPolygon(region)}, hole, mode, shift);
+}
+
+bool contains_point(const Polyline &polyline, const Point &point)
+{
+    return std::find(polyline.points.begin(), polyline.points.end(), point) != polyline.points.end();
+}
+} // namespace
+
+TEST_CASE("The surface line shifts edges towards air, follows convex corners and bridges concave ones", "[PreciseSeam][SegmentExtraction]")
+{
+    // A convex contour is surface all round: one piece, no dead stretches.
+    const Polygon square = rectangle(0, 0, 20, 20);
+    const auto convex = PreciseSeam::detail::build_surface_line(square, surface_distance, false);
+    REQUIRE(convex.shifts.size() == 4);
+    CHECK(convex.shifts[0] == Point(0, -surface_distance));
+    CHECK(convex.shifts[1] == Point(surface_distance, 0));
+    REQUIRE(convex.elements.size() == convex.polygon.size());
+    size_t arc_chords = 0;
+    for (size_t i = 0; i < convex.polygon.size(); ++i) {
+        CHECK(convex.polygon.points[i] != convex.polygon.points[(i + 1) % convex.polygon.size()]);
+        arc_chords += convex.elements[i].vertex ? 1 : 0;
+    }
+    CHECK(arc_chords > 4); // Every corner is an arc of several chords.
+    REQUIRE(convex.pieces.size() == 1);
+    CHECK(convex.gaps.empty());
+
+    // One concave corner leaves one dead stretch whose ends meet near the crossing of the shifted edges.
+    const auto concave = PreciseSeam::detail::build_surface_line(l_shape(), surface_distance, false);
+    REQUIRE(concave.gaps.size() == 1);
+    CHECK((concave.gaps.front().end - mm(10.2, 10.2)).cast<double>().norm() < scale_(0.001));
+    CHECK((concave.gaps.front().start - mm(10.2, 10.2)).cast<double>().norm() < scale_(0.001));
+
+    // The wall of a hole is shifted into the hole; a hole narrower than twice the shift has no surface.
+    const auto hole = PreciseSeam::detail::build_surface_line(rectangle(0, 0, 10, 10), surface_distance, true);
+    CHECK(hole.shifts[0] == Point(0, surface_distance));
+    CHECK(hole.pieces.size() == 1);
+    CHECK(PreciseSeam::detail::build_surface_line(rectangle(0, 0, 0.3, 0.3), surface_distance, true).pieces.empty());
+}
+
+TEST_CASE("A modifier crossing the surface acts without reaching the centerline", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    // 0.1 mm past the surface, 0.1 mm short of the centerline.
+    const Polygon shallow = rectangle(8, -1, 12, -0.1);
+    CHECK(surface_extraction(square, shallow, false, ModelVolumeType::PRECISE_SEAM_CENTER, 0).segments.empty());
+    const auto result = surface_extraction(square, shallow);
+    check_provenance(square, result);
+    REQUIRE(result.segments.size() == 1);
+    CHECK(result.segments.front().polyline.points.front() == mm(8, 0));
+    CHECK(result.segments.front().polyline.points.back() == mm(12, 0));
+    CHECK_FALSE(result.full_containment);
+
+    // An inclined side maps along the normal: it crosses the surface y = -0.2 at x = 7 + 0.8 / 0.9.
+    const Polygon inclined(Points{mm(7, -1), mm(12, -1), mm(12, -0.1), mm(8, -0.1)});
+    const auto slanted = surface_extraction(square, inclined);
+    check_provenance(square, slanted);
+    REQUIRE(slanted.segments.size() == 1);
+    CHECK_THAT(unscale<double>(slanted.segments.front().polyline.points.front().x()),
+               Catch::Matchers::WithinAbs(7. + 0.8 / 0.9, 1e-5));
+    CHECK(slanted.segments.front().polyline.points.front().y() == 0);
+}
+
+TEST_CASE("A modifier that does not cross the surface has no effect even across the centerline", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    // Stops 0.1 mm short of the surface.
+    const auto short_of_surface = surface_extraction(square, rectangle(8, -1, 12, -0.3));
+    CHECK(short_of_surface.segments.empty());
+    CHECK_FALSE(short_of_surface.full_containment);
+    // Lies inside the body: crosses the centerline but never reaches the surface.
+    const auto inside = surface_extraction(square, rectangle(8, -0.15, 12, 0.5));
+    CHECK(inside.segments.empty());
+    CHECK_FALSE(inside.full_containment);
+    CHECK(inside.discarded_fragments == 0);
+}
+
+TEST_CASE("Covering only the arc of a convex corner gives a zero-length segment at its vertex", "[PreciseSeam][SegmentExtraction]")
+{
+    const auto mode = GENERATE(ModelVolumeType::PRECISE_SEAM_LEFT, ModelVolumeType::PRECISE_SEAM_CENTER,
+                               ModelVolumeType::PRECISE_SEAM_RIGHT, ModelVolumeType::PRECISE_SEAM_ENFORCED);
+    const Polygon square = rectangle(0, 0, 20, 20);
+    // Around the arc point at -45 degrees from (20, 0), clear of both shifted edges.
+    const auto arc = surface_extraction(square, rectangle(20.11, -0.17, 20.17, -0.11), false, mode);
+    REQUIRE(arc.valid);
+    CHECK(arc.discarded_fragments == 0);
+    REQUIRE(arc.segments.size() == 1);
+    const auto &point = arc.segments.front();
+    CHECK(point.edge_indices.empty());
+    CHECK(point.polyline.points == Points{mm(20, 0)});
+    CHECK(point.begin.edge_index == 1);
+    CHECK(point.begin.parameter == 0.);
+    CHECK(point.end.edge_index == 1);
+    CHECK(point.end.parameter == 0.);
+    CHECK_FALSE(arc.full_containment);
+    if (is_precise_seam_strong(mode)) {
+        REQUIRE(point.strong_target.has_value());
+        CHECK(point.strong_target->point == mm(20, 0));
+        CHECK(point.strong_target->edge_index == 1);
+    } else
+        CHECK_FALSE(point.strong_target.has_value());
+
+    // The arc together with part of the next shifted edge is an ordinary segment starting at the vertex.
+    const auto longer = surface_extraction(square, rectangle(20.11, -0.17, 20.5, 3), false, mode);
+    // Only strong modes prepare the targets the provenance check expects; only Center measures one segment.
+    if (is_precise_seam_strong(mode))
+        check_provenance(square, longer, mode == ModelVolumeType::PRECISE_SEAM_CENTER);
+    REQUIRE(longer.segments.size() == 1);
+    CHECK(longer.segments.front().polyline.points.front() == mm(20, 0));
+    CHECK(longer.segments.front().polyline.points.back() == mm(20, 3));
+    CHECK(longer.segments.front().begin.edge_index == 1);
+    CHECK(longer.segments.front().begin.parameter == 0.);
+}
+
+TEST_CASE("Covering the crossing of a concave corner covers its dead stretch of the centerline", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon perimeter = l_shape();
+    // The crossing (10.2, 10.2) inside: one segment through the vertex.
+    const auto across = surface_extraction(perimeter, rectangle(10.1, 10.1, 10.4, 10.4));
+    check_provenance(perimeter, across);
+    REQUIRE(across.segments.size() == 1);
+    CHECK(across.segments.front().polyline.points == Points{mm(10.4, 10), mm(10, 10), mm(10, 10.4)});
+    CHECK(across.segments.front().edge_indices == std::vector<size_t>{2, 3});
+
+    // On one side only: the segment ends under the modifier, outside the dead stretch.
+    const auto one_side = surface_extraction(perimeter, rectangle(10.5, 10.1, 11, 10.4));
+    check_provenance(perimeter, one_side);
+    REQUIRE(one_side.segments.size() == 1);
+    CHECK(one_side.segments.front().polyline.points == Points{mm(11, 10), mm(10.5, 10)});
+
+    // Within the shift of both walls but clear of the surface: across the bridge, and across the tail
+    // of a shifted edge past the crossing.
+    CHECK(surface_extraction(perimeter, rectangle(10.02, 10.02, 10.15, 10.15)).segments.empty());
+    CHECK(surface_extraction(perimeter, rectangle(10.05, 10.05, 10.15, 10.3)).segments.empty());
+}
+
+TEST_CASE("The surface of a hole lies inside the hole", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon perimeter = rectangle(0, 0, 10, 10);
+    const Polygon inside_hole = rectangle(4, 0.1, 6, 1);
+    const auto hole = surface_extraction(perimeter, inside_hole, true);
+    check_provenance(perimeter, hole);
+    REQUIRE(hole.segments.size() == 1);
+    CHECK(hole.segments.front().polyline.points == Points{mm(4, 0), mm(6, 0)});
+    // The same modifier is inside the body of a contour.
+    CHECK(surface_extraction(perimeter, inside_hole, false).segments.empty());
+    // A hole narrower than twice the shift has no surface to cross.
+    const auto narrow = surface_extraction(rectangle(0, 0, 0.3, 0.3), rectangle(-1, -1, 1, 1), true);
+    CHECK(narrow.valid);
+    CHECK(narrow.segments.empty());
+    CHECK_FALSE(narrow.full_containment);
+}
+
+TEST_CASE("A modifier touching the surface at one point has no effect", "[PreciseSeam][SegmentExtraction]")
+{
+    // Counter-clockwise diamond whose top vertex lies exactly on the surface.
+    const Polygon diamond(Points{mm(10, -0.2), mm(9.5, -0.7), mm(10, -1.2), mm(10.5, -0.7)});
+    const auto result = surface_extraction(rectangle(0, 0, 20, 20), diamond);
+    CHECK(result.segments.empty());
+    CHECK_FALSE(result.full_containment);
+}
+
+TEST_CASE("A modifier face flush with the model surface stays clear of the reconstructed surface", "[PreciseSeam][SegmentExtraction]")
+{
+    // The model surface lies half a 0.4 mm line outside the centerline; the margin keeps the
+    // reconstructed surface inside it.
+    const coord_t shift = PreciseSeam::surface_shift(0.4, 0.);
+    REQUIRE(shift > 0);
+    REQUIRE(shift < surface_distance);
+    CHECK(surface_extraction(rectangle(0, 0, 20, 20), rectangle(8, -1, 12, -0.2), false,
+                             ModelVolumeType::PRECISE_SEAM_CENTER, shift).segments.empty());
+
+    // Inclined wall x + y = 20, flush face 0.2 mm outside it.
+    const Polygon triangle(Points{mm(0, 0), mm(20, 0), mm(0, 20)});
+    const Vec2d normal = Vec2d(1., 1.).normalized();
+    const auto at = [](const Vec2d &p) { return mm(p.x(), p.y()); };
+    const Vec2d a = Vec2d(11., 9.) + 0.2 * normal;
+    const Vec2d b = Vec2d(9., 11.) + 0.2 * normal;
+    Polygon flush(Points{at(a), at(a + 2. * normal), at(b + 2. * normal), at(b)});
+    flush.make_counter_clockwise();
+    CHECK(surface_extraction(triangle, flush, false, ModelVolumeType::PRECISE_SEAM_CENTER, shift).segments.empty());
+
+    // A tessellated cylinder inside a modifier whose hole is the model surface.
+    Polygon circle;
+    for (int i = 0; i < 360; ++i)
+        circle.points.push_back(mm(10. * std::cos(i * PI / 180.), 10. * std::sin(i * PI / 180.)));
+    const auto around = [&](double distance) {
+        Polygons model_surface = offset(circle, float(scale_(distance)), jtRound, 10.);
+        REQUIRE(model_surface.size() == 1);
+        ExPolygon region(rectangle(-20, -20, 20, 20));
+        region.holes.push_back(model_surface.front());
+        region.holes.back().make_clockwise();
+        return surface_extraction(circle, ExPolygons{region}, false, ModelVolumeType::PRECISE_SEAM_CENTER, shift);
+    };
+    const auto flush_ring = around(0.2);
+    CHECK(flush_ring.segments.empty());
+    CHECK_FALSE(flush_ring.full_containment);
+    // 10 um deeper the modifier covers the whole surface.
+    CHECK(around(0.19).full_containment);
+}
+
+TEST_CASE("Full containment means the whole surface, not the whole centerline", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    CHECK(surface_extraction(square, rectangle(-1, -1, 21, 21)).full_containment);
+    // Covers the centerline all round but the surface only under the bump on the front face.
+    const ExPolygons partial = union_ex(Polygons{rectangle(-0.1, -0.1, 20.1, 20.1), rectangle(8, -1, 12, 0)});
+    const auto result = surface_extraction(square, partial);
+    CHECK_FALSE(result.full_containment);
+    REQUIRE(result.segments.size() == 1);
+    CHECK(result.segments.front().polyline.points == Points{mm(8, 0), mm(12, 0)});
+}
+
+TEST_CASE("A concave fillet finer than the shift binds without failures", "[PreciseSeam][SegmentExtraction]")
+{
+    // The concave corner of the L shape rounded with radius 0.1 mm in 20 edges: all of them dead.
+    Points points{mm(0, 0), mm(20, 0), mm(20, 10)};
+    for (int i = 0; i <= 20; ++i) {
+        const double angle = 0.5 * PI * i / 20.;
+        points.push_back(mm(10.1 - 0.1 * std::sin(angle), 10.1 - 0.1 * std::cos(angle)));
+    }
+    points.insert(points.end(), {mm(10, 20), mm(0, 20)});
+    const Polygon perimeter(points);
+    const auto across = surface_extraction(perimeter, rectangle(10.1, 10.1, 10.4, 10.4));
+    check_provenance(perimeter, across);
+    REQUIRE(across.segments.size() == 1);
+    CHECK(across.segments.front().polyline.points.front() == mm(10.4, 10));
+    CHECK(across.segments.front().polyline.points.back() == mm(10, 10.4));
+    // Every fillet vertex lies in the covered dead stretch.
+    for (size_t i = 3; i <= 23; ++i)
+        CHECK(contains_point(across.segments.front().polyline, perimeter.points[i]));
+    const auto one_side = surface_extraction(perimeter, rectangle(10.5, 10.1, 11, 10.4));
+    check_provenance(perimeter, one_side);
+    REQUIRE(one_side.segments.size() == 1);
+    CHECK(one_side.segments.front().polyline.points == Points{mm(11, 10), mm(10.5, 10)});
+}
+
+TEST_CASE("Surface extraction does not depend on the contour origin or direction", "[PreciseSeam][SegmentExtraction]")
+{
+    const int origin = GENERATE(0, 1, 2, 3, 4, 5);
+    const bool reverse = GENERATE(false, true);
+    CAPTURE(origin, reverse);
+    Polygon perimeter = l_shape();
+    std::rotate(perimeter.points.begin(), perimeter.points.begin() + origin, perimeter.points.end());
+    if (reverse)
+        perimeter.reverse();
+    // Across the concave corner, and around the convex corner (20, 0) as one segment through its vertex.
+    const struct {
+        Polygon region;
+        Point first;
+        Point last;
+    } cases[] = {{rectangle(10.1, 10.1, 10.4, 10.4), mm(10.4, 10), mm(10, 10.4)},
+                 {rectangle(19, -1, 21, 1), mm(19, 0), mm(20, 1)}};
+    for (const auto &expected : cases) {
+        const auto result = surface_extraction(perimeter, expected.region);
+        check_provenance(perimeter, result);
+        REQUIRE(result.segments.size() == 1);
+        const Polyline &polyline = result.segments.front().polyline;
+        CHECK(polyline.points.front() == (reverse ? expected.last : expected.first));
+        CHECK(polyline.points.back() == (reverse ? expected.first : expected.last));
+        CHECK(polyline.size() == 3);
+    }
+}

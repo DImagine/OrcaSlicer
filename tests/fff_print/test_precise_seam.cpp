@@ -1280,6 +1280,72 @@ TEST_CASE("Weak zones type painting's oversampled candidates between their bound
     CHECK(cleared_oversampled >= 15); // About 4 mm of 0.2 mm steps inside the zone.
 }
 
+TEST_CASE("Strong modes put the seam on the vertex of a zero-length surface segment", "[PreciseSeam]")
+{
+    const auto [mode, x] = GENERATE(table<ModelVolumeType, double>({
+        {ModelVolumeType::PRECISE_SEAM_LEFT, 8.},
+        {ModelVolumeType::PRECISE_SEAM_CENTER, 10.},
+        {ModelVolumeType::PRECISE_SEAM_RIGHT, 12.}}));
+    SeamFixture fixture;
+    const coord_t shift = coord_t(scale_(0.2));
+    // Covers only the surface arc around the corner (20, 0).
+    const Polygon arc_only = rectangle(20.11, -0.17, 20.17, -0.11);
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    const ModelVolume *corner = fixture.add(mode, {arc_only});
+    PreciseSeam::PreciseSeamWarnings warnings;
+    const auto seam = PreciseSeam::insert_strong_seam_point({corner}, perimeter, PreciseSeam::PreparedPerimeter(perimeter, shift),
+                                                            fixture.layer, fixture.cache, &warnings);
+    REQUIRE(seam.has_value());
+    CHECK(*seam == mm(20, 0));
+    require_vertex(perimeter, mm(19.999, 0));
+    require_vertex(perimeter, mm(20, 0.001));
+    check_square_boundary(perimeter);
+    CHECK_FALSE(warnings.full_containment.load());
+    CHECK_FALSE(warnings.multiple_intersections.load());
+
+    // Any segment of nonzero length is longer: here the crossing of the front face at x = 8..12.
+    Polygon second = rectangle(0, 0, 20, 20);
+    const ModelVolume *both = fixture.add(mode, {arc_only, rectangle(8, -1, 12, -0.1)});
+    const auto longer = PreciseSeam::insert_strong_seam_point({both}, second, PreciseSeam::PreparedPerimeter(second, shift),
+                                                              fixture.layer, fixture.cache, &warnings);
+    REQUIRE(longer.has_value());
+    CHECK(*longer == mm(x, 0));
+    CHECK(warnings.multiple_intersections.load() != 0);
+}
+
+TEST_CASE("A zero-length weak zone types the single candidate at its vertex", "[PreciseSeam]")
+{
+    using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    SeamFixture fixture;
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    const ModelVolume *enforcer = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, {rectangle(20.11, -0.17, 20.17, -0.11)});
+    const auto segments = PreciseSeam::collect_weak_modifier_segments(
+        {enforcer}, perimeter, PreciseSeam::PreparedPerimeter(perimeter, coord_t(scale_(0.2))), fixture.layer, fixture.cache);
+    REQUIRE(segments.size() == 1);
+    CHECK_FALSE(segments.front().whole_perimeter);
+    CHECK(segments.front().left_point == mm(20, 0));
+    CHECK(segments.front().right_point == mm(20, 0));
+    check_square_boundary(perimeter);
+
+    PrintObjectSeamData::LayerSeams candidates;
+    candidates.perimeters.emplace_back();
+    auto &loop = candidates.perimeters.back();
+    loop.start_index = 0;
+    for (const Point &point : perimeter.points) {
+        const Vec2f position = unscale(point).cast<float>();
+        candidates.points.emplace_back(Vec3f(position.x(), position.y(), 0), loop, 0, Type::Neutral);
+    }
+    loop.end_index = candidates.points.size();
+    bool enforced = false;
+    PreciseSeam::apply_weak_modifiers_to_perimeter(segments, candidates, loop, enforced);
+    CHECK(enforced);
+    for (const auto &candidate : candidates.points) {
+        CAPTURE(candidate.position.x(), candidate.position.y());
+        const bool at_vertex = candidate.position.x() == 20.f && candidate.position.y() == 0.f;
+        CHECK(candidate.type == (at_vertex ? Type::Enforced : Type::Neutral));
+    }
+}
+
 namespace {
 // A 20 x 20 x 2 mm cube sliced at 0.2 mm, so ten layers, each with one outer wall loop.
 struct ExportFixture {
@@ -1288,7 +1354,7 @@ struct ExportFixture {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     Vec3d cube_min;
 
-    explicit ExportFixture(const std::string &seam_position, int raft_layers = 0)
+    explicit ExportFixture(const std::string &seam_position, int raft_layers = 0, TriangleMesh object = make_cube(20, 20, 2))
     {
         config.set_deserialize_strict("seam_position", seam_position);
         config.set_deserialize_strict("seam_slope_type", "none"); // The loop then starts exactly at the seam.
@@ -1297,7 +1363,7 @@ struct ExportFixture {
         config.set_deserialize_strict("outer_wall_line_width", "0.4");
         config.set_deserialize_strict("initial_layer_line_width", "0.4");
         config.set_deserialize_strict("raft_layers", std::to_string(raft_layers));
-        Test::init_print({make_cube(20, 20, 2)}, print, model, config);
+        Test::init_print({std::move(object)}, print, model, config);
         const ModelVolume *cube = model.objects.front()->volumes.front();
         cube_min = cube->mesh().transformed_bounding_box(cube->get_matrix()).min;
     }
@@ -1356,6 +1422,18 @@ std::vector<OuterLoop> outer_wall_loops(const std::string &gcode)
     for (OuterLoop &loop : loops)
         loop.seam -= loop.bounds.center();
     return loops;
+}
+
+// The 20 x 20 x 2 mm cube with a 6 x 6 mm hole at x, y = 7..13 mm between z = 0.4 and 1.6 mm, clear of the
+// slicing planes.
+TriangleMesh cube_with_hole()
+{
+    TriangleMesh cube = make_cube(20, 20, 2);
+    TriangleMesh cavity = make_cube(6, 6, 1.2);
+    cavity.translate(7., 7., 0.4);
+    cavity.flip_triangles();
+    cube.merge(cavity);
+    return cube;
 }
 
 TriangleMesh helper_with_hole()
@@ -1452,13 +1530,60 @@ TEST_CASE("A strong modifier with a hole uses the left of two equal crossings", 
     CHECK(fixture.warning().find("Seam Center") != std::string::npos);
 }
 
-TEST_CASE("The export warning names a modifier that misses the outer wall centreline", "[PreciseSeam]")
+TEST_CASE("The export warning names a modifier that misses the model surface", "[PreciseSeam]")
 {
-    // The helper reaches 0.1 mm into the cube, short of the centreline 0.2 mm inside a 0.4 mm outer wall.
+    // The helper stops 0.1 mm in front of the cube.
     ExportFixture fixture("back");
-    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(2, 3.1, 4), Vec3d(4, -3, -1), "short helper");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(2, 2.9, 4), Vec3d(4, -3, -1), "short helper");
     fixture.export_gcode();
     CHECK(fixture.warning().find("short helper") != std::string::npos);
+}
+
+TEST_CASE("A modifier reaching into the model surface places the seam short of the centreline", "[PreciseSeam]")
+{
+    // The helper reaches 0.1 mm into the cube, half way to the centreline of the 0.4 mm outer wall.
+    ExportFixture fixture("back");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3.1, 4), Vec3d(4, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    for (const OuterLoop &loop : loops) {
+        CHECK_THAT(loop.seam.x(), Catch::Matchers::WithinAbs(5. - 10., 0.01));
+        CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.min.y() - loop.bounds.center().y(), 0.01));
+    }
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("XY compensation does not change which modifiers reach the model surface", "[PreciseSeam]")
+{
+    const double compensation = GENERATE(-0.1, 0., 0.1);
+    const bool hole = GENERATE(false, true);
+    const bool reaches = GENERATE(true, false);
+    CAPTURE(compensation, hole, reaches);
+    // The helper ends 0.05 mm inside or in front of the model face, however far compensation moved the wall.
+    const double depth = reaches ? 0.05 : -0.05;
+    ExportFixture fixture("back", 0, hole ? cube_with_hole() : make_cube(20, 20, 2));
+    fixture.config.set_deserialize_strict(hole ? "xy_hole_compensation" : "xy_contour_compensation", std::to_string(compensation));
+    // Elephant foot compensation would move the first layer's wall as well.
+    fixture.config.set_deserialize_strict("elefant_foot_compensation", "0");
+    if (hole)
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 2. + depth, 4), Vec3d(9, 7. - depth, -1)); // Hole wall y = 7.
+    else
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3. + depth, 4), Vec3d(4, -3, -1)); // Front face.
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    size_t checked = 0;
+    for (const OuterLoop &loop : loops) {
+        // Hole loops are about 6 mm wide, outer loops about 20 mm.
+        if ((loop.bounds.size().x() < 10.) != hole)
+            continue;
+        ++checked;
+        CAPTURE(loop.seam.x(), loop.seam.y());
+        if (reaches) {
+            CHECK_THAT(loop.seam.x(), Catch::Matchers::WithinAbs(hole ? 0. : 5. - 10., 0.01));
+            CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.min.y() - loop.bounds.center().y(), 0.01));
+        } else
+            CHECK(loop.seam.y() > 0.); // The back seam, away from the helper.
+    }
+    CHECK(checked >= (hole ? 4u : 10u));
 }
 
 TEST_CASE("Full containment warns for Blocked but not for Enforced", "[PreciseSeam]")

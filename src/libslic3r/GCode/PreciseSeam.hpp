@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <vector>
 #include <unordered_map>
@@ -13,6 +14,7 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
+#include "libslic3r/libslic3r.h"
 #include "libslic3r/Model.hpp"
 #include "SeamPlacer.hpp"
 
@@ -93,14 +95,30 @@ struct ExtractionContext {
     PreciseSeamWarnings *warnings = nullptr;
 };
 
+namespace detail { struct SurfaceLine; }
+
+// Scaled distance from the perimeter centerline to the model surface the user sees: half the line width,
+// less the XY compensation applied to this contour (positive towards air) and a small margin. Zero when
+// the surface practically coincides with the centerline; extraction then clips the centerline itself.
+coord_t surface_shift(double line_width, double compensation);
+
 // Borrows the source polygon; use only until insertion/refinement changes that polygon.
 struct PreparedPerimeter {
     const Polygon &polygon;
     BoundingBox bounds;
     Polyline line;
     bool valid = false;
+    // Distance to the reconstructed surface and its side: air lies inside the polygon of a hole.
+    coord_t shift = 0;
+    bool hole = false;
 
-    explicit PreparedPerimeter(const Polygon &perimeter);
+    explicit PreparedPerimeter(const Polygon &perimeter, coord_t surface_shift = 0, bool is_hole = false);
+    ~PreparedPerimeter();
+    // Built on the first request, so perimeters that no modifier approaches never pay for it.
+    const detail::SurfaceLine &surface() const;
+
+private:
+    mutable std::unique_ptr<detail::SurfaceLine> m_surface;
 };
 
 // A vertex is represented by its outgoing edge and parameter zero, including vertex 0.
@@ -116,6 +134,7 @@ struct StrongSeamTarget {
 };
 
 struct PerimeterSegment {
+    // A single point with no edges when the surface was reached only around a convex vertex.
     Polyline polyline;
     // One bound source edge per polyline interval.
     std::vector<size_t> edge_indices;
