@@ -1306,7 +1306,8 @@ TEST_CASE("A concave fillet finer than the shift binds without failures", "[Prec
     }
     points.insert(points.end(), {mm(10, 20), mm(0, 20)});
     const Polygon perimeter(points);
-    const auto across = surface_extraction(perimeter, rectangle(10.1, 10.1, 10.4, 10.4));
+    // A modifier covering the whole corner, tails and bridges of the surface line included.
+    const auto across = surface_extraction(perimeter, rectangle(9.9, 9.9, 10.4, 10.4));
     check_provenance(perimeter, across);
     REQUIRE(across.segments.size() == 1);
     CHECK(across.segments.front().polyline.points.front() == mm(10.4, 10));
