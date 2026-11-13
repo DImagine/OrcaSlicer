@@ -361,7 +361,8 @@ print and is tested on its own.
   perimeter.
 - **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
   `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
-  the layers it takes the perimeters as the main pass extracts them, and runs
+  the layers it takes the perimeters as the main pass extracts them, with the
+  same surface shift and side, and runs
   the strong driver on a fresh copy of each, first with the seniors, then on a
   free perimeter with each member alone until it wins. These probes are quiet:
   no log, no counters, no usage flags, so the real pass reports everything once.

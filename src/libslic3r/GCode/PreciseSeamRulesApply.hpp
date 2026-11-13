@@ -10,6 +10,7 @@
 #include <vector>
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Polygon.hpp"
+#include "libslic3r/libslic3r.h"
 #include "PreciseSeam.hpp"
 #include "PreciseSeamRulesGeometry.hpp"
 #include "PreciseSeamRules.hpp"
@@ -106,8 +107,16 @@ std::vector<size_t> relay_random_holders(const std::vector<std::vector<uint8_t>>
 void relay_strong_volumes(const RelayOrder &order, const EffectiveModifiers &effective, size_t layer, size_t end,
                           std::vector<const ModelVolume*> &out);
 
+// Outer perimeter of one object layer, with the surface shift and side the main pass prepares it with.
+struct ProbePerimeter
+{
+    Polygon polygon;
+    coord_t surface_shift = 0;
+    bool    is_hole       = false;
+};
+
 // Outer perimeters of one object layer, as the seam placer gives them to Precise Seam.
-using LayerPerimeters = std::function<Polygons(const Layer &layer)>;
+using LayerPerimeters = std::function<std::vector<ProbePerimeter>(const Layer &layer)>;
 
 // Second stage of the context, once its modifiers are sliced; nothing to do without relay. Fills the holders of
 // every group, in block order: a pre-pass, parallel over the layers, finds the members that win on each layer

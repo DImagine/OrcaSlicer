@@ -2399,18 +2399,25 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       // Relay: who holds the turn of each group on each layer, from the same perimeters as the main pass.
       if (global_model_info.precise_seam_rules)
           PreciseSeam::schedule_relay(*global_model_info.precise_seam_rules, *po, global_model_info.precise_seam_slices,
-              [](const Layer &layer) {
+              [&global_model_info](const Layer &layer) {
                   std::vector<const LayerRegion*> regions;
-                  // Boundary types only mark the perimeter after the seam point is chosen; the probe needs none.
+                  // Boundary types tell holes from contours, as in the main pass.
                   std::vector<std::optional<bool>> boundary_types;
                   // An object with relay groups has strong modifiers, so the main pass normalizes too.
                   Polygons polygons = extract_perimeter_polygons(&layer, regions, boundary_types, true);
                   // Without a region the main pass leaves Precise Seam out, as for the placeholder of a layer
                   // without perimeters.
-                  Polygons out;
+                  std::vector<PreciseSeam::ProbePerimeter> out;
                   for (size_t i = 0; i < polygons.size(); ++i)
-                      if (regions[i] != nullptr && !polygons[i].empty())
-                          out.push_back(std::move(polygons[i]));
+                      if (regions[i] != nullptr && !polygons[i].empty()) {
+                          // Side and surface shift exactly as process_perimeter_polygon() derives them.
+                          const bool   hole         = boundary_types[i].value_or(polygons[i].is_clockwise());
+                          const double compensation = hole ? global_model_info.precise_seam_hole_compensation
+                                                           : global_model_info.precise_seam_contour_compensation;
+                          const coord_t shift = PreciseSeam::surface_shift(
+                              regions[i]->flow(FlowRole::frExternalPerimeter).width(), compensation);
+                          out.push_back({std::move(polygons[i]), shift, hole});
+                      }
                   return out;
               },
               throw_if_canceled_func);
