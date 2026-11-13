@@ -1350,3 +1350,55 @@ TEST_CASE("Surface extraction does not depend on the contour origin or direction
         CHECK(polyline.size() == 3);
     }
 }
+
+namespace {
+// Concave circular wall of `count` vertices per full turn with a vertex at `vertex`, its centre on the air side:
+// a hole of the given radius, or a notch of that radius cut into the right side of an 80 mm square.
+Polygon concave_wall(double radius, int count, bool hole, Point &vertex)
+{
+    Polygon polygon;
+    if (hole) {
+        for (int i = 0; i < count; ++i)
+            polygon.points.push_back(mm(radius * std::cos(2. * PI * i / count), radius * std::sin(2. * PI * i / count)));
+        vertex = mm(radius, 0);
+        return polygon;
+    }
+    polygon.points = {mm(-40, -40), mm(40, -40)};
+    // The notch runs clockwise around its centre (40, 0), from angle -90 through 180 degrees to 90.
+    for (int j = 0; j <= count / 2; ++j) {
+        const double angle = -0.5 * PI - 2. * PI * j / count;
+        polygon.points.push_back(mm(40. + radius * std::cos(angle), radius * std::sin(angle)));
+    }
+    polygon.points.insert(polygon.points.end(), {mm(40, 40), mm(-40, 40)});
+    vertex = mm(40. - radius, 0);
+    return polygon;
+}
+} // namespace
+
+TEST_CASE("A boundary swept across a shallow concave vertex moves the single segment end monotonically", "[PreciseSeam][SegmentExtraction]")
+{
+    const int count = GENERATE(120, 180, 360, 720);
+    const double radius = GENERATE(2., 10.);
+    const bool hole = GENERATE(true, false);
+    CAPTURE(count, radius, hole);
+    Point vertex;
+    const Polygon perimeter = concave_wall(radius, count, hole, vertex);
+    const PreciseSeam::PreparedPerimeter prepared(perimeter, surface_distance, hole);
+    const double x = unscale<double>(vertex.x());
+    // The wall runs up (+y) through the vertex in both cases; the crossing of the shifted edges lies at y = 0.
+    // The modifier's top face sweeps from 6 um below it to 6 um above in 0.2 um steps.
+    double previous = -1.;
+    for (int step = -30; step <= 30; ++step) {
+        CAPTURE(step);
+        const auto regions = PreciseSeam::prepare_modifier_regions({ExPolygon(rectangle(x - 0.5, -0.5, x + 0.5, step * 0.0002))});
+        const auto result = PreciseSeam::extract_perimeter_segments(prepared, regions, ModelVolumeType::PRECISE_SEAM_CENTER);
+        CHECK(result.discarded_fragments == 0);
+        REQUIRE(result.segments.size() == 1);
+        // The segment starts at the fixed bottom face, so its length follows the top face along the wall.
+        const double length = result.segments.front().length;
+        CHECK(length >= previous - 2.);
+        previous = length;
+        if (step == 30)
+            CHECK(contains_point(result.segments.front().polyline, vertex));
+    }
+}
