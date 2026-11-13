@@ -685,16 +685,17 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
 
   std::optional<Point> seam_point;
   std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
-  if (layer != nullptr && (!strong_volumes.empty() || !weak_volumes.empty())) {
+  // Closed loops only: the G-code of an open extrusion (thin wall) does not depend on where its seam is.
+  if (layer != nullptr && boundary_hole.has_value() && (!strong_volumes.empty() || !weak_volumes.empty())) {
     // Modifiers act where they cross the model surface the user sees: the centerline lies half a line width
     // inside the printed wall, which XY compensation moved away from the model.
-    const bool hole = boundary_hole.value_or(was_clockwise);
+    const bool hole = *boundary_hole;
     const double compensation = hole ? global_model_info.precise_seam_hole_compensation
                                      : global_model_info.precise_seam_contour_compensation;
+    const coord_t shift = PreciseSeam::surface_shift(region->flow(FlowRole::frExternalPerimeter).width(), compensation);
     // Share validation, bounds and clipping line across all modifiers while the polygon is unchanged.
     // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
-    const PreciseSeam::PreparedPerimeter prepared(
-        polygon, PreciseSeam::surface_shift(region->flow(FlowRole::frExternalPerimeter).width(), compensation), hole);
+    const PreciseSeam::PreparedPerimeter prepared(polygon, shift, hole);
     seam_point = PreciseSeam::insert_strong_seam_point(
         strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
     if (!seam_point.has_value())

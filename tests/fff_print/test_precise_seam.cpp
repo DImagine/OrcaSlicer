@@ -6,12 +6,14 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "test_helpers.hpp"
+#include "admesh/stl.h"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/GCode/PreciseSeam.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -1638,6 +1640,64 @@ TEST_CASE("A wider first layer line does not change which modifiers reach the mo
         } else
             CHECK(loop.seam.y() > 0.); // The back seam, away from the helper.
     }
+}
+
+namespace {
+// A wall of the given thickness along a quarter circle of radius 10 mm around the origin, 2 mm high: from (10, 0)
+// to (0, 10) through 90 segments.
+TriangleMesh quarter_ring(double thickness)
+{
+    indexed_triangle_set its;
+    const int segments = 90;
+    for (int i = 0; i <= segments; ++i) {
+        const double angle = 0.5 * PI * i / segments;
+        const Vec2d direction(std::cos(angle), std::sin(angle));
+        for (const double radius : {10. - 0.5 * thickness, 10. + 0.5 * thickness})
+            for (const double z : {0., 2.})
+                its.vertices.emplace_back(Vec3f(float(radius * direction.x()), float(radius * direction.y()), float(z)));
+    }
+    // Vertex 4 i + 2 r + h: r = 0 inner, 1 outer; h = 0 bottom, 1 top. Faces wind counterclockwise from outside.
+    const auto v = [](int i, int r, int h) { return 4 * i + 2 * r + h; };
+    const auto quad = [&its](int a, int b, int c, int d) {
+        its.indices.emplace_back(a, b, c);
+        its.indices.emplace_back(a, c, d);
+    };
+    for (int i = 0; i < segments; ++i) {
+        quad(v(i, 0, 0), v(i + 1, 0, 0), v(i + 1, 1, 0), v(i, 1, 0)); // Bottom.
+        quad(v(i, 0, 1), v(i, 1, 1), v(i + 1, 1, 1), v(i + 1, 0, 1)); // Top.
+        quad(v(i, 1, 0), v(i + 1, 1, 0), v(i + 1, 1, 1), v(i, 1, 1)); // Outer side.
+        quad(v(i, 0, 0), v(i, 0, 1), v(i + 1, 0, 1), v(i + 1, 0, 0)); // Inner side.
+    }
+    quad(v(0, 0, 0), v(0, 1, 0), v(0, 1, 1), v(0, 0, 1));                         // End at angle 0.
+    quad(v(segments, 0, 0), v(segments, 0, 1), v(segments, 1, 1), v(segments, 1, 0)); // End at 90 degrees.
+    return TriangleMesh(std::move(its));
+}
+} // namespace
+
+TEST_CASE("A modifier crossing only an open thin wall has no effect", "[PreciseSeam]")
+{
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(generator);
+    // A 0.3 mm wall, thinner than one line, printed as a single open line along its middle, radius 10 mm. Its
+    // G-code does not depend on a seam, so Precise Seam leaves it out.
+    ExportFixture fixture("back", 0, quarter_ring(0.3));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    fixture.config.set_deserialize_strict("detect_thin_wall", "1");
+    fixture.config.set_deserialize_strict("elefant_foot_compensation", "0");
+    // A closed loop on the same layers, inside the ring at x, y = 2..5 mm: the helpers are evaluated on it.
+    fixture.add(ModelVolumeType::MODEL_PART, make_cube(3, 3, 2), Vec3d(2, 2, 0), "block");
+    // The fixture's corner is the ring's centre. At y = 3..4 mm the wall lies at x = 9.0..9.7: the first helper
+    // crosses all of it, centerline included, and nothing else. At y = 4.2..4.8 mm the second one crosses the wall
+    // and enters the block's right face x = 5 by 1 mm.
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(4, 1, 4), Vec3d(9, 3, -1), "thin wall only");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(9, 0.6, 4), Vec3d(4, 4.2, -1), "thin wall and block");
+    fixture.export_gcode();
+    const std::string warning = fixture.warning();
+    CAPTURE(warning);
+    // The user warning names the first modifier without effect and counts the rest: only the first helper is one.
+    CHECK(warning.find("had no effect") != std::string::npos);
+    CHECK(warning.find("thin wall only") != std::string::npos);
+    CHECK(warning.find("in total") == std::string::npos);
 }
 
 TEST_CASE("Full containment warns for Blocked but not for Enforced", "[PreciseSeam]")
