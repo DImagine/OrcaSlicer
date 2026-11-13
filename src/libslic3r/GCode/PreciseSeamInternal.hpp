@@ -25,8 +25,8 @@ struct ClippedEdgeInterval {
 struct SurfaceElement {
     size_t source; // Source edge or vertex index.
     bool vertex;
-    // Parameters on the source edge where a shifted edge starts and ends: below 1 and above 0 where it ends
-    // at the crossing of a concave corner instead of the shifted vertex.
+    // Parameters on the source edge where this part of a shifted edge starts and ends: a shifted edge is split
+    // where its shift changes along it, and ends at the crossing of a concave corner instead of the shifted vertex.
     double begin = 0.;
     double end = 1.;
 };
@@ -46,7 +46,10 @@ struct SurfaceGap {
 struct SurfaceLine {
     Polygon polygon;                      // No consecutive or closing duplicates.
     std::vector<SurfaceElement> elements; // One per polygon edge.
-    std::vector<Point> shifts;            // Integer shift of every source edge, so shifted edges keep parameters.
+    // Integer shift of every source edge whose shift is constant along it: its shifted edge is an exact translate,
+    // so a point maps back by subtraction. Other edges map back through the parameter.
+    std::vector<Point> shifts;
+    std::vector<bool> translated;         // Per source edge: whether `shifts` applies.
     Polyline line;                        // The polygon as an open path closed at its start, for clipping.
     std::vector<SurfaceGap> gaps;
     BoundingBox bounds;                   // Of the polygon.
@@ -54,6 +57,8 @@ struct SurfaceLine {
 
 // Builds the surface line of a perimeter accepted by PreparedPerimeter (either direction), shift > 0.
 SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hole);
+// The same with a shift that changes along the perimeter; no shift is negative.
+SurfaceLine build_surface_line(const Polygon &perimeter, const ShiftProfile &profile, bool hole);
 
 // A position on the centerline with its point.
 struct CenterlinePoint {

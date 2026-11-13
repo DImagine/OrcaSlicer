@@ -92,6 +92,22 @@ coord_t surface_shift(double line_width, double compensation)
     return shift > double(TOLERANCE_LINEAR) ? coord_t(std::lround(shift)) : 0;
 }
 
+PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter, ShiftProfile shift_profile, bool is_hole)
+    : PreparedPerimeter(perimeter, coord_t(0), is_hole)
+{
+    coord_t largest = 0;
+    for (const coord_t value : shift_profile.vertices)
+        largest = std::max(largest, value);
+    for (const auto &edge : shift_profile.interior)
+        for (const auto &sample : edge)
+            largest = std::max(largest, sample.second);
+    // Same snapping as surface_shift(): a surface this close cannot change what insertion produces.
+    if (largest <= TOLERANCE_LINEAR)
+        return;
+    shift = largest;
+    profile = std::move(shift_profile);
+}
+
 namespace detail {
 
 // Use the existing clipping tolerance only to recover rounded coordinates, not to
@@ -403,9 +419,17 @@ void cover_centerline(const Polygon &perimeter, CenterlinePoint from, const Cent
 
 SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hole)
 {
+    ShiftProfile profile;
+    profile.vertices.assign(perimeter.size(), shift);
+    return build_surface_line(perimeter, profile, hole);
+}
+
+SurfaceLine build_surface_line(const Polygon &perimeter, const ShiftProfile &profile, bool hole)
+{
     SurfaceLine surface;
     const size_t count = perimeter.size();
-    const double distance = double(shift);
+    assert(profile.vertices.size() == count);
+    assert(profile.interior.empty() || profile.interior.size() == count);
     // Air lies to the right of a counter-clockwise contour and to the left of a counter-clockwise hole;
     // a clockwise input swaps the sides.
     const bool ccw = perimeter.is_counter_clockwise();
@@ -413,49 +437,91 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
     const auto round_point = [](const Vec2d &p) { return Point(coord_t(std::lround(p.x())), coord_t(std::lround(p.y()))); };
     const auto cross = [](const Vec2d &a, const Vec2d &b) { return a.x() * b.y() - a.y() * b.x(); };
     std::vector<Vec2d> normals(count);
-    std::vector<Vec2d> directions(count);
-    surface.shifts.reserve(count);
     for (size_t i = 0; i < count; ++i) {
-        directions[i] = (perimeter[(i + 1) % count] - perimeter[i]).cast<double>();
-        normals[i] = side * Vec2d(directions[i].y(), -directions[i].x()) / directions[i].norm();
-        // One rounded shift per edge keeps each shifted edge an exact translate of its source edge.
-        surface.shifts.push_back(round_point(distance * normals[i]));
+        const Vec2d direction = (perimeter[(i + 1) % count] - perimeter[i]).cast<double>();
+        normals[i] = side * Vec2d(direction.y(), -direction.x()) / direction.norm();
     }
 
-    // A concave corner whose shifted edges cross within both of them is resolved exactly: the shifted edges end
-    // at the crossing K, with no tails and no bridge, and the dead stretch around the vertex is known at once.
-    // The trims of both corners of one edge must leave a part of it, so a fillet finer than the shift keeps its
-    // tails and bridges. A candidate counts against its neighbours even when it is not resolved itself.
-    std::vector<double> end_at(count, 1.);  // Per vertex: parameter on the edge before it where that edge ends.
-    std::vector<double> start_at(count, 0.); // Per vertex: parameter on the edge after it where that edge starts.
+    // Every shifted edge is a chain of straight parts between the points where its shift is given: from the edge's
+    // start vertex through the interior samples to its end vertex, each point moved along the edge's normal.
+    // A part maps linearly onto its range of parameters on the source edge.
+    struct Part {
+        double begin;
+        double end;
+        Point a;
+        Point b;
+    };
+    std::vector<Part> parts;
+    std::vector<size_t> first_part(count + 1);
+    surface.shifts.assign(count, Point(0, 0));
+    surface.translated.assign(count, false);
+    for (size_t i = 0; i < count; ++i) {
+        const size_t next = (i + 1) % count;
+        first_part[i] = parts.size();
+        const bool interior = !profile.interior.empty() && !profile.interior[i].empty();
+        Point from = perimeter[i] + round_point(double(profile.vertices[i]) * normals[i]);
+        double begin = 0.;
+        if (interior)
+            for (const auto &[parameter, value] : profile.interior[i]) {
+                const Vec2d at = perimeter[i].cast<double>() + parameter * (perimeter[next] - perimeter[i]).cast<double>();
+                const Point to = round_point(at + double(value) * normals[i]);
+                parts.push_back({begin, parameter, from, to});
+                from = to;
+                begin = parameter;
+            }
+        parts.push_back({begin, 1., from, perimeter[next] + round_point(double(profile.vertices[next]) * normals[i])});
+        // One rounded shift for a constant edge keeps its shifted edge an exact translate of the source edge.
+        if (!interior && profile.vertices[i] == profile.vertices[next]) {
+            surface.shifts[i] = round_point(double(profile.vertices[i]) * normals[i]);
+            surface.translated[i] = true;
+        }
+    }
+    first_part[count] = parts.size();
+    const auto last_part = [&first_part](size_t edge) { return first_part[edge + 1] - 1; };
+    const auto direction = [&parts](size_t part) -> Vec2d { return (parts[part].b - parts[part].a).cast<double>(); };
+
+    // A concave corner whose shifted edges cross within both of the parts meeting there is resolved exactly: the
+    // shifted edges end at the crossing K, with no tails and no bridge, and the dead stretch around the vertex is
+    // known at once. The trims of both corners of one part must leave a piece of it, so a fillet finer than the
+    // shift keeps its tails and bridges. A candidate counts against its neighbours even when it is not resolved
+    // itself.
+    std::vector<double> end_at(count, 1.);   // Per vertex: fraction of the part before it where that part ends.
+    std::vector<double> start_at(count, 0.); // Per vertex: fraction of the part after it where that part starts.
     std::vector<bool> candidate(count, false);
     std::vector<Vec2d> crossing(count);
     for (size_t v = 0; v < count; ++v) {
         const size_t before = (v + count - 1) % count;
+        const Vec2d into = direction(last_part(before));
+        const Vec2d out = direction(first_part[v]);
         const double turn = cross(normals[before], normals[v]);
-        const double denominator = cross(directions[before], directions[v]);
+        const double denominator = cross(into, out);
         if (side * turn >= 0. || denominator == 0.)
             continue; // Convex, collinear or a reversal.
-        const Vec2d a = (perimeter[before] + surface.shifts[before]).cast<double>();
-        const Vec2d offset = (perimeter[v] + surface.shifts[v]).cast<double>() - a;
-        end_at[v] = cross(offset, directions[v]) / denominator;
-        start_at[v] = cross(offset, directions[before]) / denominator;
-        crossing[v] = a + end_at[v] * directions[before];
+        const Vec2d a = parts[last_part(before)].a.cast<double>();
+        const Vec2d offset = parts[first_part[v]].a.cast<double>() - a;
+        end_at[v] = cross(offset, out) / denominator;
+        start_at[v] = cross(offset, into) / denominator;
+        crossing[v] = a + end_at[v] * into;
         candidate[v] = end_at[v] > 0. && end_at[v] < 1. && start_at[v] > 0. && start_at[v] < 1.;
     }
-    // A trimmed edge keeps at least this many units, so its rounded ends stay distinct.
+    // A trimmed part keeps at least this many units, so its rounded ends stay distinct. The far corner trims the
+    // same part only when the edge is a single part.
     const double min_part = 4.;
+    const auto single = [&](size_t edge) { return first_part[edge] == last_part(edge); };
     std::vector<bool> resolved(count, false);
     for (size_t v = 0; v < count; ++v) {
         const size_t before = (v + count - 1) % count;
         const size_t after = (v + 1) % count;
         resolved[v] = candidate[v] &&
-            (end_at[v] - (candidate[before] ? start_at[before] : 0.)) * directions[before].norm() > min_part &&
-            ((candidate[after] ? end_at[after] : 1.) - start_at[v]) * directions[v].norm() > min_part;
+            (end_at[v] - (single(before) && candidate[before] ? start_at[before] : 0.)) *
+                direction(last_part(before)).norm() > min_part &&
+            ((single(v) && candidate[after] ? end_at[after] : 1.) - start_at[v]) *
+                direction(first_part[v]).norm() > min_part;
     }
 
     Points &points = surface.polygon.points;
-    std::vector<size_t> edge_element(count, size_t(-1));
+    std::vector<size_t> first_element(count, size_t(-1));
+    std::vector<size_t> last_element(count, size_t(-1));
     // A point equal to the previous one ends a zero-length element: the new element replaces it.
     const auto push = [&](const Point &point, SurfaceElement element) {
         if (!points.empty() && points.back() == point) {
@@ -465,20 +531,27 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
         points.push_back(point);
         surface.elements.push_back(element);
     };
-    // Chord angle of an arc of this radius whose sagitta stays within the limit.
-    const double max_step = 2. * std::acos(std::max(-1., 1. - SURFACE_ARC_SAGITTA / distance));
     for (size_t i = 0; i < count; ++i) {
         const size_t next = (i + 1) % count;
         const Point &vertex = perimeter[next];
-        push(resolved[i] ? round_point(crossing[i]) : perimeter[i] + surface.shifts[i],
-             {i, false, resolved[i] ? start_at[i] : 0., resolved[next] ? end_at[next] : 1.});
-        edge_element[i] = surface.elements.size() - 1;
+        for (size_t k = first_part[i]; k <= last_part(i); ++k) {
+            const Part &part = parts[k];
+            const bool first = k == first_part[i];
+            // Fractions of the part kept between the crossings of resolved corners.
+            const double from = first && resolved[i] ? start_at[i] : 0.;
+            const double to = k == last_part(i) && resolved[next] ? end_at[next] : 1.;
+            push(first && resolved[i] ? round_point(crossing[i]) : part.a,
+                 {i, false, part.begin + from * (part.end - part.begin), part.begin + to * (part.end - part.begin)});
+            if (first)
+                first_element[i] = surface.elements.size() - 1;
+        }
+        last_element[i] = surface.elements.size() - 1;
         if (resolved[next])
             continue; // The next edge starts at the crossing that ends this one.
-        const Point end = vertex + surface.shifts[i];
-        const Point resume = vertex + surface.shifts[next];
+        const Point end = parts[last_part(i)].b;
+        const Point resume = parts[first_part[next]].a;
         if (end == resume)
-            continue; // Collinear edges: the shifted edges meet exactly.
+            continue; // Collinear edges or no shift at the vertex: the shifted edges meet exactly.
         push(end, {next, true});
         // The normal turns like the edge; a reversal turns by half a circle around the air side.
         const double turn = cross(normals[i], normals[next]);
@@ -487,11 +560,15 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
         // Concave towards air and not resolved: a straight bridge, carried onto the vertex like an arc.
         if (side * sweep <= 0.)
             continue;
+        // An arc of the vertex's shift; both edges take that shift at the vertex, so the line stays continuous.
+        const double radius = double(profile.vertices[next]);
+        // Chord angle of an arc of this radius whose sagitta stays within the limit.
+        const double max_step = 2. * std::acos(std::max(-1., 1. - SURFACE_ARC_SAGITTA / radius));
         const double start = std::atan2(normals[i].y(), normals[i].x());
         const size_t steps = size_t(std::ceil(std::abs(sweep) / max_step));
         for (size_t step = 1; step < steps; ++step) {
             const double angle = start + sweep * double(step) / double(steps);
-            push(round_point(vertex.cast<double>() + distance * Vec2d(std::cos(angle), std::sin(angle))), {next, true});
+            push(round_point(vertex.cast<double>() + radius * Vec2d(std::cos(angle), std::sin(angle))), {next, true});
         }
     }
     if (points.size() > 1 && points.back() == points.front()) {
@@ -503,9 +580,9 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
     // Resolved corners: the crossing ends the element of the edge before and starts the one after.
     for (size_t v = 0; v < count; ++v) {
         const size_t before = (v + count - 1) % count;
-        if (resolved[v] && edge_element[before] < points.size() && edge_element[v] < points.size()) {
-            const Point at = points[edge_element[v]];
-            surface.gaps.push_back({edge_element[before], at, edge_element[v], at});
+        if (resolved[v] && last_element[before] < points.size() && first_element[v] < points.size()) {
+            const Point at = points[first_element[v]];
+            surface.gaps.push_back({last_element[before], at, first_element[v], at});
         }
     }
 
@@ -523,7 +600,8 @@ const detail::SurfaceLine &PreparedPerimeter::surface() const
 {
     assert(valid && shift > 0);
     if (!m_surface)
-        m_surface = std::make_unique<detail::SurfaceLine>(detail::build_surface_line(polygon, shift, hole));
+        m_surface = std::make_unique<detail::SurfaceLine>(profile.empty() ? detail::build_surface_line(polygon, shift, hole) :
+                                                                            detail::build_surface_line(polygon, profile, hole));
     return *m_surface;
 }
 
@@ -614,13 +692,19 @@ static std::vector<detail::ClippedEdgeInterval> surface_intervals(const Prepared
 
     const Polygon &perimeter = prepared.polygon;
     using detail::CenterlinePoint;
-    // Shifted edges are exact translates, so a point moves back by the same integer shift; a shifted edge that
-    // ends at a concave crossing covers only part of its source edge.
+    // An edge with a constant shift is an exact translate, so a point moves back by the same integer shift. Where
+    // the shift changes, the point on the source edge follows from the parameter. A shifted edge that ends at a
+    // concave crossing covers only part of its source edge.
     const auto to_centerline = [&](size_t element, double parameter, const Point &point) -> CenterlinePoint {
         const detail::SurfaceElement &source = surface.elements[element];
         if (source.vertex)
             return {source.source, 0., perimeter[source.source]};
-        return {source.source, source.begin + parameter * (source.end - source.begin), point - surface.shifts[source.source]};
+        const double t = source.begin + parameter * (source.end - source.begin);
+        if (surface.translated[source.source])
+            return {source.source, t, point - surface.shifts[source.source]};
+        const Vec2d a = perimeter[source.source].cast<double>();
+        const Vec2d at = a + t * (perimeter[(source.source + 1) % perimeter.size()].cast<double>() - a);
+        return {source.source, t, Point(coord_t(std::lround(at.x())), coord_t(std::lround(at.y())))};
     };
     for (const ClippedEdgeInterval &interval : bound) {
         const CenterlinePoint first = to_centerline(interval.edge, interval.begin, interval.first);

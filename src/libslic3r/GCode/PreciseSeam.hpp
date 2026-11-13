@@ -102,17 +102,29 @@ namespace detail { struct SurfaceLine; }
 // the surface practically coincides with the centerline; extraction then clips the centerline itself.
 coord_t surface_shift(double line_width, double compensation);
 
+// A shift that changes along the perimeter: one value per vertex and, on an edge where it does not change
+// linearly between its vertices, values at interior points as (parameter, shift) in increasing parameter order.
+struct ShiftProfile {
+    std::vector<coord_t> vertices;
+    std::vector<std::vector<std::pair<double, coord_t>>> interior; // One list per edge.
+    bool empty() const { return vertices.empty(); }
+};
+
 // Borrows the source polygon; use only until insertion/refinement changes that polygon.
 struct PreparedPerimeter {
     const Polygon &polygon;
     BoundingBox bounds;
     Polyline line;
     bool valid = false;
-    // Distance to the reconstructed surface and its side: air lies inside the polygon of a hole.
+    // Largest distance to the reconstructed surface and its side: air lies inside the polygon of a hole.
     coord_t shift = 0;
     bool hole = false;
+    // The shift at every point when it changes along the perimeter; empty when it is `shift` everywhere.
+    ShiftProfile profile;
 
     explicit PreparedPerimeter(const Polygon &perimeter, coord_t surface_shift = 0, bool is_hole = false);
+    // A profile whose largest shift is within the snapping radius keeps the centerline, as a constant one does.
+    PreparedPerimeter(const Polygon &perimeter, ShiftProfile shift_profile, bool is_hole);
     ~PreparedPerimeter();
     // Built on the first request, so perimeters that no modifier approaches never pay for it. Internal to
     // extraction.

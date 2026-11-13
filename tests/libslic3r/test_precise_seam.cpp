@@ -9,6 +9,7 @@
 #include "libslic3r/ClipperUtils.hpp"
 
 #include <algorithm>
+#include <initializer_list>
 #include <cmath>
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -1542,4 +1543,132 @@ TEST_CASE("Covering the centerline between two positions never goes round the wh
     CHECK(intervals[1].edge == 0);
     CHECK(intervals[2].edge == 1);
     CHECK(intervals[2].end == 0.5);
+}
+
+namespace {
+// A profile with the given shift in mm at each vertex and no interior samples.
+PreciseSeam::ShiftProfile vertex_profile(std::initializer_list<double> shifts)
+{
+    PreciseSeam::ShiftProfile profile;
+    for (const double shift : shifts)
+        profile.vertices.push_back(coord_t(scale_(shift)));
+    return profile;
+}
+
+bool within_unit(const Point &a, const Point &b) { return (a - b).cast<double>().squaredNorm() <= 2.; }
+
+bool contains_near(const Polygon &polygon, const Point &point)
+{
+    return std::any_of(polygon.points.begin(), polygon.points.end(), [&point](const Point &p) { return within_unit(p, point); });
+}
+} // namespace
+
+TEST_CASE("A variable shift moves every vertex by its own distance and keeps the line continuous", "[PreciseSeam][SegmentExtraction]")
+{
+    // The front edge goes from 0.1 mm below (0, 0) to 0.3 mm below (20, 0); the corner (20, 20) has no shift.
+    const Polygon square = rectangle(0, 0, 20, 20);
+    const auto surface = PreciseSeam::detail::build_surface_line(square, vertex_profile({0.1, 0.3, 0., 0.2}), false);
+    REQUIRE(surface.elements.size() == surface.polygon.size());
+    CHECK(contains_near(surface.polygon, mm(0, -0.1)));
+    CHECK(contains_near(surface.polygon, mm(20, -0.3)));
+    CHECK(contains_near(surface.polygon, mm(20.3, 0)));
+    // Edges with different shifts at their ends are not translates; the right edge reaches the corner itself.
+    CHECK_FALSE(surface.translated[0]);
+    CHECK(contains_near(surface.polygon, mm(20, 20)));
+    // Every arc point lies at its vertex's shift from the vertex, so the shifted edges join the arcs without gaps.
+    const double shifts[] = {0.1, 0.3, 0., 0.2};
+    for (size_t i = 0; i < surface.polygon.size(); ++i) {
+        const auto &element = surface.elements[i];
+        if (!element.vertex)
+            continue;
+        CAPTURE(i, element.source);
+        const double distance = (surface.polygon.points[i] - square.points[element.source]).cast<double>().norm();
+        CHECK_THAT(distance, Catch::Matchers::WithinAbs(scale_(shifts[element.source]), 1.5));
+    }
+    CHECK(surface.gaps.empty());
+
+    // A modifier on the front face finds the centerline under its sides, whatever the shift there.
+    const PreciseSeam::PreparedPerimeter prepared(square, vertex_profile({0.1, 0.3, 0., 0.2}), false);
+    REQUIRE(prepared.shift == coord_t(scale_(0.3)));
+    const auto result = PreciseSeam::extract_perimeter_segments(prepared,
+        PreciseSeam::prepare_modifier_regions({ExPolygon(rectangle(4, -1, 16, -0.25))}), ModelVolumeType::PRECISE_SEAM_CENTER);
+    check_provenance(square, result);
+    REQUIRE(result.segments.size() == 1);
+    // The surface runs y = -0.1 - 0.01 x: below y = -0.25 from x = 15.
+    CHECK(within_unit(result.segments.front().polyline.points.front(), mm(15, 0)));
+    CHECK(within_unit(result.segments.front().polyline.points.back(), mm(16, 0)));
+}
+
+TEST_CASE("A concave corner with different shifts on its edges is resolved at their crossing", "[PreciseSeam][SegmentExtraction]")
+{
+    // Shifts 0.2 at (20, 10), 0.3 at the concave vertex (10, 10) and 0.1 at (10, 20): the shifted edges run
+    // y = 10.2 + 0.01 (20 - x) and x = 10.3 - 0.02 (y - 10), crossing at about (10.29406, 10.29706).
+    const Polygon perimeter = l_shape();
+    const auto profile = vertex_profile({0.2, 0.2, 0.2, 0.3, 0.1, 0.2});
+    const auto surface = PreciseSeam::detail::build_surface_line(perimeter, profile, false);
+    REQUIRE(surface.gaps.size() == 1);
+    const Vec2d crossing(10.3 - 0.02 * 0.297 / 0.9998, 10. + 0.297 / 0.9998);
+    CHECK((unscale(surface.gaps.front().end) - crossing).norm() < 0.001);
+
+    // Covering the crossing covers the dead stretch: one segment through the vertex, its ends under the modifier.
+    const PreciseSeam::PreparedPerimeter prepared(perimeter, profile, false);
+    const auto result = PreciseSeam::extract_perimeter_segments(prepared,
+        PreciseSeam::prepare_modifier_regions({ExPolygon(rectangle(10.25, 10.25, 10.5, 10.5))}), ModelVolumeType::PRECISE_SEAM_CENTER);
+    check_provenance(perimeter, result);
+    REQUIRE(result.segments.size() == 1);
+    const Points &points = result.segments.front().polyline.points;
+    REQUIRE(points.size() == 3);
+    CHECK(within_unit(points[0], mm(10.5, 10)));
+    CHECK(points[1] == mm(10, 10));
+    CHECK(within_unit(points[2], mm(10, 10.5)));
+}
+
+TEST_CASE("A shift changing along a long edge splits its element and moves the segment end monotonically", "[PreciseSeam][SegmentExtraction]")
+{
+    // The front edge keeps 0.2 mm at its vertices and 0.3 mm in its middle: its surface bends at (10, -0.3).
+    const Polygon square = rectangle(0, 0, 20, 20);
+    auto profile = vertex_profile({0.2, 0.2, 0.2, 0.2});
+    profile.interior.resize(4);
+    profile.interior[0].emplace_back(0.5, coord_t(scale_(0.3)));
+    const auto surface = PreciseSeam::detail::build_surface_line(square, profile, false);
+    std::vector<std::pair<double, double>> front;
+    for (const auto &element : surface.elements)
+        if (element.source == 0 && !element.vertex)
+            front.emplace_back(element.begin, element.end);
+    REQUIRE(front.size() == 2);
+    const std::pair<double, double> expected[] = {{0., 0.5}, {0.5, 1.}};
+    for (size_t i = 0; i < 2; ++i) {
+        CHECK_THAT(front[i].first, Catch::Matchers::WithinAbs(expected[i].first, 1e-12));
+        CHECK_THAT(front[i].second, Catch::Matchers::WithinAbs(expected[i].second, 1e-12));
+    }
+    CHECK(contains_near(surface.polygon, mm(10, -0.3)));
+    // The other edges keep a constant shift and stay translates.
+    CHECK(surface.translated[1]);
+
+    // A side of the modifier swept across the bend: the segment end follows it along the centerline.
+    const PreciseSeam::PreparedPerimeter prepared(square, profile, false);
+    double previous = -1.;
+    for (int step = -20; step <= 20; ++step) {
+        CAPTURE(step);
+        const double x = 10. + step * 0.05;
+        const auto result = PreciseSeam::extract_perimeter_segments(prepared,
+            PreciseSeam::prepare_modifier_regions({ExPolygon(rectangle(2, -1, x, -0.1))}), ModelVolumeType::PRECISE_SEAM_CENTER);
+        REQUIRE(result.segments.size() == 1);
+        const Point &end = result.segments.front().polyline.points.back();
+        CHECK(within_unit(end, mm(x, 0)));
+        CHECK(double(end.x()) >= previous);
+        previous = double(end.x());
+    }
+}
+
+TEST_CASE("A profile within the snapping radius keeps the centerline", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    PreciseSeam::ShiftProfile profile;
+    profile.vertices = {1000, 0, 500, 1000};
+    const PreciseSeam::PreparedPerimeter prepared(square, profile, false);
+    CHECK(prepared.shift == 0);
+    CHECK(prepared.profile.empty());
+    profile.vertices[1] = 1001;
+    CHECK(PreciseSeam::PreparedPerimeter(square, profile, false).shift == 1001);
 }
