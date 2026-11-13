@@ -202,46 +202,42 @@ remembers its source:
   at least 4 units of it.
 - **Bridge.** At any other concave vertex (shifted edges crossing beyond the end
   of one of them, as in a fillet finer than the shift), a straight edge between
-  the ends of the full shifted edges. It is never surface.
+  the ends of the full shifted edges, carried onto the vertex like an arc. The
+  shifted edges keep their tails beyond the crossing.
 
 Each crossing is the end of a **dead stretch**: the part of the centerline
 around the vertex that has no surface of its own. It is recorded at once, with
 the elements of the surface line that end and start at `K`. Resolving these
 corners exactly matters on shallow corners, such as the many vertices of a
 tessellated hole: there the parts of the full shifted edges beyond `K` stay
-within micrometers of the surface, a clearance no offset can separate reliably.
+within micrometers of the surface, and a modifier boundary crossing them would
+split the segment.
 
-Defining the surface by distance discards whatever remains closer than `d` to
-the centerline: bridges and the tails of unresolved corners, fine tessellation
-with a radius below `d`, and parts facing other walls. Instead of trimming the
-line itself, the whole line is clipped once per perimeter against the centerline
-polygon offset by `d` less `SURFACE_ZONE_MARGIN` (round joins): what remains
-outside it (inside, for a hole) are the **pieces** of real surface. The margin
-keeps the real surface whole despite the arc sagitta, the offset's own arc
-tolerance and rounding; in return, tails of at most a few micrometers past an
-unresolved corner survive.
-
-When the zone leaves more than one piece, the pieces are ordered along the line:
-each end pair of a piece lies on one edge of the line, found through an AABB tree
-of its edges. Where one piece ends and the next begins at nearly the same point,
-they are the two ends of a dead stretch of an unresolved corner, kept as a gap
-too. "Nearly" allows for the surviving tails, whose ends lie at most about
-`sqrt(margin * d / 2)` apart at the shallowest such corner; the tolerance is
-twice the square root of `(margin + arc tolerance) * d`, plus the snapping
-radius. A piece whose ends cannot be located takes no part in gaps and is
-logged. A general offset of the polygon could not replace the surface line: it
-rounds and cuts corners and loses the link to source edges.
+The surface line is not filtered further: every part of it counts as surface,
+even where it comes closer than `d` to another part of the centerline. The
+centerline is itself the model contour shifted inwards by half the line width,
+so shifting it back by slightly less returns to that contour and does not fold:
+a concave fillet of radius `r` on the surface is a fillet of radius `r + d` on
+the centerline, and a sharp inner corner stays sharp and resolves exactly. The
+line folds only on corners that are not resolved exactly: a very sharp inner
+corner that the slicer bevels, variable Arachne widths, or relief finer than the
+shift (see [Known limitations](#known-limitations)). There the tails and bridges
+of the line stay part of it, and the user's rule that a modifier enters the wall
+by a clear depth keeps such corners out of play. A general offset of the polygon
+could not replace the surface line: it rounds and cuts corners and loses the
+link to source edges.
 
 ### Clipping
 
 Regions whose bounding box does not overlap the perimeter's, enlarged by the
-shift, are skipped. The surface pieces are intersected with each remaining
-region by `intersection_pl()`, which clips open paths against an `ExPolygon`
-with its holes attached, using the nonzero rule. Clipping open lines yields only
-pieces of the surface, so a modifier crossing the whole object produces two
-separate pieces rather than a chord through the body. Holes in a modifier and
-several regions of one modifier simply produce more pieces. The surface line is
-cut at its start, so a piece crossing it arrives as two fragments. A border that
+shift, are skipped. The surface line, as an open path closed at its start, is
+intersected with each remaining region by `intersection_pl()`, which clips open
+paths against an `ExPolygon` with its holes attached, using the nonzero rule.
+Clipping an open line yields only pieces of the surface, so a modifier crossing
+the whole object produces two separate pieces rather than a chord through the
+body. Holes in a modifier and several regions of one modifier simply produce
+more pieces. The line is cut at its start, so a piece crossing it arrives as two
+fragments. A border that
 only touches the surface can come back as a single point; such fragments carry
 no coverage and are dropped before binding. With a shift of zero the
 centerline's own clipping line is clipped instead, without offsets or contact
@@ -300,7 +296,7 @@ Intervals on the surface line are carried onto the centerline along the normal:
 | Surface | Centerline |
 | --- | --- |
 | Shifted edge, parameters `t0..t1` | the same source edge, the same parameters (proportionally on a trimmed one) |
-| Arc around a vertex | that vertex, as a **vertex point** |
+| Arc or bridge around a vertex | that vertex, as a **vertex point** |
 | Both ends of a dead stretch covered | the whole centerline between them |
 
 The last rule covers the crossing point `K` of a concave corner: when the
@@ -309,8 +305,7 @@ vertex, which has no surface of its own, joins them. When only one side is
 covered, the segment ends under the modifier's crossing, outside the dead
 stretch. An end counts as covered when coverage ends within the snapping radius
 of it on the same edge of the surface line, so a modifier boundary passing
-exactly through `K` covers it. The rule holds for non-adjacent edges as well,
-for example a concave fillet finer than the shift.
+exactly through `K` covers it.
 
 ### Assembling segments
 
@@ -474,7 +469,6 @@ larger. The enforced subdivision step is a physical distance and stays 0.2 mm.
 | `TOLERANCE_LINEAR` (1000 units, 1 µm) | Insertion snaps points this close to an existing vertex, and helper points are placed this far from boundaries. The same radius bounds the rounding fallback, contacts and the sub-micron full-containment rule, so those decisions match what insertion would produce anyway. It is also the reach of a dead-stretch end and the smallest surface shift. |
 | `SURFACE_MARGIN` (5000 units, 5 µm) | The reconstructed surface lies this far inside the model surface, so a modifier flush with a model face does not act. |
 | `SURFACE_ARC_SAGITTA` (40 units) | Maximum sagitta of the chords of surface arcs. |
-| `SURFACE_ZONE_MARGIN` (60 units), `SURFACE_ZONE_ARC_TOLERANCE` (10 units) | The offset that removes non-surface stays this far inside the surface, with this arc tolerance, above the arc sagitta and rounding. Together with the shift they set the dead-stretch join tolerance. |
 | `enforcer_oversampling_distance` (0.2 mm) | Maximum step of enforced subdivision. |
 
 Raising the on-edge tolerance would not help with cuts beside a vertex: more
@@ -541,19 +535,15 @@ The log records the following diagnostic markers:
   point counts.
 - `[PreciseSeamFragmentRecovered]` for a recovery, with `outcome=bound` or
   `outcome=contact`, the same location fields and the original failure reason.
-- `[PreciseSeamSurfaceFailed]` for a perimeter whose surface pieces could not
-  all be located on the surface line, with object, layer, height and counts.
-  Their dead stretches stay uncovered, so segments there may split.
 - `[PreciseSeamNoEffect]` for every modifier of the "had no effect" cause, with
   the object and modifier names. Unlike the user warning, the log lists all of
   them.
 - `[PreciseSeamFullyBlocked]` for every modifier of the "covers an entire
   perimeter" cause, listed the same way.
 
-Failures, recoveries and unlocated surface pieces are counted separately. The
-first 10 of each per `init()` call are logged in detail, in parallel processing
-order (surface pieces per perimeter); if a limit is exceeded, one summary marker
-reports the total.
+Failures and recoveries are counted separately. The first 10 of each per
+`init()` call are logged in detail, in parallel processing order; if a limit is
+exceeded, one summary marker reports the total.
 
 ## Known limitations
 
@@ -569,12 +559,12 @@ reports the total.
   responsibility. Several near-touches on inclined edges can leave several
   segments separated by gaps of a few units; their zones then cover nearly the
   whole perimeter instead of being treated as full containment.
-- **Dead stretches.** At an unresolved concave corner the zone margin lets a
-  covered segment reach a few micrometers into the dead stretch. A dead stretch whose
-  ends do not meet (two walls of one contour closer than twice the shift, which
-  takes a model gap of about 10 µm) is never covered, so a modifier covering
-  all of the surface there gives one segment with a gap instead of full
-  containment.
+- **Concave corners not resolved exactly.** At a very sharp inner corner that
+  the slicer bevels, with variable Arachne widths or with artificially fine
+  relief, the surface line keeps its tails and bridges. A modifier boundary
+  closer than `d` to such a corner can give an extra segment, the
+  multiple-intersection warning and a position error of up to `d`; a modifier in
+  the air closer than `d` to such a corner can act.
 - **Self-touching perimeters.** Extraction keeps distinct visits of one
   coordinate apart through its source-edge bindings, but the consumers locate
   inserted points by coordinates. A weak zone is typed and subdivided from the
@@ -694,12 +684,11 @@ last modifier would.
   type changes and ordering; [3DScene.cpp](../../src/slic3r/GUI/3DScene.cpp)
   defines the colors.
 - [Segment extraction tests](../../tests/libslic3r/test_precise_seam.cpp) cover
-  surface reconstruction (convex and concave corners, holes, holes narrower than
-  the shift), crossing the surface without reaching the centerline, modifiers
+  surface reconstruction (convex and concave corners, holes), crossing the surface without reaching the centerline, modifiers
   inside the body, arcs giving zero-length segments, dead stretches covered or
   not, contacts and flush faces on straight, inclined and tessellated walls,
   full containment of the surface versus the centerline (also with part of one
-  arc uncovered), fine concave fillets, reversals, nearly collinear vertices,
+  arc uncovered), a fully covered concave fillet finer than the shift, reversals, nearly collinear vertices,
   vertex points at vertex zero, and independence of contour origin and
   direction. A boundary swept in sub-micron steps across shallow concave
   vertices of tessellated holes and notches must move a single segment end

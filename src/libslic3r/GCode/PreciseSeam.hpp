@@ -57,8 +57,6 @@ struct PreciseSeamWarnings {
     // Fragments saved by the rare-case fallback or accepted as contacts; log only, no user warning.
     // Clipper is deterministic, so a prismatic model can repeat the same case on every layer.
     std::atomic<size_t> recovered_fragments{0};
-    // Surface pieces that could not be located on their surface line; log only. Their dead stretches stay open.
-    std::atomic<size_t> failed_surface_pieces{0};
 
     // Per-modifier flags for the "had no effect" and "covers an entire perimeter" warnings. Modifiers are
     // registered before the parallel phase, so workers only set flags; unregistered ones (e.g. in tests)
@@ -116,9 +114,9 @@ struct PreparedPerimeter {
 
     explicit PreparedPerimeter(const Polygon &perimeter, coord_t surface_shift = 0, bool is_hole = false);
     ~PreparedPerimeter();
-    // Built on the first request, so perimeters that no modifier approaches never pay for it. The context of
-    // that request identifies the layer in diagnostics. Internal to extraction.
-    const detail::SurfaceLine &surface(const ExtractionContext &context = {}) const;
+    // Built on the first request, so perimeters that no modifier approaches never pay for it. Internal to
+    // extraction.
+    const detail::SurfaceLine &surface() const;
 
 private:
     mutable std::unique_ptr<detail::SurfaceLine> m_surface;

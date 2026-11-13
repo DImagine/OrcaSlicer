@@ -1090,7 +1090,7 @@ bool contains_point(const Polyline &polyline, const Point &point)
 
 TEST_CASE("The surface line shifts edges towards air, follows convex corners and bridges concave ones", "[PreciseSeam][SegmentExtraction]")
 {
-    // A convex contour is surface all round: one piece, no dead stretches.
+    // A convex contour has no dead stretches; the clipping line closes the polygon at its start.
     const Polygon square = rectangle(0, 0, 20, 20);
     const auto convex = PreciseSeam::detail::build_surface_line(square, surface_distance, false);
     REQUIRE(convex.shifts.size() == 4);
@@ -1103,7 +1103,8 @@ TEST_CASE("The surface line shifts edges towards air, follows convex corners and
         arc_chords += convex.elements[i].vertex ? 1 : 0;
     }
     CHECK(arc_chords > 4); // Every corner is an arc of several chords.
-    REQUIRE(convex.pieces.size() == 1);
+    REQUIRE(convex.line.size() == convex.polygon.size() + 1);
+    CHECK(convex.line.first_point() == convex.line.last_point());
     CHECK(convex.gaps.empty());
 
     // One concave corner leaves one dead stretch whose ends meet near the crossing of the shifted edges.
@@ -1113,16 +1114,12 @@ TEST_CASE("The surface line shifts edges towards air, follows convex corners and
     CHECK((concave.gaps.front().start - mm(10.2, 10.2)).cast<double>().norm() < scale_(0.001));
 
     // The wall of a hole is shifted into the hole, where its corners are concave: the shifted edges end at their
-    // crossings, one closed piece with a dead stretch at every corner. A hole narrower than twice the shift has
-    // no surface.
+    // crossings, with a dead stretch at every corner.
     const auto hole = PreciseSeam::detail::build_surface_line(rectangle(0, 0, 10, 10), surface_distance, true);
     CHECK(hole.shifts[0] == Point(0, surface_distance));
-    REQUIRE(hole.pieces.size() == 1);
-    CHECK(hole.pieces.front().first_point() == hole.pieces.front().last_point());
     CHECK(hole.gaps.size() == 4);
     CHECK(hole.polygon.points == Points{mm(0.2, 0.2), mm(9.8, 0.2), mm(9.8, 9.8), mm(0.2, 9.8)});
     CHECK(hole.bounds.defined);
-    CHECK(PreciseSeam::detail::build_surface_line(rectangle(0, 0, 0.3, 0.3), surface_distance, true).pieces.empty());
 }
 
 TEST_CASE("A modifier crossing the surface acts without reaching the centerline", "[PreciseSeam][SegmentExtraction]")
@@ -1236,11 +1233,6 @@ TEST_CASE("The surface of a hole lies inside the hole", "[PreciseSeam][SegmentEx
     check_provenance(perimeter, corner);
     REQUIRE(corner.segments.size() == 1);
     CHECK(corner.segments.front().polyline.points == Points{mm(9.5, 0), mm(10, 0), mm(10, 0.5)});
-    // A hole narrower than twice the shift has no surface to cross.
-    const auto narrow = surface_extraction(rectangle(0, 0, 0.3, 0.3), rectangle(-1, -1, 1, 1), true);
-    CHECK(narrow.valid);
-    CHECK(narrow.segments.empty());
-    CHECK_FALSE(narrow.full_containment);
 }
 
 TEST_CASE("A modifier touching the surface at one point has no effect", "[PreciseSeam][SegmentExtraction]")
@@ -1305,7 +1297,8 @@ TEST_CASE("Full containment means the whole surface, not the whole centerline", 
 
 TEST_CASE("A concave fillet finer than the shift binds without failures", "[PreciseSeam][SegmentExtraction]")
 {
-    // The concave corner of the L shape rounded with radius 0.1 mm in 20 edges: all of them dead.
+    // The concave corner of the L shape rounded with radius 0.1 mm in 20 edges: none of them is resolved, so the
+    // surface line keeps their shifted edges and bridges, crossing near the corner.
     Points points{mm(0, 0), mm(20, 0), mm(20, 10)};
     for (int i = 0; i <= 20; ++i) {
         const double angle = 0.5 * PI * i / 20.;

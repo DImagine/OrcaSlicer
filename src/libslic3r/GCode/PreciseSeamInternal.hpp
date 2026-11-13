@@ -21,7 +21,7 @@ struct ClippedEdgeInterval {
 };
 
 // Source of one edge of the surface line: a source edge shifted towards air, or the arc (convex) or
-// bridge (concave) around a source vertex. An arc maps to its vertex; a bridge is never real surface.
+// bridge (unresolved concave) around a source vertex. Both map to their vertex.
 struct SurfaceElement {
     size_t source; // Source edge or vertex index.
     bool vertex;
@@ -31,9 +31,9 @@ struct SurfaceElement {
     double end = 1.;
 };
 
-// Where coverage of the surface ends on one side of a dead stretch of the centerline (around a concave
-// corner) and resumes on the other. The two points meet in space (at the crossing of the shifted edges, or
-// within the join tolerance), so coverage of both covers the stretch.
+// Where coverage of the surface ends on one side of a dead stretch of the centerline (around a resolved
+// concave corner) and resumes on the other. Both points are the crossing of the shifted edges, so coverage
+// of both covers the stretch.
 struct SurfaceGap {
     size_t end_element;
     Point end;
@@ -41,20 +41,19 @@ struct SurfaceGap {
     Point start;
 };
 
-// The reconstructed surface of one perimeter: the closed surface line with the source of every edge,
-// and the parts of it that are real surface, at least the shift away from every part of the centerline.
+// The reconstructed surface of one perimeter: the centerline shifted towards air, as a closed line with the
+// source of every edge.
 struct SurfaceLine {
     Polygon polygon;                      // No consecutive or closing duplicates.
     std::vector<SurfaceElement> elements; // One per polygon edge.
     std::vector<Point> shifts;            // Integer shift of every source edge, so shifted edges keep parameters.
-    Polylines pieces;                     // Real surface, clipped from the closed line.
+    Polyline line;                        // The polygon as an open path closed at its start, for clipping.
     std::vector<SurfaceGap> gaps;
-    BoundingBox bounds;                   // Of the pieces.
+    BoundingBox bounds;                   // Of the polygon.
 };
 
 // Builds the surface line of a perimeter accepted by PreparedPerimeter (either direction), shift > 0.
-// The context only identifies the layer in the log marker of a piece that cannot be bound.
-SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hole, const ExtractionContext &context = {});
+SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hole);
 
 // A position on the centerline with its point.
 struct CenterlinePoint {

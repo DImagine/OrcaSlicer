@@ -2240,12 +2240,6 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
               << " fragments recovered; first " << PreciseSeam::failed_fragment_log_limit
               << " logged (parallel processing order), " << (recovered - PreciseSeam::failed_fragment_log_limit)
               << " omitted";
-      // Surface pieces are counted per piece but logged per perimeter, so the total only bounds the detail.
-      const size_t surface_failed = precise_seam_warnings.failed_surface_pieces.load(std::memory_order_relaxed);
-      if (surface_failed > PreciseSeam::failed_fragment_log_limit)
-          BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamSurfaceFailed] " << surface_failed
-              << " surface pieces not located; the first perimeters up to " << PreciseSeam::failed_fragment_log_limit
-              << " pieces logged (parallel processing order)";
       // Reasons name the modifier types, as the menu does, not individual modifiers: "Seam Left, Seam
       // Enforced" in menu order, each type once. The same msgids as the menu share its translations.
       const auto type_list = [](unsigned mask) {
