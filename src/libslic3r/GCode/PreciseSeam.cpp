@@ -466,7 +466,9 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
     Polylines pieces = hole ? intersection_pl(line, zone) : diff_pl(line, zone);
     for (Polyline &piece : pieces)
         if (piece.size() >= 2) {
-            surface.bounds.merge(piece.points);
+            // Point by point: a box built from an axis-aligned piece counts as undefined and would be skipped.
+            for (const Point &point : piece.points)
+                surface.bounds.merge(point);
             surface.pieces.push_back(std::move(piece));
         }
 

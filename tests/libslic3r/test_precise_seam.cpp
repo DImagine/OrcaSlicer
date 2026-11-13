@@ -1112,10 +1112,13 @@ TEST_CASE("The surface line shifts edges towards air, follows convex corners and
     CHECK((concave.gaps.front().end - mm(10.2, 10.2)).cast<double>().norm() < scale_(0.001));
     CHECK((concave.gaps.front().start - mm(10.2, 10.2)).cast<double>().norm() < scale_(0.001));
 
-    // The wall of a hole is shifted into the hole; a hole narrower than twice the shift has no surface.
+    // The wall of a hole is shifted into the hole, where its corners are concave: four straight pieces with
+    // a dead stretch at every corner. A hole narrower than twice the shift has no surface.
     const auto hole = PreciseSeam::detail::build_surface_line(rectangle(0, 0, 10, 10), surface_distance, true);
     CHECK(hole.shifts[0] == Point(0, surface_distance));
-    CHECK(hole.pieces.size() == 1);
+    CHECK(hole.pieces.size() == 4);
+    CHECK(hole.gaps.size() == 4);
+    CHECK(hole.bounds.defined);
     CHECK(PreciseSeam::detail::build_surface_line(rectangle(0, 0, 0.3, 0.3), surface_distance, true).pieces.empty());
 }
 
@@ -1225,6 +1228,11 @@ TEST_CASE("The surface of a hole lies inside the hole", "[PreciseSeam][SegmentEx
     CHECK(hole.segments.front().polyline.points == Points{mm(4, 0), mm(6, 0)});
     // The same modifier is inside the body of a contour.
     CHECK(surface_extraction(perimeter, inside_hole, false).segments.empty());
+    // The corners of a hole are concave: covering the crossing (9.8, 0.2) covers the corner of the centerline.
+    const auto corner = surface_extraction(perimeter, rectangle(9.5, 0.1, 9.9, 0.5), true);
+    check_provenance(perimeter, corner);
+    REQUIRE(corner.segments.size() == 1);
+    CHECK(corner.segments.front().polyline.points == Points{mm(9.5, 0), mm(10, 0), mm(10, 0.5)});
     // A hole narrower than twice the shift has no surface to cross.
     const auto narrow = surface_extraction(rectangle(0, 0, 0.3, 0.3), rectangle(-1, -1, 1, 1), true);
     CHECK(narrow.valid);
