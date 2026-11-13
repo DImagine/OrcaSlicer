@@ -371,6 +371,7 @@ struct GlobalModelInfo {
   // Slice each modifier once; both consumers share structured regions and source provenance.
   PreciseSeam::ModifierRegionsCache precise_seam_slices;
   // XY compensation that moved the object's contours and hole walls away from the model, positive towards air.
+  // Walls between regions of one object are compensated differently by slicing; that is not modelled.
   double precise_seam_contour_compensation = 0.;
   double precise_seam_hole_compensation = 0.;
 

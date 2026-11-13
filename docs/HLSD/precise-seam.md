@@ -49,8 +49,10 @@ who places modifiers against the model surface. Extraction therefore
 reconstructs that surface from the centerline, clips it, and carries the
 result back onto the centerline along the normal (see
 [Surface reconstruction](#surface-reconstruction)). A modifier acts when it
-crosses the model surface, however shallowly, and has no effect when it stays
-inside the body, even if it crosses the centerline.
+reaches the reconstructed surface, which lies a margin of 5 µm inside the model
+surface, and has no effect when it stays inside the body, even if it crosses the
+centerline. A modifier that enters the model by less than the margin does not
+act.
 
 ### Terms
 
@@ -163,8 +165,11 @@ the user sees, less a margin: `d = w/2 - c - m`.
   `xy_hole_compensation` for a hole (a positive value enlarges holes). It is
   zero where slicing skips compensation, for multi-material painting with
   several filaments. Both values are taken once per object in
-  `SeamPlacer::init()`. Modifier slices are not compensated, so they stay in
-  the frame of the model.
+  `SeamPlacer::init()`, so they describe the outer contours and holes of the
+  object. A wall on the boundary between two regions of one object is
+  compensated differently by slicing, and there the surface is not restored
+  exactly (see [Known limitations](#known-limitations)). Modifier slices are not
+  compensated, so they stay in the frame of the model.
 - `m` is `SURFACE_MARGIN` (5 µm). A modifier face placed flush against a model
   face would otherwise touch the reconstructed surface by rounding noise and
   act on some layers only; the margin moves that unstable position 5 µm deep,
@@ -564,8 +569,22 @@ exceeded, one summary marker reports the total.
   are closer than the trim of a corner (`d * tan(turn / 2)`) or with
   artificially fine relief, the surface line keeps its tails and bridges. A modifier boundary
   closer than `d` to such a corner can give an extra segment, the
-  multiple-intersection warning and a position error of up to `d`; a modifier in
-  the air closer than `d` to such a corner can act.
+  multiple-intersection warning and a local distortion of the segment of up to
+  `d`; a modifier in the air closer than `d` to such a corner can act. `d`
+  bounds the distortion, not the movement of the seam: if the distortion changes
+  which segment of a strong modifier is the longest, the seam moves to another
+  segment, which may lie at any distance.
+- **Walls between regions.** XY compensation is taken once per object, for its
+  outer contours and its holes. Where an external perimeter runs along the
+  boundary between two regions of one object (regions whose perimeters are
+  generated separately), slicing compensates that boundary differently: a
+  negative compensation does not move it, and a positive one moves it according
+  to the order of the regions. With a nonzero compensation the reconstructed
+  surface of such a wall is therefore off the real region boundary by the
+  amount of the compensation, and a modifier near that boundary may act or not
+  act accordingly. Restoring it exactly would need the shift actually applied to
+  each part of the loop, since one loop can contain both such a boundary and a
+  compensated outer contour.
 - **Self-touching perimeters.** Extraction keeps distinct visits of one
   coordinate apart through its source-edge bindings, but the consumers locate
   inserted points by coordinates. A weak zone is typed and subdivided from the

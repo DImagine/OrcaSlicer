@@ -98,7 +98,7 @@ struct ExtractionContext {
 namespace detail { struct SurfaceLine; }
 
 // Scaled distance from the perimeter centerline to the model surface the user sees: half the line width,
-// less the XY compensation applied to this contour (positive towards air) and a small margin. Zero when
+// less the object's XY compensation for contours or holes (positive towards air) and a small margin. Zero when
 // the surface practically coincides with the centerline; extraction then clips the centerline itself.
 coord_t surface_shift(double line_width, double compensation);
 
