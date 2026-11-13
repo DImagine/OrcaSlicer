@@ -2299,10 +2299,10 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       if (!no_effect.empty()) {
           const ModelVolume *first = no_effect.front();
           if (no_effect.size() == 1)
-              parts.push_back((boost::format(_u8L("modifier \"%1%\" of \"%2%\" had no effect on the seam (it might not reach the centerline of the printed perimeter)"))
+              parts.push_back((boost::format(_u8L("modifier \"%1%\" of \"%2%\" had no effect on the seam"))
                   % first->name % first->get_object()->name).str());
           else
-              parts.push_back((boost::format(_u8L("modifier \"%1%\" of \"%2%\" (%3% in total) had no effect on the seam (it might not reach the centerline of the printed perimeter)"))
+              parts.push_back((boost::format(_u8L("modifier \"%1%\" of \"%2%\" (%3% in total) had no effect on the seam"))
                   % first->name % first->get_object()->name % no_effect.size()).str());
       }
       if (!parts.empty()) {

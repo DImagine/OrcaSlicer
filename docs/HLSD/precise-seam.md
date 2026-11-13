@@ -504,18 +504,19 @@ The causes are:
   the first flagged modifier in print and volume order is named, followed by
   "(N in total)" when there are several. The type name reuses the menu's
   translation.
-- **modifier "<name>" of "<object>" had no effect on the seam (it might not reach
-  the centerline of the printed perimeter):** a modifier was evaluated on at
-  least one perimeter and never gave a segment, full containment or a discarded
-  fragment. Only the first such modifier in print and volume order is named,
-  followed by "(N in total)" when there are several.
+- **modifier "<name>" of "<object>" had no effect on the seam:** a modifier was
+  evaluated on at least one perimeter and never gave a segment, full containment
+  or a discarded fragment. Only the first such modifier in print and volume order
+  is named, followed by "(N in total)" when there are several.
 
-  Only the effect is certain, so the cause is given as a hint. A modifier is
+  Only the effect is certain, so the text names no cause. A modifier is
   evaluated only when its turn comes: on a perimeter where a higher strong
   modifier placed the seam, lower strong and all weak modifiers are not
   evaluated. A modifier that was never evaluated is not reported, since nothing
-  is known about it. A point contact gives no segment and does not count as
-  reaching the perimeter.
+  is known about it. One that was overridden on the perimeters it crosses and
+  evaluated only on others it does not reach is reported, although it does reach
+  the model surface; a cause given in the text would mislead there. A point
+  contact gives no segment and does not count as reaching the perimeter.
 
 The log records the following diagnostic markers:
 
