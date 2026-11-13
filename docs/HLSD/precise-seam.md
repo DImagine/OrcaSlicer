@@ -709,8 +709,8 @@ last modifier would.
   not, contacts and flush faces on straight, inclined and tessellated walls,
   full containment of the surface versus the centerline (also with part of one
   arc uncovered), a fully covered concave fillet finer than the shift, reversals, nearly collinear vertices,
-  vertex points at vertex zero, and independence of contour origin and
-  direction. A boundary swept in sub-micron steps across shallow concave
+  vertex points at vertex zero and on holes, the bounds of the surface shift,
+  and independence of contour origin and direction. A boundary swept in sub-micron steps across shallow concave
   vertices of tessellated holes and notches must move a single segment end
   monotonically. On the centerline they cover
   clipping and binding: holes and components, contour origin and reversal,
@@ -722,7 +722,7 @@ last modifier would.
   consumers: strong targets in every mode, including a midpoint on an existing
   vertex or the closing edge and a zero-length segment, longest-arc selection
   (also of a longer segment over a zero-length one) and tie order in bed axes,
-  zero-length weak zones,
+  zero-length weak zones of every type,
   priorities, weak boundaries that coincide or share an edge, enforced
   subdivision, whole-perimeter weak zones with painting and priorities, weak
   zones over painting's oversampled candidates, the warning type masks, usage
@@ -733,7 +733,7 @@ last modifier would.
   volumes and check the outer wall starts in the exported G-code: every strong
   mode under several seam positions and with a raft, a modifier reaching only
   0.1 mm into the model, contour and hole walls under positive and negative XY
-  compensation, Enforced and Blocked zones,
+  compensation, a first layer with a wider line, Enforced and Blocked zones,
   a perimeter blocked all round under every seam position, a modifier with a
   hole, and the user warning.
 - [Seam placer tests](../../tests/fff_print/test_seam_placer.cpp) cover

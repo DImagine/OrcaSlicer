@@ -1335,11 +1335,18 @@ TEST_CASE("A strong modifier leaving only part of one surface arc uncovered is s
 TEST_CASE("A zero-length weak zone types the single candidate at its vertex", "[PreciseSeam]")
 {
     using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    // Every zone type over candidates of another type, so a change shows exactly where the zone acted.
+    const auto [mode, zone, base] = GENERATE(table<ModelVolumeType, Type, Type>({
+        {ModelVolumeType::PRECISE_SEAM_ENFORCED, Type::Enforced, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_BLOCKED, Type::Blocked, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_NEUTRAL, Type::Neutral, Type::Enforced},
+        {ModelVolumeType::PRECISE_SEAM_NEUTRAL, Type::Neutral, Type::Blocked}}));
+    CAPTURE(int(zone), int(base));
     SeamFixture fixture;
     Polygon perimeter = rectangle(0, 0, 20, 20);
-    const ModelVolume *enforcer = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, {rectangle(20.11, -0.17, 20.17, -0.11)});
+    const ModelVolume *modifier = fixture.add(mode, {rectangle(20.11, -0.17, 20.17, -0.11)});
     const auto segments = PreciseSeam::collect_weak_modifier_segments(
-        {enforcer}, perimeter, PreciseSeam::PreparedPerimeter(perimeter, coord_t(scale_(0.2))), fixture.layer, fixture.cache);
+        {modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter, coord_t(scale_(0.2))), fixture.layer, fixture.cache);
     REQUIRE(segments.size() == 1);
     CHECK_FALSE(segments.front().whole_perimeter);
     CHECK(segments.front().left_point == mm(20, 0));
@@ -1352,17 +1359,20 @@ TEST_CASE("A zero-length weak zone types the single candidate at its vertex", "[
     loop.start_index = 0;
     for (const Point &point : perimeter.points) {
         const Vec2f position = unscale(point).cast<float>();
-        candidates.points.emplace_back(Vec3f(position.x(), position.y(), 0), loop, 0, Type::Neutral);
+        candidates.points.emplace_back(Vec3f(position.x(), position.y(), 0), loop, 0, base);
     }
     loop.end_index = candidates.points.size();
     bool enforced = false;
     PreciseSeam::apply_weak_modifiers_to_perimeter(segments, candidates, loop, enforced);
-    CHECK(enforced);
+    CHECK(enforced == (zone == Type::Enforced));
+    size_t changed = 0;
     for (const auto &candidate : candidates.points) {
         CAPTURE(candidate.position.x(), candidate.position.y());
         const bool at_vertex = candidate.position.x() == 20.f && candidate.position.y() == 0.f;
-        CHECK(candidate.type == (at_vertex ? Type::Enforced : Type::Neutral));
+        CHECK(candidate.type == (at_vertex ? zone : base));
+        changed += candidate.type != base ? 1 : 0;
     }
+    CHECK(changed == 1);
 }
 
 namespace {
@@ -1603,6 +1613,31 @@ TEST_CASE("XY compensation does not change which modifiers reach the model surfa
             CHECK(loop.seam.y() > 0.); // The back seam, away from the helper.
     }
     CHECK(checked >= (hole ? 4u : 10u));
+}
+
+TEST_CASE("A wider first layer line does not change which modifiers reach the model surface", "[PreciseSeam]")
+{
+    const bool reaches = GENERATE(true, false);
+    CAPTURE(reaches);
+    // The first layer's wall lies 0.3 mm inside the model face, the others 0.2 mm. A helper ending 0.05 mm inside
+    // the face is short of the surface a 0.4 mm line would give the first layer; one ending 0.05 mm in front of
+    // it would reach the surface a 0.6 mm line would give the upper layers.
+    const double depth = reaches ? 0.05 : -0.05;
+    ExportFixture fixture("back");
+    fixture.config.set_deserialize_strict("initial_layer_line_width", "0.6");
+    // Elephant foot compensation would move the first layer's wall as well.
+    fixture.config.set_deserialize_strict("elefant_foot_compensation", "0");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3. + depth, 4), Vec3d(4, -3, -1)); // Front face.
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    for (const OuterLoop &loop : loops) {
+        CAPTURE(loop.seam.x(), loop.seam.y());
+        if (reaches) {
+            CHECK_THAT(loop.seam.x(), Catch::Matchers::WithinAbs(5. - 10., 0.01));
+            CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.min.y() - loop.bounds.center().y(), 0.01));
+        } else
+            CHECK(loop.seam.y() > 0.); // The back seam, away from the helper.
+    }
 }
 
 TEST_CASE("Full containment warns for Blocked but not for Enforced", "[PreciseSeam]")

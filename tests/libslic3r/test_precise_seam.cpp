@@ -1283,6 +1283,22 @@ TEST_CASE("A modifier face flush with the model surface stays clear of the recon
     CHECK(around(0.19).full_containment);
 }
 
+TEST_CASE("The surface shift subtracts compensation and margin and drops within the snapping radius", "[PreciseSeam][SegmentExtraction]")
+{
+    // d = w/2 - c - margin, kept only above the snapping radius; the margin is 5000 units and the snapping radius
+    // 1000 units. The line width is 0.4 mm throughout.
+    const auto expected = [](double distance) { return coord_t(std::lround(scale_(distance))) - 5000; };
+    // Positive compensation moves the wall towards air, closer to the model surface, so it shortens the shift.
+    CHECK(PreciseSeam::surface_shift(0.4, 0.) == expected(0.2));
+    CHECK(PreciseSeam::surface_shift(0.4, 0.1) == expected(0.1));
+    CHECK(PreciseSeam::surface_shift(0.4, -0.1) == expected(0.3));
+    // Two units either side of the snapping radius.
+    CHECK(PreciseSeam::surface_shift(0.4, 0.2 - 6002 * SCALING_FACTOR) == 1002);
+    CHECK(PreciseSeam::surface_shift(0.4, 0.2 - 5998 * SCALING_FACTOR) == 0);
+    // Compensation beyond half the width would put the surface on the body side: no shift, not a negative one.
+    CHECK(PreciseSeam::surface_shift(0.4, 0.3) == 0);
+}
+
 TEST_CASE("Full containment means the whole surface, not the whole centerline", "[PreciseSeam][SegmentExtraction]")
 {
     const Polygon square = rectangle(0, 0, 20, 20);
@@ -1431,6 +1447,36 @@ TEST_CASE("A vertex point at vertex zero forms or closes a segment across the co
     CHECK(joined.segments.front().edge_indices == std::vector<size_t>{3});
     CHECK(joined.segments.front().end.edge_index == 0);
     CHECK(joined.segments.front().end.parameter == 0.);
+}
+
+TEST_CASE("A vertex point on a hole does not depend on the contour origin or direction", "[PreciseSeam][SegmentExtraction]")
+{
+    const int origin = GENERATE(0, 1, 2, 3, 4, 5);
+    const bool reverse = GENERATE(false, true);
+    CAPTURE(origin, reverse);
+    Polygon perimeter = l_shape();
+    std::rotate(perimeter.points.begin(), perimeter.points.begin() + origin, perimeter.points.end());
+    if (reverse)
+        perimeter.reverse(); // A hole as the loop gives it, clockwise.
+    // As a hole, the L has air inside: its reflex vertex (10, 10) is convex from the air, wrapped by an arc
+    // of radius 0.2 mm into the hole. The modifier covers only that arc, around its point at 225 degrees.
+    const auto result = surface_extraction(perimeter, rectangle(9.83, 9.83, 9.89, 9.89), true);
+    REQUIRE(result.valid);
+    CHECK(result.discarded_fragments == 0);
+    CHECK_FALSE(result.full_containment);
+    REQUIRE(result.segments.size() == 1);
+    const auto &point = result.segments.front();
+    CHECK(point.polyline.points == Points{mm(10, 10)});
+    CHECK(point.edge_indices.empty());
+    // The position is the vertex's outgoing edge, wherever the rotation and reversal moved it.
+    const size_t vertex = size_t(std::find(perimeter.points.begin(), perimeter.points.end(), mm(10, 10)) - perimeter.points.begin());
+    REQUIRE(vertex < perimeter.size());
+    CHECK(point.begin.edge_index == vertex);
+    CHECK(point.begin.parameter == 0.);
+    CHECK(point.end.edge_index == vertex);
+    CHECK(point.end.parameter == 0.);
+    REQUIRE(point.strong_target.has_value());
+    CHECK(point.strong_target->point == mm(10, 10));
 }
 
 TEST_CASE("Leaving part of one arc uncovered is still full containment", "[PreciseSeam][SegmentExtraction]")
