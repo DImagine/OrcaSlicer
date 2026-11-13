@@ -44,7 +44,7 @@ painting does.
 An **intersection** is a continuous part of the external perimeter's centerline
 whose model surface lies inside the modifier's slice on that layer. It is a
 portion of the perimeter, never a chord through the object. The centerline lies
-half an extrusion width inside the printed wall and is invisible to the user,
+about half an extrusion width inside the printed wall and is invisible to the user,
 who places modifiers against the model surface. Extraction therefore
 reconstructs that surface from the centerline, clips it, and carries the
 result back onto the centerline along the normal (see
@@ -52,7 +52,8 @@ result back onto the centerline along the normal (see
 reaches the reconstructed surface, which lies a margin of 5 µm inside the model
 surface, and has no effect when it stays inside the body, even if it crosses the
 centerline. A modifier that enters the model by less than the margin does not
-act.
+act. An open extrusion (a thin wall printed as one line) is left out: its
+G-code does not depend on where the seam is.
 
 ### Terms
 
@@ -140,7 +141,11 @@ threads without locking.
 ## Perimeter preparation
 
 The seam placer works on external perimeter loops, including the walls of
-holes. For objects with Precise Seam volumes, consecutive duplicate points and
+holes. Precise Seam processes closed loops only: an open extrusion (a thin wall
+printed as one line) keeps its ordinary seam candidates, and modifiers are not
+evaluated on it. A modifier that crosses only such a wall has no effect, and the
+"had no effect" warning names it when it was evaluated on a closed loop. For
+objects with Precise Seam volumes, consecutive duplicate points and
 the repeated closing point of each extrusion loop are removed: adjacent
 extrusion paths share endpoints, and the resulting zero-length edges would
 prevent point insertion at their junctions. Distinct visits to one point of a
@@ -156,7 +161,7 @@ role) and the surface shift. The surface line is built from it on the first
 request, so perimeters that no modifier approaches never pay for it.
 
 The **surface shift** is the distance from the centerline to the model surface
-the user sees, less a margin: `d = w/2 - c - m`.
+the user sees, less a margin. Its nominal value is `d = w/2 - c - m`:
 
 - `w` is the region's nominal external perimeter width, the flow the perimeter
   generator uses for the outer loop on that layer, first layer included.
@@ -164,7 +169,10 @@ the user sees, less a margin: `d = w/2 - c - m`.
   positive towards air: `xy_contour_compensation` for a contour and minus
   `xy_hole_compensation` for a hole (a positive value enlarges holes). It is
   zero where slicing skips compensation, for multi-material painting with
-  several filaments. Both values are taken once per object in
+  several filaments. It is also zero for a hole on a layer with several
+  regions when the hole setting is negative: slicing then clips the regions by
+  the compensated islands, and clipping cannot add the material that would make
+  the hole smaller. Both values are taken once per object in
   `SeamPlacer::init()`, so they describe the outer contours and holes of the
   object. A wall on the boundary between two regions of one object is
   compensated differently by slicing, and there the surface is not restored
@@ -174,6 +182,58 @@ the user sees, less a margin: `d = w/2 - c - m`.
   face would otherwise touch the reconstructed surface by rounding noise and
   act on some layers only; the margin moves that unstable position 5 µm deep,
   where it is not reached by accident.
+
+**Measured shift.** On the layers with elephant foot compensation (printing
+directly on the bed, below `elefant_foot_compensation_layers`) and on every
+layer of Arachne perimeters (not in spiral vase mode, which uses the classic
+generator), the centerline does not lie at depth `w/2`: elephant foot
+compensation shrinks the contour the perimeters are built on by an amount that
+changes along it, and Arachne lines vary in width. There the shift is measured:
+`d(P) = D(P) - c' - m` at a point `P` of the centerline, where `D(P)` is the
+depth of `P` below the boundary of the layer's islands (`Layer::lslices`) and
+`c'` the part of `c` those islands contain. The depth is the offset from `P` to
+the nearest point of the boundary, projected on the normal of the edge (at a
+vertex, the larger of the projections on its two edges' normals). At an inner
+corner the nearest point is the corner of the boundary, farther away than
+either side; its projections are the distances to the sides.
+
+- Slicing stores the islands of an elephant foot layer from before that
+  compensation, and those of other layers as the perimeters see them, so `D`
+  includes the elephant foot compensation at that point and the half width of
+  the line actually printed there. The islands contain the XY compensation
+  (`c' = c`), except on an elephant foot layer with several regions: slicing
+  keeps those islands from before a negative contour compensation and applies
+  it to the perimeters only, so there `c'` is zero for contours.
+- A distance is accepted only within the range of the wall's own line: from half
+  the narrowest line the generator prints to half the widest, widened by the
+  elephant foot compensation of the layer, by the part of `c` missing from the
+  islands, by half the difference between line width and spacing (Arachne keeps
+  a precise outer wall that much deeper where it prints one line) and by the
+  slicing resolution plus 1 µm. The narrowest line is half the nominal width for
+  Arachne, which splits a wall into two lines narrower than its minimum bead
+  width, and slightly under it for the classic generator, which prints narrow
+  loops thinner; the widest is twice the nominal width for Arachne and the
+  nominal width for the classic generator. A distance outside that range does not
+  come from the wall's own surface: the wall is thinner than a line, or it lies
+  on the boundary between two regions, which the islands do not contain. Such a
+  point takes the nominal shift.
+- Every vertex is measured, and an edge longer than 0.5 mm (the step at which
+  elephant foot compensation is resampled) also at points at most 0.5 mm apart
+  along it. If they all follow the straight change between its vertices within
+  the snapping radius, the edge stays one piece; otherwise they all split it.
+- A negative value is taken as zero. A perimeter whose values all equal the
+  nominal shift within the snapping radius keeps the constant shift, so a wall at
+  its nominal depth gives exactly the result of the nominal shift. A perimeter
+  whose largest value is within the snapping radius keeps the centerline; a
+  single point at zero does not change that.
+- Loops with fuzzy skin keep the nominal shift. The noise moves the centerline
+  off the smooth outline, so measuring would pull its points within the range
+  back to the outline while the points outside it kept the noise. A layer where
+  any region adds fuzzy skin to the outer walls of contours, or of holes,
+  measures no loop of that kind.
+- The islands are indexed once per layer and only on layers where a Precise
+  Seam modifier has a region, and only loops that some modifier on the layer
+  approaches are measured.
 
 A shift within the snapping radius is treated as zero: extraction then clips the
 centerline itself. The preparation borrows the polygon and is used only while the polygon
@@ -194,17 +254,24 @@ The surface is the set of points on the air side at the shift `d` from the
 centerline. `build_surface_line()` builds it as a closed line whose every edge
 remembers its source:
 
-- **Shifted edge.** Each source edge moved by `d` along its normal into the air.
-  The shift is rounded once per edge, so the shifted edge is an exact integer
-  translate of its source and keeps its parameters.
+- **Shifted edge.** Each source edge moved along its normal into the air. With a
+  constant shift along the edge, the shift is rounded once per edge, so the
+  shifted edge is an exact integer translate of its source and keeps its
+  parameters. Where a measured shift changes along the edge, the shifted edge is
+  a chain of straight parts through the points moved by the shift at its
+  vertices and at its measured interior points; each part maps linearly onto the
+  range of parameters of the source edge between those points.
 - **Arc.** Where shifted edges diverge (a convex vertex as seen from the air),
-  an arc of radius `d` around the vertex, approximated by chords with a sagitta
-  of at most 40 units. A reversal of direction turns by half a circle.
+  an arc around the vertex whose radius is the shift at that vertex,
+  approximated by chords with a sagitta of at most 40 units. Both shifted edges
+  take that shift at the vertex, so the line stays continuous; with no shift
+  there they meet at the vertex itself. A reversal of direction turns by half a
+  circle.
 - **Crossing.** Where shifted edges cross (a concave vertex) at a point `K`
-  inside both of them, they end exactly at `K`: no part of them lies beyond it.
-  A shifted edge trimmed this way covers only part of its source edge, and its
-  parameters are carried over proportionally. Both trims of one edge must leave
-  at least 4 units of it.
+  inside both of the parts meeting there, they end exactly at `K`: no part of
+  them lies beyond it. A part trimmed this way covers only part of its range of
+  the source edge, and its parameters are carried over proportionally. Both
+  trims of one part must leave at least 4 units of it.
 - **Bridge.** At any other concave vertex (shifted edges crossing beyond the end
   of one of them, as in a fillet finer than the shift), a straight edge between
   the ends of the full shifted edges, carried onto the vertex like an arc. The
@@ -225,8 +292,8 @@ so shifting it back by slightly less returns to that contour and does not fold:
 a concave fillet of radius `r` on the surface is a fillet of radius `r + d` on
 the centerline, and a sharp inner corner stays sharp and resolves exactly. The
 line folds only on corners that are not resolved exactly: a very sharp inner
-corner that the slicer bevels, variable Arachne widths, or relief finer than the
-shift (see [Known limitations](#known-limitations)). There the tails and bridges
+corner that the slicer bevels, a sharp change of the measured shift, or relief
+finer than the shift (see [Known limitations](#known-limitations)). There the tails and bridges
 of the line stay part of it, and the user's rule that a modifier enters the wall
 by a clear depth keeps such corners out of play. A general offset of the polygon
 could not replace the surface line: it rounds and cuts corners and loses the
@@ -296,13 +363,18 @@ a log marker.
 
 ### Carrying the surface onto the centerline
 
-Intervals on the surface line are carried onto the centerline along the normal:
+Intervals on the surface line are carried onto the centerline through their
+source:
 
 | Surface | Centerline |
 | --- | --- |
-| Shifted edge, parameters `t0..t1` | the same source edge, the same parameters (proportionally on a trimmed one) |
+| Shifted edge, parameters `t0..t1` | the same source edge, the same parameters (proportionally on a trimmed part or a part of a split edge) |
 | Arc or bridge around a vertex | that vertex, as a **vertex point** |
 | Both ends of a dead stretch covered | the whole centerline between them |
+
+A point of an edge with a constant shift moves back by subtracting that edge's
+integer shift, which is the same as following the normal. On an edge whose
+shift changes, the point is the one at the same parameter of the source edge.
 
 The last rule covers the crossing point `K` of a concave corner: when the
 modifier covers the surface on both sides of `K`, the centerline around the
@@ -471,9 +543,11 @@ larger. The enforced subdivision step is a physical distance and stays 0.2 mm.
 | Value | Role |
 | --- | --- |
 | `MACHINE_PRECISION_SQUARED` (2.5 units², about 1.6 nm) | A point lies on an edge if it is this close. It absorbs Clipper's truncation of cuts to whole units (under √2 units from the edge) and never bridges a real gap: a one-unit uncovered gap stays a gap. |
-| `TOLERANCE_LINEAR` (1000 units, 1 µm) | Insertion snaps points this close to an existing vertex, and helper points are placed this far from boundaries. The same radius bounds the rounding fallback, contacts and the sub-micron full-containment rule, so those decisions match what insertion would produce anyway. It is also the reach of a dead-stretch end and the smallest surface shift. |
+| `TOLERANCE_LINEAR` (1000 units, 1 µm) | Insertion snaps points this close to an existing vertex, and helper points are placed this far from boundaries. The same radius bounds the rounding fallback, contacts and the sub-micron full-containment rule, so those decisions match what insertion would produce anyway. It is also the reach of a dead-stretch end, the smallest surface shift, and the agreement of measured shifts with the nominal shift and with a straight change along an edge. |
 | `SURFACE_MARGIN` (5000 units, 5 µm) | The reconstructed surface lies this far inside the model surface, so a modifier flush with a model face does not act. |
 | `SURFACE_ARC_SAGITTA` (40 units) | Maximum sagitta of the chords of surface arcs. |
+| `SHIFT_SAMPLING_STEP` (0.5 mm) | Largest spacing of shift measurements along an edge, the step at which elephant foot compensation is resampled. |
+| Slicing resolution plus 1 µm | Widens the accepted range of measured depths: perimeters are built on a contour simplified by the resolution. |
 | `enforcer_oversampling_distance` (0.2 mm) | Maximum step of enforced subdivision. |
 
 Raising the on-edge tolerance would not help with cuts beside a vertex: more
@@ -552,20 +626,24 @@ exceeded, one summary marker reports the total.
 
 ## Known limitations
 
-- **The surface is reconstructed, not measured.** It follows the nominal
-  external perimeter width; with Arachne the real width varies, and narrow
-  loops of the classic generator may print thinner. Elephant foot compensation
-  is not taken into account: on the first layers the reconstructed surface lies
-  inside the model surface by its amount. With fuzzy skin the centerline is
-  noisy and the surface repeats the noise. An open extrusion (thin wall) takes
-  its side from the loop orientation and gets a surface on that side only.
+- **Where the shift is not measured, or only approximately.** On layers
+  without elephant foot compensation the classic generator keeps the nominal
+  shift, so its narrow loops, printed slightly thinner, get a surface a few
+  micrometers outside the model. With fuzzy skin the centerline is noisy and the
+  surface repeats the noise. A measured point moves along the normal of its
+  edge by the depth projected on that normal: where elephant foot compensation
+  changes along a wall, the centerline's edges are inclined to the outline, and
+  the surface falls short of it by `D * (1 / cos a - cos a)` for an inclination
+  `a`, a few micrometers for usual changes. A closed Arachne loop of
+  a single line (a ring thinner than two lines) gets a surface on its contour or
+  hole side only.
 - **Grazing contacts.** Contacts are taken as clipping returns them, without
   tangency rules, so boundaries that only graze the surface are the user's
   responsibility. Several near-touches on inclined edges can leave several
   segments separated by gaps of a few units; their zones then cover nearly the
   whole perimeter instead of being treated as full containment.
 - **Concave corners not resolved exactly.** At a very sharp inner corner that
-  the slicer bevels, with variable Arachne widths, with fuzzy skin whose points
+  the slicer bevels, at a sharp change of the measured shift, with fuzzy skin whose points
   are closer than the trim of a corner (`d * tan(turn / 2)`) or with
   artificially fine relief, the surface line keeps its tails and bridges. A modifier boundary
   closer than `d` to such a corner can give an extra segment, the
@@ -584,7 +662,10 @@ exceeded, one summary marker reports the total.
   amount of the compensation, and a modifier near that boundary may act or not
   act accordingly. Restoring it exactly would need the shift actually applied to
   each part of the loop, since one loop can contain both such a boundary and a
-  compensated outer contour.
+  compensated outer contour. The measured shift does not change this: the
+  islands do not contain such a boundary, so its points fall outside the
+  accepted range and take the nominal shift, except near the place where the
+  boundary meets the outer contour.
 - **Self-touching perimeters.** Extraction keeps distinct visits of one
   coordinate apart through its source-edge bindings, but the consumers locate
   inserted points by coordinates. A weak zone is typed and subdivided from the
@@ -710,7 +791,12 @@ last modifier would.
   full containment of the surface versus the centerline (also with part of one
   arc uncovered), a fully covered concave fillet finer than the shift, reversals, nearly collinear vertices,
   vertex points at vertex zero and on holes, the bounds of the surface shift,
-  and independence of contour origin and direction. A boundary swept in sub-micron steps across shallow concave
+  and independence of contour origin and direction. A shift that changes along
+  the perimeter is checked at vertices, arcs and a vertex without shift, at a
+  resolved concave corner and on a split long edge swept by a boundary; its
+  measurement against an outline at the nominal depth, deeper, beyond the
+  accepted range, with compensation inside and outside the outline, within the
+  margin, and with a step along an edge. A boundary swept in sub-micron steps across shallow concave
   vertices of tessellated holes and notches must move a single segment end
   monotonically. On the centerline they cover
   clipping and binding: holes and components, contour origin and reversal,
@@ -733,7 +819,13 @@ last modifier would.
   volumes and check the outer wall starts in the exported G-code: every strong
   mode under several seam positions and with a raft, a modifier reaching only
   0.1 mm into the model, contour and hole walls under positive and negative XY
-  compensation, a first layer with a wider line, Enforced and Blocked zones,
+  compensation with both generators, a first layer with a wider line, the
+  measured shift on elephant foot layers with both generators (the same
+  modifier depth as above, flush and slightly deeper modifiers, a hole, a thin
+  part they cannot shrink fully, a raft), XY compensation together with elephant
+  foot compensation in one region and in several, an Arachne wall narrower than
+  its line, fuzzy skin on contours or holes, a modifier crossing only an open
+  thin wall, Enforced and Blocked zones,
   a perimeter blocked all round under every seam position, a modifier with a
   hole, and the user warning.
 - [Seam placer tests](../../tests/fff_print/test_seam_placer.cpp) cover
