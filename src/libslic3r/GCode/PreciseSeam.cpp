@@ -9,6 +9,8 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/AABBTreeLines.hpp"
+#include "libslic3r/Line.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 #include <algorithm>
@@ -18,6 +20,8 @@
 #include <optional>
 #include <cstddef>
 #include <string>
+#include <tuple>
+#include <unordered_map>
 #include <cassert>
 #include <cmath>
 #include <tbb/parallel_for.h>
@@ -82,10 +86,10 @@ static constexpr coord_t TOLERANCE_SQUARED = TOLERANCE_LINEAR * TOLERANCE_LINEAR
 // a model face stays clear of it on every layer instead of touching it by rounding noise.
 static constexpr coord_t SURFACE_MARGIN = 5 * TOLERANCE_LINEAR;
 // Maximum sagitta of the chords that approximate the surface arcs around convex vertices.
-static constexpr double SURFACE_ARC_SAGITTA = 10.;
+static constexpr double SURFACE_ARC_SAGITTA = 40.;
 // The dead-zone offset stays this far inside the surface: above the arc sagitta, the offset's own arc
 // tolerance and the rounding of both, so real surface is never removed. In units, like the tolerances above.
-static constexpr double SURFACE_ZONE_MARGIN = 50.;
+static constexpr double SURFACE_ZONE_MARGIN = 60.;
 static constexpr double SURFACE_ZONE_ARC_TOLERANCE = 10.;
 
 coord_t surface_shift(double line_width, double compensation)
@@ -385,15 +389,34 @@ bool append_fragment(const Polyline &fragment, const Polygon &perimeter,
     return false;
 }
 
-// Squared distance within which the two ends of a dead stretch count as one point. The zone margin keeps
-// tails up to about sqrt(margin * shift / 8) past a concave corner, so the ends of the shallowest corner
-// that still has a dead stretch lie about twice that apart; this bound keeps a wide margin over it.
+// Squared distance within which the two ends of a dead stretch left by the zone count as one point. The zone
+// margin keeps tails up to about sqrt(margin * shift / 8) past the crossing of a non-local concave corner, so
+// the ends of the shallowest such corner lie about twice that apart; this bound keeps a wide margin over it.
 static double surface_join_tolerance_squared(coord_t shift)
 {
     return 4. * (SURFACE_ZONE_MARGIN + SURFACE_ZONE_ARC_TOLERANCE) * double(shift) + double(TOLERANCE_SQUARED);
 }
 
-SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hole)
+void cover_centerline(const Polygon &perimeter, CenterlinePoint from, const CenterlinePoint &to,
+                      std::vector<ClippedEdgeInterval> &intervals)
+{
+    const size_t count = perimeter.size();
+    if (from.edge == to.edge && from.parameter > to.parameter)
+        return;
+    for (size_t steps = 0; steps <= count; ++steps) {
+        if (from.edge == to.edge && from.parameter <= to.parameter) {
+            if (from.parameter < to.parameter)
+                intervals.push_back({from.edge, from.parameter, to.parameter, from.point, to.point});
+            return;
+        }
+        const size_t next = (from.edge + 1) % count;
+        if (from.parameter < 1.)
+            intervals.push_back({from.edge, from.parameter, 1., from.point, perimeter[next]});
+        from = {next, 0., perimeter[next]};
+    }
+}
+
+SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hole, const ExtractionContext &context)
 {
     SurfaceLine surface;
     const size_t count = perimeter.size();
@@ -403,16 +426,51 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
     const bool ccw = perimeter.is_counter_clockwise();
     const double side = (hole ? -1. : 1.) * (ccw ? 1. : -1.);
     const auto round_point = [](const Vec2d &p) { return Point(coord_t(std::lround(p.x())), coord_t(std::lround(p.y()))); };
+    const auto cross = [](const Vec2d &a, const Vec2d &b) { return a.x() * b.y() - a.y() * b.x(); };
     std::vector<Vec2d> normals(count);
+    std::vector<Vec2d> directions(count);
     surface.shifts.reserve(count);
     for (size_t i = 0; i < count; ++i) {
-        const Vec2d edge = (perimeter[(i + 1) % count] - perimeter[i]).cast<double>();
-        normals[i] = side * Vec2d(edge.y(), -edge.x()) / edge.norm();
+        directions[i] = (perimeter[(i + 1) % count] - perimeter[i]).cast<double>();
+        normals[i] = side * Vec2d(directions[i].y(), -directions[i].x()) / directions[i].norm();
         // One rounded shift per edge keeps each shifted edge an exact translate of its source edge.
         surface.shifts.push_back(round_point(distance * normals[i]));
     }
 
+    // A concave corner whose shifted edges cross within both of them is resolved exactly: the shifted edges end
+    // at the crossing K, with no tails and no bridge, and the dead stretch around the vertex is known at once.
+    // The trims of both corners of one edge must leave a part of it, so a fillet finer than the shift is left
+    // to the zone below. A candidate counts against its neighbours even when it is not resolved itself.
+    std::vector<double> end_at(count, 1.);  // Per vertex: parameter on the edge before it where that edge ends.
+    std::vector<double> start_at(count, 0.); // Per vertex: parameter on the edge after it where that edge starts.
+    std::vector<bool> candidate(count, false);
+    std::vector<Vec2d> crossing(count);
+    for (size_t v = 0; v < count; ++v) {
+        const size_t before = (v + count - 1) % count;
+        const double turn = cross(normals[before], normals[v]);
+        const double denominator = cross(directions[before], directions[v]);
+        if (side * turn >= 0. || denominator == 0.)
+            continue; // Convex, collinear or a reversal.
+        const Vec2d a = (perimeter[before] + surface.shifts[before]).cast<double>();
+        const Vec2d offset = (perimeter[v] + surface.shifts[v]).cast<double>() - a;
+        end_at[v] = cross(offset, directions[v]) / denominator;
+        start_at[v] = cross(offset, directions[before]) / denominator;
+        crossing[v] = a + end_at[v] * directions[before];
+        candidate[v] = end_at[v] > 0. && end_at[v] < 1. && start_at[v] > 0. && start_at[v] < 1.;
+    }
+    // A trimmed edge keeps at least this many units, so its rounded ends stay distinct.
+    const double min_part = 4.;
+    std::vector<bool> resolved(count, false);
+    for (size_t v = 0; v < count; ++v) {
+        const size_t before = (v + count - 1) % count;
+        const size_t after = (v + 1) % count;
+        resolved[v] = candidate[v] &&
+            (end_at[v] - (candidate[before] ? start_at[before] : 0.)) * directions[before].norm() > min_part &&
+            ((candidate[after] ? end_at[after] : 1.) - start_at[v]) * directions[v].norm() > min_part;
+    }
+
     Points &points = surface.polygon.points;
+    std::vector<size_t> edge_element(count, size_t(-1));
     // A point equal to the previous one ends a zero-length element: the new element replaces it.
     const auto push = [&](const Point &point, SurfaceElement element) {
         if (!points.empty() && points.back() == point) {
@@ -427,17 +485,21 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
     for (size_t i = 0; i < count; ++i) {
         const size_t next = (i + 1) % count;
         const Point &vertex = perimeter[next];
-        push(perimeter[i] + surface.shifts[i], {i, false});
+        push(resolved[i] ? round_point(crossing[i]) : perimeter[i] + surface.shifts[i],
+             {i, false, resolved[i] ? start_at[i] : 0., resolved[next] ? end_at[next] : 1.});
+        edge_element[i] = surface.elements.size() - 1;
+        if (resolved[next])
+            continue; // The next edge starts at the crossing that ends this one.
         const Point end = vertex + surface.shifts[i];
         const Point resume = vertex + surface.shifts[next];
         if (end == resume)
             continue; // Collinear edges: the shifted edges meet exactly.
         push(end, {next, true});
         // The normal turns like the edge; a reversal turns by half a circle around the air side.
-        const double cross = normals[i].x() * normals[next].y() - normals[i].y() * normals[next].x();
+        const double turn = cross(normals[i], normals[next]);
         const double dot = normals[i].dot(normals[next]);
-        const double sweep = cross == 0. && dot < 0. ? side * PI : std::atan2(cross, dot);
-        // Concave towards air: a straight bridge, never real surface, so it needs no shape.
+        const double sweep = turn == 0. && dot < 0. ? side * PI : std::atan2(turn, dot);
+        // Concave towards air and not resolved: a straight bridge, never real surface, so it needs no shape.
         if (side * sweep <= 0.)
             continue;
         const double start = std::atan2(normals[i].y(), normals[i].x());
@@ -453,9 +515,17 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
     }
     if (points.size() < 3)
         return surface;
+    // Resolved corners: the crossing ends the element of the edge before and starts the one after.
+    for (size_t v = 0; v < count; ++v) {
+        const size_t before = (v + count - 1) % count;
+        if (resolved[v] && edge_element[before] < points.size() && edge_element[v] < points.size()) {
+            const Point at = points[edge_element[v]];
+            surface.gaps.push_back({edge_element[before], at, edge_element[v], at});
+        }
+    }
 
     // Remove every part of the line closer than the shift to the centerline, slightly less to keep the
-    // real surface whole: concave bridges, tails past concave corners and parts facing other walls.
+    // real surface whole: bridges, tails past unresolved concave corners and parts facing other walls.
     Polyline line(points);
     line.points.push_back(points.front());
     Polygon oriented = perimeter;
@@ -471,9 +541,12 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
                 surface.bounds.merge(point);
             surface.pieces.push_back(std::move(piece));
         }
+    if (surface.pieces.empty() ||
+        (surface.pieces.size() == 1 && surface.pieces.front().first_point() == surface.pieces.front().last_point()))
+        return surface; // No piece, or one along the whole closed line: no dead stretch left by the zone.
 
-    // Order the pieces along the line by their bound ends; any binding failure leaves no gaps, so dead
-    // stretches simply stay uncovered.
+    // Order the pieces along the line. Each end pair of a piece lies on one element of the line, found through
+    // a tree of its edges rather than a scan per piece.
     struct PieceEnds {
         size_t first_element;
         double first_parameter;
@@ -482,26 +555,44 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
         double last_parameter;
         Point last;
     };
+    const AABBTreeLines::LinesDistancer<Line> elements(surface.polygon.lines());
+    const auto locate = [&](const Point &end, const Point &inner) -> std::optional<std::pair<size_t, double>> {
+        const Point middle((end.x() + inner.x()) / 2, (end.y() + inner.y()) / 2);
+        const size_t element = std::get<1>(elements.distance_from_lines_extra<false>(middle));
+        const Point &a = surface.polygon[element];
+        const Point &b = surface.polygon[(element + 1) % surface.polygon.size()];
+        // Both points must lie on the element found, as binding would require.
+        const auto parameter = parameter_on_edge(end, a, b);
+        if (!parameter || !parameter_on_edge(inner, a, b))
+            return std::nullopt;
+        return std::make_pair(element, *parameter);
+    };
     std::vector<PieceEnds> ends;
+    size_t failed = 0;
     for (const Polyline &piece : surface.pieces) {
-        std::vector<ClippedEdgeInterval> bound;
-        FragmentBindingFailure failure;
-        Polyline cleaned = piece;
-        if (!bind_fragment(piece, surface.polygon, bound, failure) &&
-            !(snap_cuts_to_adjacent_vertices(cleaned, surface.polygon) && cleaned.size() >= 2 &&
-              bind_fragment(cleaned, surface.polygon, bound, failure)))
-            return surface;
-        // A piece never crosses the start of the line, so its extreme positions are its ends, whichever
-        // direction clipping returned it in.
-        const ClippedEdgeInterval *first = &bound.front();
-        const ClippedEdgeInterval *last = &bound.front();
-        for (const ClippedEdgeInterval &interval : bound) {
-            if (std::make_pair(interval.edge, interval.begin) < std::make_pair(first->edge, first->begin))
-                first = &interval;
-            if (std::make_pair(interval.edge, interval.end) > std::make_pair(last->edge, last->end))
-                last = &interval;
+        auto head = locate(piece.points[0], piece.points[1]);
+        auto tail = locate(piece.points.back(), piece.points[piece.size() - 2]);
+        if (!head || !tail) {
+            ++failed;
+            continue;
         }
-        ends.push_back({first->edge, first->begin, first->first, last->edge, last->end, last->last});
+        PieceEnds piece_ends{head->first, head->second, piece.points.front(), tail->first, tail->second, piece.points.back()};
+        // A piece never crosses the start of the line, so its ends are its extreme positions, whichever direction
+        // clipping returned it in.
+        if (std::make_pair(piece_ends.first_element, piece_ends.first_parameter) >
+            std::make_pair(piece_ends.last_element, piece_ends.last_parameter))
+            piece_ends = {tail->first, tail->second, piece.points.back(), head->first, head->second, piece.points.front()};
+        ends.push_back(piece_ends);
+    }
+    if (failed > 0 && (context.warnings == nullptr ||
+                       context.warnings->failed_surface_pieces.fetch_add(failed, std::memory_order_relaxed) < failed_fragment_log_limit)) {
+        const Layer *layer = context.layer;
+        const ModelObject *object = layer && layer->object() ? layer->object()->model_object() : nullptr;
+        // Without a position the piece takes no part in dead stretches; its neighbours may still meet across it.
+        BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamSurfaceFailed] Unable to locate surface pieces"
+            << " object=" << (object ? object->id().id : 0) << " layer=" << (layer ? std::to_string(layer->id()) : std::string("unknown"))
+            << " z=" << (layer ? std::to_string(layer->slice_z) : std::string("unknown")) << " failed=" << failed
+            << " pieces=" << surface.pieces.size() << " perimeter_points=" << count;
     }
     std::sort(ends.begin(), ends.end(), [](const PieceEnds &a, const PieceEnds &b) {
         return std::make_pair(a.first_element, a.first_parameter) < std::make_pair(b.first_element, b.first_parameter);
@@ -520,11 +611,11 @@ SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hol
 }
 } // namespace detail
 
-const detail::SurfaceLine &PreparedPerimeter::surface() const
+const detail::SurfaceLine &PreparedPerimeter::surface(const ExtractionContext &context) const
 {
     assert(valid && shift > 0);
     if (!m_surface)
-        m_surface = std::make_unique<detail::SurfaceLine>(detail::build_surface_line(polygon, shift, hole));
+        m_surface = std::make_unique<detail::SurfaceLine>(detail::build_surface_line(polygon, shift, hole, context));
     return *m_surface;
 }
 
@@ -601,7 +692,7 @@ static std::vector<detail::ClippedEdgeInterval> surface_intervals(const Prepared
 {
     using detail::ClippedEdgeInterval;
     std::vector<ClippedEdgeInterval> intervals;
-    const detail::SurfaceLine &surface = prepared.surface();
+    const detail::SurfaceLine &surface = prepared.surface(context);
     Polylines fragments;
     for (const ModifierRegion *region : regions)
         if (surface.bounds.defined && surface.bounds.overlap(region->bounds))
@@ -614,18 +705,14 @@ static std::vector<detail::ClippedEdgeInterval> surface_intervals(const Prepared
         return intervals;
 
     const Polygon &perimeter = prepared.polygon;
-    const size_t count = perimeter.size();
-    struct CenterlinePoint {
-        size_t edge;
-        double parameter;
-        Point point;
-    };
-    // Shifted edges are exact translates, so a point moves back by the same integer shift.
+    using detail::CenterlinePoint;
+    // Shifted edges are exact translates, so a point moves back by the same integer shift; a shifted edge that
+    // ends at a concave crossing covers only part of its source edge.
     const auto to_centerline = [&](size_t element, double parameter, const Point &point) -> CenterlinePoint {
         const detail::SurfaceElement &source = surface.elements[element];
         if (source.vertex)
             return {source.source, 0., perimeter[source.source]};
-        return {source.source, parameter, point - surface.shifts[source.source]};
+        return {source.source, source.begin + parameter * (source.end - source.begin), point - surface.shifts[source.source]};
     };
     for (const ClippedEdgeInterval &interval : bound) {
         const CenterlinePoint first = to_centerline(interval.edge, interval.begin, interval.first);
@@ -634,39 +721,28 @@ static std::vector<detail::ClippedEdgeInterval> surface_intervals(const Prepared
         intervals.push_back({first.edge, first.parameter, last.parameter, first.point, last.point});
     }
 
-    // Covers the centerline forward from `from` to `to`; never around the whole loop.
-    const auto cover = [&](CenterlinePoint from, const CenterlinePoint &to) {
-        if (from.edge == to.edge && from.parameter > to.parameter)
-            return;
-        for (size_t steps = 0; steps <= count; ++steps) {
-            if (from.edge == to.edge && from.parameter <= to.parameter) {
-                if (from.parameter < to.parameter)
-                    intervals.push_back({from.edge, from.parameter, to.parameter, from.point, to.point});
-                return;
-            }
-            const size_t next = (from.edge + 1) % count;
-            if (from.parameter < 1.)
-                intervals.push_back({from.edge, from.parameter, 1., from.point, perimeter[next]});
-            from = {next, 0., perimeter[next]};
-        }
-    };
     // A stretch counts as reached when coverage ends at its end point on the same element; the snapping
     // radius absorbs a modifier boundary passing through the corner itself.
     const auto reaches = [](const Point &a, const Point &b) {
         return (a - b).cast<double>().squaredNorm() < double(TOLERANCE_SQUARED);
     };
+    // Indexed by element: a hole has a gap at every vertex, a covered hole an interval on every element.
+    std::unordered_multimap<size_t, const ClippedEdgeInterval*> by_element;
+    by_element.reserve(bound.size());
+    for (const ClippedEdgeInterval &interval : bound)
+        by_element.emplace(interval.edge, &interval);
     for (const detail::SurfaceGap &gap : surface.gaps) {
         const ClippedEdgeInterval *before = nullptr;
         const ClippedEdgeInterval *after = nullptr;
-        for (const ClippedEdgeInterval &interval : bound) {
-            if (interval.edge == gap.end_element && reaches(interval.last, gap.end))
-                before = &interval;
-            if (interval.edge == gap.start_element && reaches(interval.first, gap.start))
-                after = &interval;
-        }
+        for (auto [it, end] = by_element.equal_range(gap.end_element); it != end; ++it)
+            if (reaches(it->second->last, gap.end))
+                before = it->second;
+        for (auto [it, end] = by_element.equal_range(gap.start_element); it != end; ++it)
+            if (reaches(it->second->first, gap.start))
+                after = it->second;
         if (before != nullptr && after != nullptr)
-            cover(to_centerline(before->edge, before->end, before->last),
-                  to_centerline(after->edge, after->begin, after->first));
+            detail::cover_centerline(perimeter, to_centerline(before->edge, before->end, before->last),
+                                     to_centerline(after->edge, after->begin, after->first), intervals);
     }
     return intervals;
 }

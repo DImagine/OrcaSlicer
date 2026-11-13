@@ -1112,12 +1112,15 @@ TEST_CASE("The surface line shifts edges towards air, follows convex corners and
     CHECK((concave.gaps.front().end - mm(10.2, 10.2)).cast<double>().norm() < scale_(0.001));
     CHECK((concave.gaps.front().start - mm(10.2, 10.2)).cast<double>().norm() < scale_(0.001));
 
-    // The wall of a hole is shifted into the hole, where its corners are concave: four straight pieces with
-    // a dead stretch at every corner. A hole narrower than twice the shift has no surface.
+    // The wall of a hole is shifted into the hole, where its corners are concave: the shifted edges end at their
+    // crossings, one closed piece with a dead stretch at every corner. A hole narrower than twice the shift has
+    // no surface.
     const auto hole = PreciseSeam::detail::build_surface_line(rectangle(0, 0, 10, 10), surface_distance, true);
     CHECK(hole.shifts[0] == Point(0, surface_distance));
-    CHECK(hole.pieces.size() == 4);
+    REQUIRE(hole.pieces.size() == 1);
+    CHECK(hole.pieces.front().first_point() == hole.pieces.front().last_point());
     CHECK(hole.gaps.size() == 4);
+    CHECK(hole.polygon.points == Points{mm(0.2, 0.2), mm(9.8, 0.2), mm(9.8, 9.8), mm(0.2, 9.8)});
     CHECK(hole.bounds.defined);
     CHECK(PreciseSeam::detail::build_surface_line(rectangle(0, 0, 0.3, 0.3), surface_distance, true).pieces.empty());
 }
@@ -1401,4 +1404,102 @@ TEST_CASE("A boundary swept across a shallow concave vertex moves the single seg
         if (step == 30)
             CHECK(contains_point(result.segments.front().polyline, vertex));
     }
+}
+
+TEST_CASE("Covering an arc and the end of the previous shifted edge ends the segment at the vertex", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    // The front shifted edge from x = 17 and the arc around (20, 0) up to about -33 degrees.
+    const auto result = surface_extraction(square, rectangle(17, -0.5, 20.17, -0.11));
+    check_provenance(square, result);
+    REQUIRE(result.segments.size() == 1);
+    CHECK(result.segments.front().polyline.points == Points{mm(17, 0), mm(20, 0)});
+    CHECK(result.segments.front().end.edge_index == 1);
+    CHECK(result.segments.front().end.parameter == 0.);
+}
+
+TEST_CASE("A vertex point at vertex zero forms or closes a segment across the contour origin", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    // Only the arc around vertex zero (0, 0), at 225 degrees.
+    const auto point = surface_extraction(square, rectangle(-0.17, -0.17, -0.11, -0.11));
+    REQUIRE(point.segments.size() == 1);
+    CHECK(point.segments.front().polyline.points == Points{mm(0, 0)});
+    CHECK(point.segments.front().begin.edge_index == 0);
+    CHECK(point.segments.front().edge_indices.empty());
+    CHECK_FALSE(point.full_containment);
+    // The left shifted edge down to the vertex and part of its arc: the vertex point heads the sorted intervals,
+    // and the tail on the closing edge joins it.
+    const auto joined = surface_extraction(square, rectangle(-0.5, -0.17, -0.11, 3));
+    check_provenance(square, joined);
+    REQUIRE(joined.segments.size() == 1);
+    CHECK(joined.segments.front().polyline.points == Points{mm(0, 3), mm(0, 0)});
+    CHECK(joined.segments.front().edge_indices == std::vector<size_t>{3});
+    CHECK(joined.segments.front().end.edge_index == 0);
+    CHECK(joined.segments.front().end.parameter == 0.);
+}
+
+TEST_CASE("Leaving part of one arc uncovered is still full containment", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    // The modifier covers everything but a small hole on the arc around (20, 0), clear of both shifted edges.
+    ExPolygon region(rectangle(-1, -1, 21, 21));
+    region.holes.push_back(rectangle(20.12, -0.16, 20.16, -0.12));
+    region.holes.back().reverse();
+    const auto result = surface_extraction(square, ExPolygons{region});
+    CHECK(result.full_containment);
+    CHECK(result.discarded_fragments == 0);
+}
+
+TEST_CASE("A reversal of direction is wrapped by a half-circle arc", "[PreciseSeam][SegmentExtraction]")
+{
+    // A needle from (20, 5) to the tip (26, 5) and back: the surface runs along both sides and round the tip.
+    const Polygon needle(Points{mm(0, 0), mm(20, 0), mm(20, 5), mm(26, 5), mm(20, 5), mm(20, 20), mm(0, 20)});
+    const auto tip = surface_extraction(needle, rectangle(26.1, 4, 27, 6));
+    CHECK(tip.discarded_fragments == 0);
+    REQUIRE(tip.segments.size() == 1);
+    CHECK(tip.segments.front().polyline.points == Points{mm(26, 5)});
+    const auto around = surface_extraction(needle, rectangle(25, 4, 27, 6));
+    check_provenance(needle, around);
+    REQUIRE(around.segments.size() == 1);
+    CHECK(around.segments.front().polyline.points == Points{mm(25, 5), mm(26, 5), mm(25, 5)});
+}
+
+TEST_CASE("Nearly collinear vertices whose rounded shifts differ by one unit bind without failures", "[PreciseSeam][SegmentExtraction]")
+{
+    // The second edge rises (or drops) 30 units over 10 mm: 0.6 units of its 0.2 mm shift point along x, so
+    // the rounded shifts of the two edges differ by one unit; the vertex is convex or concave.
+    const coord_t rise = GENERATE(30, -30);
+    CAPTURE(rise);
+    const Polygon perimeter(Points{mm(0, 0), mm(10, 0), Point(mm(20, 0).x(), rise), mm(20, 20), mm(0, 20)});
+    const auto surface = PreciseSeam::detail::build_surface_line(perimeter, surface_distance, false);
+    CHECK(surface.shifts[0] != surface.shifts[1]);
+    const auto result = surface_extraction(perimeter, rectangle(9, -1, 11, -0.1));
+    check_provenance(perimeter, result);
+    REQUIRE(result.segments.size() == 1);
+    CHECK(result.segments.front().polyline.points.front() == mm(9, 0));
+    CHECK(contains_point(result.segments.front().polyline, mm(10, 0)));
+}
+
+TEST_CASE("Covering the centerline between two positions never goes round the whole loop", "[PreciseSeam][SegmentExtraction]")
+{
+    using PreciseSeam::detail::CenterlinePoint;
+    const Polygon square = rectangle(0, 0, 20, 20);
+    std::vector<PreciseSeam::detail::ClippedEdgeInterval> intervals;
+    // Backwards on one edge: nothing.
+    PreciseSeam::detail::cover_centerline(square, CenterlinePoint{2, 0.6, mm(12, 20)}, CenterlinePoint{2, 0.3, mm(14, 20)}, intervals);
+    CHECK(intervals.empty());
+    // Forwards on one edge, and across the closing edge to the next one.
+    PreciseSeam::detail::cover_centerline(square, CenterlinePoint{2, 0.3, mm(14, 20)}, CenterlinePoint{2, 0.6, mm(8, 20)}, intervals);
+    REQUIRE(intervals.size() == 1);
+    CHECK(intervals[0].begin == 0.3);
+    CHECK(intervals[0].end == 0.6);
+    intervals.clear();
+    PreciseSeam::detail::cover_centerline(square, CenterlinePoint{3, 0.5, mm(0, 10)}, CenterlinePoint{1, 0.5, mm(20, 10)}, intervals);
+    REQUIRE(intervals.size() == 3);
+    CHECK(intervals[0].edge == 3);
+    CHECK(intervals[0].last == mm(0, 0));
+    CHECK(intervals[1].edge == 0);
+    CHECK(intervals[2].edge == 1);
+    CHECK(intervals[2].end == 0.5);
 }

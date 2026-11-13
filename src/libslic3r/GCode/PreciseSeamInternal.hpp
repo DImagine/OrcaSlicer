@@ -25,10 +25,15 @@ struct ClippedEdgeInterval {
 struct SurfaceElement {
     size_t source; // Source edge or vertex index.
     bool vertex;
+    // Parameters on the source edge where a shifted edge starts and ends: below 1 and above 0 where it ends
+    // at the crossing of a concave corner instead of the shifted vertex.
+    double begin = 0.;
+    double end = 1.;
 };
 
-// Where coverage of the surface ends on one side of a dead stretch of the surface line (around a concave
-// corner) and resumes on the other. The two points meet in space, so coverage of both covers the stretch.
+// Where coverage of the surface ends on one side of a dead stretch of the centerline (around a concave
+// corner) and resumes on the other. The two points meet in space (at the crossing of the shifted edges, or
+// within the join tolerance), so coverage of both covers the stretch.
 struct SurfaceGap {
     size_t end_element;
     Point end;
@@ -48,7 +53,20 @@ struct SurfaceLine {
 };
 
 // Builds the surface line of a perimeter accepted by PreparedPerimeter (either direction), shift > 0.
-SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hole);
+// The context only identifies the layer in the log marker of a piece that cannot be bound.
+SurfaceLine build_surface_line(const Polygon &perimeter, coord_t shift, bool hole, const ExtractionContext &context = {});
+
+// A position on the centerline with its point.
+struct CenterlinePoint {
+    size_t edge;
+    double parameter;
+    Point point;
+};
+
+// Appends intervals covering the perimeter forward from `from` to `to`. Refuses to go around the whole loop:
+// `to` before `from` on one edge appends nothing.
+void cover_centerline(const Polygon &perimeter, CenterlinePoint from, const CenterlinePoint &to,
+                      std::vector<ClippedEdgeInterval> &intervals);
 
 struct FragmentBindingFailure {
     size_t pair_index = 0;

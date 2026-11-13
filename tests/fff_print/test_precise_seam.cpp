@@ -1313,6 +1313,25 @@ TEST_CASE("Strong modes put the seam on the vertex of a zero-length surface segm
     CHECK(warnings.multiple_intersections.load() != 0);
 }
 
+TEST_CASE("A strong modifier leaving only part of one surface arc uncovered is skipped as full containment", "[PreciseSeam]")
+{
+    const auto mode = GENERATE(ModelVolumeType::PRECISE_SEAM_LEFT, ModelVolumeType::PRECISE_SEAM_CENTER,
+                               ModelVolumeType::PRECISE_SEAM_RIGHT);
+    SeamFixture fixture;
+    // Everything is covered but a small hole on the arc around (20, 0): the gap carries onto one vertex.
+    ExPolygon region(rectangle(-1, -1, 21, 21));
+    region.holes.push_back(rectangle(20.12, -0.16, 20.16, -0.12));
+    region.holes.back().reverse();
+    const ModelVolume *modifier = fixture.add_regions(mode, {region});
+    Polygon perimeter = rectangle(0, 0, 20, 20);
+    PreciseSeam::PreciseSeamWarnings warnings;
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, perimeter, PreciseSeam::PreparedPerimeter(perimeter, coord_t(scale_(0.2))),
+                                                            fixture.layer, fixture.cache, &warnings);
+    CHECK_FALSE(seam.has_value());
+    CHECK(warnings.full_containment.load() == PreciseSeam::PreciseSeamWarnings::type_bit(mode));
+    CHECK(perimeter.points == rectangle(0, 0, 20, 20).points);
+}
+
 TEST_CASE("A zero-length weak zone types the single candidate at its vertex", "[PreciseSeam]")
 {
     using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;

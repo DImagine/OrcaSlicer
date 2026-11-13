@@ -370,6 +370,9 @@ struct GlobalModelInfo {
 
   // Slice each modifier once; both consumers share structured regions and source provenance.
   PreciseSeam::ModifierRegionsCache precise_seam_slices;
+  // XY compensation that moved the object's contours and hole walls away from the model, positive towards air.
+  double precise_seam_contour_compensation = 0.;
+  double precise_seam_hole_compensation = 0.;
 
   bool is_enforced(const Vec3f &position, float radius) const {
     if (enforcers.empty()) {
@@ -683,13 +686,10 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
   if (layer != nullptr && (!strong_volumes.empty() || !weak_volumes.empty())) {
     // Modifiers act where they cross the model surface the user sees: the centerline lies half a line width
-    // inside the printed wall, which XY compensation moved away from the model (positive towards air).
-    // Multi-material painting disables that compensation, as in PrintObject::slice_volumes().
+    // inside the printed wall, which XY compensation moved away from the model.
     const bool hole = boundary_hole.value_or(was_clockwise);
-    const PrintObject *object = layer->object();
-    const bool compensated = !(object->print()->config().filament_diameter.size() > 1 && object->is_mm_painted());
-    const double compensation = !compensated ? 0. :
-                                hole ? -object->config().xy_hole_compensation.value : object->config().xy_contour_compensation.value;
+    const double compensation = hole ? global_model_info.precise_seam_hole_compensation
+                                     : global_model_info.precise_seam_contour_compensation;
     // Share validation, bounds and clipping line across all modifiers while the polygon is unchanged.
     // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
     const PreciseSeam::PreparedPerimeter prepared(
@@ -2140,6 +2140,13 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
           global_model_info.precise_seam_slices[vol] = PreciseSeam::prepare_modifier_slices(po->slice_single_volume_regions(vol));
       for (const ModelVolume* vol : global_model_info.precise_seam_weak_volumes)
           global_model_info.precise_seam_slices[vol] = PreciseSeam::prepare_modifier_slices(po->slice_single_volume_regions(vol));
+      // Slicing skips XY compensation for multi-material painting with several filaments, as in
+      // PrintObject::slice_volumes(); a positive hole value enlarges holes, moving their walls into the material.
+      if (!global_model_info.precise_seam_slices.empty() &&
+          !(print.config().filament_diameter.size() > 1 && po->is_mm_painted())) {
+          global_model_info.precise_seam_contour_compensation = po->config().xy_contour_compensation.value;
+          global_model_info.precise_seam_hole_compensation = -po->config().xy_hole_compensation.value;
+      }
       // Register usage tracking before the parallel phase; workers only set its flags. Several print
       // objects of one model object share volumes, and try_emplace keeps what earlier ones recorded.
       for (const ModelVolume* vol : global_model_info.precise_seam_strong_volumes)
@@ -2233,6 +2240,12 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
               << " fragments recovered; first " << PreciseSeam::failed_fragment_log_limit
               << " logged (parallel processing order), " << (recovered - PreciseSeam::failed_fragment_log_limit)
               << " omitted";
+      // Surface pieces are counted per piece but logged per perimeter, so the total only bounds the detail.
+      const size_t surface_failed = precise_seam_warnings.failed_surface_pieces.load(std::memory_order_relaxed);
+      if (surface_failed > PreciseSeam::failed_fragment_log_limit)
+          BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamSurfaceFailed] " << surface_failed
+              << " surface pieces not located; the first perimeters up to " << PreciseSeam::failed_fragment_log_limit
+              << " pieces logged (parallel processing order)";
       // Reasons name the modifier types, as the menu does, not individual modifiers: "Seam Left, Seam
       // Enforced" in menu order, each type once. The same msgids as the menu share its translations.
       const auto type_list = [](unsigned mask) {
