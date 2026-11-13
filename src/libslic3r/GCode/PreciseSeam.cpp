@@ -92,6 +92,73 @@ coord_t surface_shift(double line_width, double compensation)
     return shift > double(TOLERANCE_LINEAR) ? coord_t(std::lround(shift)) : 0;
 }
 
+// Spacing of the measurements along a long edge: the step at which elephant foot compensation is resampled.
+static constexpr double SHIFT_SAMPLING_STEP = 0.5;
+
+ShiftProfile measure_shift_profile(const Polygon &perimeter, bool hole, const ShiftMeasurement &measurement)
+{
+    const double nominal = scale_(0.5 * measurement.line_width - measurement.compensation) - double(SURFACE_MARGIN);
+    const double correction = scale_(measurement.outline_compensation) + double(SURFACE_MARGIN);
+    const double min_depth = scale_(measurement.min_depth);
+    const double max_depth = scale_(measurement.max_depth);
+    // Normals towards air, as the surface line takes them.
+    const size_t count = perimeter.size();
+    const double side = (hole ? -1. : 1.) * (perimeter.is_counter_clockwise() ? 1. : -1.);
+    std::vector<Vec2d> normals(count);
+    for (size_t i = 0; i < count; ++i) {
+        const Vec2d direction = (perimeter[(i + 1) % count] - perimeter[i]).cast<double>();
+        normals[i] = side * Vec2d(direction.y(), -direction.x()) / direction.norm();
+    }
+    // The depth along the normals: the distance to the nearest outline point would be the corner's at an inner
+    // corner, deeper than either side. A point not inside the material (signed distance not negative) is not measured.
+    const auto shift_at = [&](const Point &point, const Vec2d &before, const Vec2d &after) {
+        const auto [distance, line, nearest] = measurement.outline.distance_from_lines_extra<true>(point);
+        const Vec2d offset = nearest - point.cast<double>();
+        const double depth = distance < 0. ? std::max(offset.dot(before), offset.dot(after)) : -1.;
+        const double shift = depth >= min_depth && depth <= max_depth ? depth - correction : nominal;
+        return coord_t(std::lround(std::max(0., shift)));
+    };
+    const coord_t nominal_shift = coord_t(std::lround(std::max(0., nominal)));
+    const auto same = [](double a, double b) { return std::abs(a - b) <= double(TOLERANCE_LINEAR); };
+
+    ShiftProfile profile;
+    profile.vertices.reserve(count);
+    bool nominal_everywhere = true;
+    for (size_t i = 0; i < count; ++i) {
+        profile.vertices.push_back(shift_at(perimeter[i], normals[(i + count - 1) % count], normals[i]));
+        nominal_everywhere = nominal_everywhere && same(double(profile.vertices.back()), double(nominal_shift));
+    }
+    // A long edge is measured in between as well. If every value there follows the line between its vertices, the
+    // edge stays one part; otherwise all of them split it.
+    const double step = scale_(SHIFT_SAMPLING_STEP);
+    profile.interior.resize(count);
+    bool split = false;
+    for (size_t i = 0; i < count; ++i) {
+        const size_t next = (i + 1) % count;
+        const Vec2d a = perimeter[i].cast<double>();
+        const Vec2d edge = perimeter[next].cast<double>() - a;
+        const size_t intervals = size_t(std::ceil(edge.norm() / step));
+        bool linear = true;
+        std::vector<std::pair<double, coord_t>> samples;
+        for (size_t k = 1; k < intervals; ++k) {
+            const double t = double(k) / double(intervals);
+            const Vec2d at = a + t * edge;
+            const coord_t value = shift_at(Point(coord_t(std::lround(at.x())), coord_t(std::lround(at.y()))), normals[i], normals[i]);
+            linear = linear && same(double(value), (1. - t) * double(profile.vertices[i]) + t * double(profile.vertices[next]));
+            samples.emplace_back(t, value);
+        }
+        if (!linear) {
+            profile.interior[i] = std::move(samples);
+            split = true;
+        }
+    }
+    if (nominal_everywhere && !split)
+        return {};
+    if (!split)
+        profile.interior.clear();
+    return profile;
+}
+
 PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter, ShiftProfile shift_profile, bool is_hole)
     : PreparedPerimeter(perimeter, coord_t(0), is_hole)
 {

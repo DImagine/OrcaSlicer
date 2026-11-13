@@ -1672,3 +1672,86 @@ TEST_CASE("A profile within the snapping radius keeps the centerline", "[Precise
     profile.vertices[1] = 1001;
     CHECK(PreciseSeam::PreparedPerimeter(square, profile, false).shift == 1001);
 }
+
+namespace {
+// Measurement of a 0.4 mm line without compensation, accepting depths from 0.15 to 0.6 mm.
+PreciseSeam::ShiftMeasurement measurement(const AABBTreeLines::LinesDistancer<Line> &outline, double compensation = 0.,
+                                          double outline_compensation = 0.)
+{
+    return {outline, 0.4, compensation, outline_compensation, 0.15, 0.6};
+}
+
+coord_t shift_mm(double distance) { return coord_t(std::lround(scale_(distance))) - 5000; }
+} // namespace
+
+TEST_CASE("A centerline at its nominal depth keeps the constant shift", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    const AABBTreeLines::LinesDistancer<Line> nominal(to_lines(ExPolygon(rectangle(-0.2, -0.2, 20.2, 20.2))));
+    CHECK(PreciseSeam::measure_shift_profile(square, false, measurement(nominal)).empty());
+    // Every depth outside the accepted range takes the nominal shift as well: the outline is not this wall's own.
+    const AABBTreeLines::LinesDistancer<Line> far(to_lines(ExPolygon(rectangle(-5, -5, 25, 25))));
+    CHECK(PreciseSeam::measure_shift_profile(square, false, measurement(far)).empty());
+    // XY compensation that the outline does not contain is in the nominal depth: still the constant shift.
+    const AABBTreeLines::LinesDistancer<Line> uncompensated(to_lines(ExPolygon(rectangle(-0.3, -0.3, 20.3, 20.3))));
+    CHECK(PreciseSeam::measure_shift_profile(square, false, measurement(uncompensated, -0.1, 0.)).empty());
+    // At the inner corner of an L the nearest outline point is the corner, about 0.28 mm away; the depth along the
+    // normals is still 0.2 mm.
+    const Polygons l_outline = offset(l_shape(), float(scale_(0.2)), jtMiter, 3.);
+    REQUIRE(l_outline.size() == 1);
+    const AABBTreeLines::LinesDistancer<Line> l_nominal(to_lines(ExPolygon(l_outline.front())));
+    CHECK(PreciseSeam::measure_shift_profile(l_shape(), false, measurement(l_nominal)).empty());
+    // The same for the corners of a hole, all of them inner corners seen from the material.
+    ExPolygon around_hole(rectangle(-10, -10, 30, 30));
+    around_hole.holes.push_back(rectangle(0.2, 0.2, 19.8, 19.8));
+    around_hole.holes.back().reverse();
+    const AABBTreeLines::LinesDistancer<Line> hole_nominal(to_lines(around_hole));
+    CHECK(PreciseSeam::measure_shift_profile(square, true, measurement(hole_nominal)).empty());
+}
+
+TEST_CASE("A centerline deeper than nominal takes its measured shift", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    // Elephant foot compensation of 0.15 mm all round: the outline lies 0.35 mm from the centerline.
+    const AABBTreeLines::LinesDistancer<Line> foot(to_lines(ExPolygon(rectangle(-0.35, -0.35, 20.35, 20.35))));
+    const auto profile = PreciseSeam::measure_shift_profile(square, false, measurement(foot));
+    REQUIRE(profile.vertices.size() == 4);
+    for (const coord_t value : profile.vertices)
+        CHECK(std::abs(value - shift_mm(0.35)) <= 1);
+    // Constant along every edge: no interior samples.
+    CHECK(profile.interior.empty());
+    // A compensation the outline contains is subtracted; one it does not contain is not.
+    const auto compensated = PreciseSeam::measure_shift_profile(square, false, measurement(foot, 0.1, 0.1));
+    REQUIRE(compensated.vertices.size() == 4);
+    CHECK(std::abs(compensated.vertices.front() - shift_mm(0.25)) <= 1);
+    const auto excluded = PreciseSeam::measure_shift_profile(square, false, measurement(foot, -0.1, 0.));
+    REQUIRE(excluded.vertices.size() == 4);
+    CHECK(std::abs(excluded.vertices.front() - shift_mm(0.35)) <= 1);
+    // A depth within the margin would put the surface on the body side: zero, not negative.
+    const AABBTreeLines::LinesDistancer<Line> shallow(to_lines(ExPolygon(rectangle(-0.003, -0.003, 20.003, 20.003))));
+    const auto clamped = PreciseSeam::measure_shift_profile(square, false, {shallow, 0.4, 0., 0., 0., 0.6});
+    REQUIRE(clamped.vertices.size() == 4);
+    CHECK(clamped.vertices.front() == 0);
+}
+
+TEST_CASE("A shift changing in the middle of a long edge is sampled along it", "[PreciseSeam][SegmentExtraction]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    // The outline steps out to 0.3 mm below the front edge between x = 8 and 12 mm.
+    const Polygon stepped(Points{mm(-0.2, -0.2), mm(8, -0.2), mm(8, -0.3), mm(12, -0.3), mm(12, -0.2), mm(20.2, -0.2),
+                                 mm(20.2, 20.2), mm(-0.2, 20.2)});
+    const AABBTreeLines::LinesDistancer<Line> outline(to_lines(ExPolygon(stepped)));
+    const auto profile = PreciseSeam::measure_shift_profile(square, false, measurement(outline));
+    REQUIRE(profile.vertices.size() == 4);
+    CHECK(std::abs(profile.vertices.front() - shift_mm(0.2)) <= 1);
+    REQUIRE(profile.interior.size() == 4);
+    // Every 0.5 mm along the 20 mm edge; only the front edge changes. Next to the step its corner is nearer.
+    REQUIRE(profile.interior[0].size() == 39);
+    for (const auto &[parameter, value] : profile.interior[0]) {
+        CAPTURE(parameter);
+        const double x = 20. * parameter;
+        CHECK(std::abs(value - shift_mm(x > 8.2 && x < 11.8 ? 0.3 : 0.2)) <= 1);
+    }
+    for (size_t edge = 1; edge < 4; ++edge)
+        CHECK(profile.interior[edge].empty());
+}

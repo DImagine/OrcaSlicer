@@ -9,7 +9,9 @@
 #include <vector>
 #include <unordered_map>
 #include <utility>
+#include "libslic3r/AABBTreeLines.hpp"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Line.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -133,6 +135,28 @@ struct PreparedPerimeter {
 private:
     mutable std::unique_ptr<detail::SurfaceLine> m_surface;
 };
+
+// What measuring the shift along one perimeter needs. Lengths in mm.
+struct ShiftMeasurement {
+    // Boundary of the layer's islands as slicing stored them, before elephant foot compensation.
+    const AABBTreeLines::LinesDistancer<Line> &outline;
+    double line_width;           // Of the external perimeter; half of it is the nominal depth of the centerline.
+    double compensation;         // XY compensation of this kind of wall, positive towards air.
+    double outline_compensation; // The part of `compensation` the outline already contains.
+    // Depths of the centerline below the outline that belong to the wall's own surface; elsewhere (a wall thinner
+    // than expected, a boundary between regions) the nominal shift applies.
+    double min_depth;
+    double max_depth;
+};
+
+// The shift at every vertex of a perimeter, and at interior points of edges longer than the sampling step where it
+// does not change linearly along them: the measured depth of the centerline below the outline, less the
+// compensation the outline contains and the margin, never negative. The depth is the offset to the nearest point of
+// the outline projected on the normal of the edge (the larger of the two at a vertex), so at an inner corner, whose
+// nearest outline point is the corner, it is still the distance to each side. Returns an empty profile when every
+// value equals the nominal shift of surface_shift() within the snapping radius, so that walls at their nominal depth
+// keep the constant shift exactly.
+ShiftProfile measure_shift_profile(const Polygon &perimeter, bool hole, const ShiftMeasurement &measurement);
 
 // A vertex is represented by its outgoing edge and parameter zero, including vertex 0.
 struct PerimeterPosition {
