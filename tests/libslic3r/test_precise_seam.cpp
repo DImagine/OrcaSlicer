@@ -7,6 +7,8 @@
 #include "libslic3r/GCode/PreciseSeam.hpp"
 #include "libslic3r/GCode/PreciseSeamInternal.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/AABBTreeLines.hpp"
+#include "libslic3r/Line.hpp"
 
 #include <algorithm>
 #include <initializer_list>

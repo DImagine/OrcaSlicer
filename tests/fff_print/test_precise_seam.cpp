@@ -8,6 +8,7 @@
 #include "test_helpers.hpp"
 #include "admesh/stl.h"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Config.hpp"
 #include "libslic3r/GCode/PreciseSeam.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
@@ -1434,6 +1435,7 @@ std::vector<OuterLoop> outer_wall_loops(const std::string &gcode)
     std::vector<OuterLoop> loops;
     bool outer_wall = false;
     bool in_loop = false;
+    float loop_z = 0.f;
     GCodeReader parser;
     parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
         const std::string_view comment = line.comment();
@@ -1443,6 +1445,10 @@ std::vector<OuterLoop> outer_wall_loops(const std::string &gcode)
         }
         if (!outer_wall || !line.extruding(self) || line.dist_XY(self) == 0.f)
             return;
+        // A loop never spans layers; an object of outer walls only keeps its type across layers.
+        if (in_loop && self.z() != loop_z)
+            in_loop = false;
+        loop_z = self.z();
         if (!in_loop) {
             loops.push_back({Vec2d(self.x(), self.y()), {}});
             loops.back().bounds.merge(loops.back().seam);
@@ -1589,10 +1595,13 @@ TEST_CASE("XY compensation does not change which modifiers reach the model surfa
     const double compensation = GENERATE(-0.1, 0., 0.1);
     const bool hole = GENERATE(false, true);
     const bool reaches = GENERATE(true, false);
-    CAPTURE(compensation, hole, reaches);
+    // Classic walls without elephant foot compensation keep the constant shift; Arachne measures it.
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(compensation, hole, reaches, generator);
     // The helper ends 0.05 mm inside or in front of the model face, however far compensation moved the wall.
     const double depth = reaches ? 0.05 : -0.05;
     ExportFixture fixture("back", 0, hole ? cube_with_hole() : make_cube(20, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
     fixture.config.set_deserialize_strict(hole ? "xy_hole_compensation" : "xy_contour_compensation", std::to_string(compensation));
     // Elephant foot compensation would move the first layer's wall as well.
     fixture.config.set_deserialize_strict("elefant_foot_compensation", "0");
@@ -1698,6 +1707,222 @@ TEST_CASE("A modifier crossing only an open thin wall has no effect", "[PreciseS
     CHECK(warning.find("had no effect") != std::string::npos);
     CHECK(warning.find("thin wall only") != std::string::npos);
     CHECK(warning.find("in total") == std::string::npos);
+}
+
+namespace {
+// Elephant foot compensation decreasing over the first layers: by default 0.3, 0.2 and 0.1 mm.
+void set_elephant_foot(ExportFixture &fixture, double compensation = 0.3, int layers = 3)
+{
+    fixture.config.set_deserialize_strict("elefant_foot_compensation", std::to_string(compensation));
+    fixture.config.set_deserialize_strict("elefant_foot_compensation_layers", std::to_string(layers));
+}
+
+// Completes a fixture built on make_cube(7, 20, 2) into a 20 x 20 x 2 mm frame with a 6 x 6 mm hole through every
+// layer at x, y = 7..13 mm.
+void make_frame(ExportFixture &fixture)
+{
+    fixture.add(ModelVolumeType::MODEL_PART, make_cube(7, 20, 2), Vec3d(13, 0, 0), "right side");
+    fixture.add(ModelVolumeType::MODEL_PART, make_cube(6, 7, 2), Vec3d(7, 0, 0), "front side");
+    fixture.add(ModelVolumeType::MODEL_PART, make_cube(6, 7, 2), Vec3d(7, 13, 0), "back side");
+}
+
+// Checks the outer loops, or the hole loops (under 10 mm wide), of every layer: those of the layers where at_front
+// holds have the seam on their front at x relative to their centre, the others away from it.
+void check_front_seams(const std::vector<OuterLoop> &loops, bool hole, const std::function<bool(size_t layer)> &at_front,
+                       double x, double front = 0.01)
+{
+    size_t checked = 0;
+    for (const OuterLoop &loop : loops) {
+        if ((loop.bounds.size().x() < 10.) != hole)
+            continue;
+        const size_t layer = checked++;
+        CAPTURE(layer, loop.seam.x(), loop.seam.y());
+        if (at_front(layer)) {
+            CHECK_THAT(loop.seam.x(), Catch::Matchers::WithinAbs(x, 0.01));
+            CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.min.y() - loop.bounds.center().y(), front));
+        } else
+            CHECK(loop.seam.y() > 0.); // The back seam, away from the helper.
+    }
+    CHECK(checked == 10);
+}
+
+// The same with all layers alike.
+void check_front_seams(const std::vector<OuterLoop> &loops, bool hole, bool at_front, double x, double front = 0.01)
+{
+    check_front_seams(loops, hole, [at_front](size_t) { return at_front; }, x, front);
+}
+} // namespace
+
+TEST_CASE("Elephant foot layers act at the same modifier depth as the layers above", "[PreciseSeam]")
+{
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(generator);
+    ExportFixture fixture("back");
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    set_elephant_foot(fixture);
+    // The helper enters the front face by 0.1 mm: short of a surface half a line width off the centerline on the
+    // first three layers, whose walls lie 0.3, 0.2 and 0.1 mm deeper.
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3.1, 4), Vec3d(4, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    check_front_seams(loops, false, true, 5. - 10.);
+    // The same place along the face on every layer; across it the walls of the first layers lie deeper.
+    const double first = loops.front().seam.x() + loops.front().bounds.center().x();
+    for (const OuterLoop &loop : loops)
+        CHECK_THAT(loop.seam.x() + loop.bounds.center().x(), Catch::Matchers::WithinAbs(first, 0.01));
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("On elephant foot layers a flush modifier stays clear and a slightly deeper one acts", "[PreciseSeam]")
+{
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    const double depth = GENERATE(0., 0.02);
+    CAPTURE(generator, depth);
+    ExportFixture fixture("back");
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    set_elephant_foot(fixture);
+    // Flush with the front face, or 0.02 mm into it: the margin keeps the surface 5 um inside the model face.
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3. + depth, 4), Vec3d(4, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    check_front_seams(loops, false, depth > 0., 5. - 10.);
+}
+
+TEST_CASE("A segment across a thin part with less elephant foot compensation ends under the modifier", "[PreciseSeam]")
+{
+    // A U of two 8 mm blocks joined by a 1 mm front wall at x = 8..12 mm. The first layers cannot shrink that wall
+    // fully, so the depth of the centerline changes along the front face.
+    const auto [type, x] = GENERATE(table<ModelVolumeType, double>({
+        {ModelVolumeType::PRECISE_SEAM_LEFT, 6.},
+        {ModelVolumeType::PRECISE_SEAM_CENTER, 10.},
+        {ModelVolumeType::PRECISE_SEAM_RIGHT, 14.}}));
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(generator, x);
+    ExportFixture fixture("back", 0, make_cube(8, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    set_elephant_foot(fixture);
+    fixture.add(ModelVolumeType::MODEL_PART, make_cube(8, 20, 2), Vec3d(12, 0, 0), "right block");
+    fixture.add(ModelVolumeType::MODEL_PART, make_cube(4, 1, 2), Vec3d(8, 0, 0), "front wall");
+    // 0.1 mm into the front face across the thin wall and both sides of it: one segment from x = 6 to 14 mm.
+    fixture.add(type, make_cube(8, 3.1, 4), Vec3d(6, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    // The front of the loop steps where the thin wall starts: the seam lies on it within that step.
+    check_front_seams(loops, false, true, x - 10., 0.3);
+    CHECK(fixture.warning().empty());
+}
+
+TEST_CASE("A hole wall on elephant foot layers acts at the same modifier depth as above", "[PreciseSeam]")
+{
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(generator);
+    ExportFixture fixture("back", 0, make_cube(7, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    set_elephant_foot(fixture);
+    make_frame(fixture);
+    // From inside the hole 0.1 mm into its front wall y = 7 mm; elephant foot compensation widens the hole.
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 2.1, 4), Vec3d(9, 6.9, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    check_front_seams(loops, true, true, 0.);
+}
+
+TEST_CASE("Loops with fuzzy skin keep the constant shift while the other kind is measured", "[PreciseSeam]")
+{
+    // Fuzzy skin on the outer contours or on the holes, from the second layer on.
+    const auto [fuzzy_skin, hole] = GENERATE(table<std::string, bool>({
+        {"external", false}, {"external", true}, {"hole", false}, {"hole", true}}));
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(fuzzy_skin, hole, generator);
+    ExportFixture fixture("back", 0, make_cube(7, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    fixture.config.set_deserialize_strict("fuzzy_skin", fuzzy_skin);
+    fixture.config.set_deserialize_strict("fuzzy_skin_first_layer", "0");
+    // The smallest noise slicing keeps: the walls stay where they were, only the kind of loop matters.
+    fixture.config.set_deserialize_strict("fuzzy_skin_thickness", "0.001");
+    set_elephant_foot(fixture);
+    make_frame(fixture);
+    // 0.05 mm into the front face or the hole wall y = 7 mm. The constant shift puts the surface 0.3, 0.2 and 0.1 mm
+    // deeper on the first three layers, out of its reach.
+    if (hole)
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 2.05, 4), Vec3d(9, 6.95, -1));
+    else
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3.05, 4), Vec3d(4, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    // The fuzzy kind is measured on the first layer only; the modifier misses it on the next two.
+    const bool fuzzy = hole == (fuzzy_skin == "hole");
+    check_front_seams(loops, hole, [fuzzy](size_t layer) { return !fuzzy || layer == 0 || layer >= 3; },
+                      hole ? 0. : 5. - 10.);
+}
+
+TEST_CASE("With a raft the modifier depth needed is that of the constant shift", "[PreciseSeam]")
+{
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    const bool reaches = GENERATE(true, false);
+    CAPTURE(generator, reaches);
+    // Slicing applies elephant foot compensation only directly on the bed.
+    ExportFixture fixture("back", 2);
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    set_elephant_foot(fixture);
+    const double depth = reaches ? 0.05 : -0.05;
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3. + depth, 4), Vec3d(4, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    check_front_seams(loops, false, reaches, 5. - 10.);
+}
+
+TEST_CASE("XY compensation with elephant foot compensation keeps the modifier depth, in one region or several", "[PreciseSeam]")
+{
+    const bool hole = GENERATE(false, true);
+    const double compensation = GENERATE(-0.1, 0.1);
+    const bool several_regions = GENERATE(false, true);
+    const bool reaches = GENERATE(true, false);
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(hole, compensation, several_regions, reaches, generator);
+    ExportFixture fixture("back", 0, make_cube(7, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    fixture.config.set_deserialize_strict(hole ? "xy_hole_compensation" : "xy_contour_compensation", std::to_string(compensation));
+    set_elephant_foot(fixture, 0.15);
+    make_frame(fixture);
+    if (several_regions) {
+        // A different infill density over the right half makes a second region without a wall between them. With
+        // several regions slicing keeps the outline of elephant foot layers before negative XY compensation.
+        fixture.add(ModelVolumeType::PARAMETER_MODIFIER, make_cube(15, 30, 4), Vec3d(10, -5, -1), "infill");
+        DynamicPrintConfig infill;
+        infill.set_key_value("sparse_infill_density", new ConfigOptionPercent(50));
+        fixture.model.objects.front()->volumes.back()->config.apply(infill);
+    }
+    // 0.05 mm into or in front of the model face, wherever the compensations moved the wall.
+    const double depth = reaches ? 0.05 : -0.05;
+    if (hole)
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 2. + depth, 4), Vec3d(9, 7. - depth, -1)); // Hole wall y = 7.
+    else
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3. + depth, 4), Vec3d(4, -3, -1)); // Front face.
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    if (several_regions)
+        REQUIRE(fixture.print.get_object(0)->get_layer(0)->regions().size() > 1);
+    check_front_seams(loops, hole, reaches, hole ? 0. : 5. - 10.);
+}
+
+TEST_CASE("An Arachne wall narrower than its nominal line acts at the model surface", "[PreciseSeam]")
+{
+    const double depth = GENERATE(0., 0.02);
+    CAPTURE(depth);
+    // A 0.7 mm wall is split into two Arachne lines of about 0.37 mm, so the centerline lies about 0.186 mm inside the
+    // face instead of 0.2: half the nominal width would put the surface outside the model face.
+    ExportFixture fixture("back", 0, make_cube(20, 0.7, 2));
+    fixture.config.set_deserialize_strict("wall_generator", "arachne");
+    fixture.config.set_deserialize_strict("elefant_foot_compensation", "0");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3. + depth, 4), Vec3d(4, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    REQUIRE(loops.size() == 10);
+    for (const OuterLoop &loop : loops) {
+        CAPTURE(loop.seam.x(), loop.seam.y());
+        if (depth > 0.) {
+            CHECK_THAT(loop.seam.x(), Catch::Matchers::WithinAbs(5. - 10., 0.01));
+            CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.min.y() - loop.bounds.center().y(), 0.01));
+        } else
+            CHECK(loop.seam.y() > 0.); // The back face.
+    }
 }
 
 TEST_CASE("Full containment warns for Blocked but not for Enforced", "[PreciseSeam]")
