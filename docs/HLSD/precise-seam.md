@@ -226,11 +226,13 @@ either side; its projections are the distances to the sides.
   its nominal depth gives exactly the result of the nominal shift. A perimeter
   whose largest value is within the snapping radius keeps the centerline; a
   single point at zero does not change that.
-- Loops with fuzzy skin keep the nominal shift. The noise moves the centerline
-  off the smooth outline, so measuring would pull its points within the range
-  back to the outline while the points outside it kept the noise. A layer where
-  any region adds fuzzy skin to the outer walls of contours, or of holes,
-  measures no loop of that kind.
+- The measurement is decided per loop. A loop with fuzzy skin is measured on its
+  smooth centerline (see [Fuzzy skin](#fuzzy-skin)). A noisy line itself is never
+  measured: the noise moves it off the smooth outline, so measuring would pull
+  its points within the range back to the outline while the points outside it
+  kept the noise. A loop without a smooth centerline on a layer where any region
+  adds fuzzy skin to the outer walls of that kind of loop keeps the nominal shift,
+  since nothing tells an unchanged loop from a noisy one that lost its centerline.
 - The islands are indexed once per layer and only on layers where a Precise
   Seam modifier has a region, and only loops that some modifier on the layer
   approaches are measured.
@@ -240,6 +242,67 @@ centerline itself. The preparation borrows the polygon and is used only while th
 is unchanged: strong processing returns immediately after inserting its point,
 and weak processing collects all segments before it inserts anything. An
 invalid perimeter receives no Precise Seam processing.
+
+### Fuzzy skin
+
+Fuzzy skin is applied by the perimeter generator, which resamples a loop and moves
+its points off the smooth centerline (Arachne's extrusion mode changes the line
+width instead). Only the noisy line reaches the seam placer, and a surface
+shifted from it would repeat the noise. The generator therefore keeps the
+centerline before texturing of an external loop whose points the texture
+changed, in `ExtrusionLoop::untextured` (classic `traverse_loops()`, Arachne
+`traverse_extrusions()`, which copies the junctions only where the layer has
+fuzzy skin on that kind of loop). A list of points equal to the printed one is
+not kept. The field is kept for every such loop, whether or not the object has
+Precise Seam volumes, because adding a volume does not regenerate perimeters
+(see [Print invalidation](#print-invalidation)). Copying, moving, reversing or
+turning the start of the loop keeps it; giving the loop other geometry must
+reset it.
+
+For such a loop the preparation has two polygons: the smooth centerline, from
+which the surface is reconstructed and on which the shift is measured, clipping,
+binding, segments, lengths, Center and full containment are worked out; and the
+noisy loop, into which the results are inserted. Both are normalized alike (no
+repeated points, counterclockwise).
+
+- **Pairs.** A segment keeps the surface points its ends were carried from, and
+  merging intervals keeps the pair of the outer end, also across vertex zero. An
+  arc still collapses into its vertex, but the end keeps its real point on the
+  arc: a zero-length segment has the two ends of its piece of arc, and separate
+  pieces of one arc make one vertex point from the piece nearest the arc's start
+  to the end of the farthest. A vertex point that continues a segment gives the
+  segment's end its arc point. Left and Right take the pair of their end.
+  Center, the middle by length of the smooth segment, takes as its pair the point
+  of the shifted edge at the same parameter (shift profile included), the middle
+  of the arc or bridge at a vertex (of the piece covered, for a zero-length
+  segment), or the crossing `K` in the dead stretch of a concave corner.
+- **Transfer.** The line through the surface point and the smooth point is
+  intersected with the edges of the noisy loop within a window of the smooth
+  point, and the crossing nearest to it is taken; an edge lying along the line
+  gives its point nearest to the smooth point. The window is the largest noise
+  amplitude of the layer's regions plus their point distance, the farthest a
+  chord cutting a convex corner passes from it. There are three outcomes:
+  - **exact**: such a crossing exists;
+  - **approximate**: the pair coincides (the centerline path, where the surface
+    is the centerline) or the line crosses nothing within the window; the
+    nearest point of the noisy loop within the window is taken, and counted in
+    the log;
+  - **failed**: not even that; the point is a discarded fragment, with its
+    counter, log marker and the type in the warning. A strong segment whose point
+    fails takes no part; a weak zone with a failed boundary is dropped.
+- **Strong modifiers** choose the segment and the point on the smooth loop, ties
+  included, so the noise never changes the winner, and insert the carried point
+  into the noisy one.
+- **Weak zones** carry each boundary separately. Before anything is inserted, a
+  zone's share of the noisy loop from its left to its right boundary is compared
+  with its share of the smooth loop; differing by more than half a loop, the
+  boundaries came out in the reverse order, and the zone is reduced to its left
+  boundary, a zero-length zone that types the one candidate there. This is a
+  declared degradation, counted in the log, not a guarantee: it happens, for
+  example, for a piece of a convex corner's arc where the noisy loop cuts the
+  corner inside it, since the lines through the corner then cross the noise
+  behind it in the reverse order. Zones across the start of a loop are compared
+  around the loop.
 
 ## Segment extraction
 
@@ -629,22 +692,35 @@ exceeded, one summary marker reports the total.
 - **Where the shift is not measured, or only approximately.** On layers
   without elephant foot compensation the classic generator keeps the nominal
   shift, so its narrow loops, printed slightly thinner, get a surface a few
-  micrometers outside the model. With fuzzy skin the centerline is noisy and the
-  surface repeats the noise. A measured point moves along the normal of its
+  micrometers outside the model. A noisy loop without its smooth centerline
+  (sliced data loaded from a cache) gets a surface that repeats the noise. A
+  measured point moves along the normal of its
   edge by the depth projected on that normal: where elephant foot compensation
   changes along a wall, the centerline's edges are inclined to the outline, and
   the surface falls short of it by `D * (1 / cos a - cos a)` for an inclination
   `a`, a few micrometers for usual changes. A closed Arachne loop of
   a single line (a ring thinner than two lines) gets a surface on its contour or
   hole side only.
+- **Fuzzy skin.** The crossing nearest to the smooth point is taken without
+  knowing which part of the noisy loop a noisy point came from: with steep noise,
+  or where another part of the same loop lies within the window (a thin part, an
+  acute corner), the nearest crossing may belong to another place than the one
+  the smooth point was textured into. Points carried without the line
+  (approximate outcome) do not lie on it, and weak zones whose boundaries reverse
+  are reduced to one point. Sliced data loaded from a cache keeps only the
+  extrusions, without the untextured centerline: such loops keep the noisy
+  surface and the nominal shift, so the same project may get another seam after
+  loading. A closed thin wall that the classic generator builds outside its
+  loops has no untextured centerline either.
 - **Grazing contacts.** Contacts are taken as clipping returns them, without
   tangency rules, so boundaries that only graze the surface are the user's
   responsibility. Several near-touches on inclined edges can leave several
   segments separated by gaps of a few units; their zones then cover nearly the
   whole perimeter instead of being treated as full containment.
 - **Concave corners not resolved exactly.** At a very sharp inner corner that
-  the slicer bevels, at a sharp change of the measured shift, with fuzzy skin whose points
-  are closer than the trim of a corner (`d * tan(turn / 2)`) or with
+  the slicer bevels, at a sharp change of the measured shift, with a noisy loop
+  without its smooth centerline whose points are closer than the trim of a corner
+  (`d * tan(turn / 2)`) or with
   artificially fine relief, the surface line keeps its tails and bridges. A modifier boundary
   closer than `d` to such a corner can give an extra segment, the
   multiple-intersection warning and a local distortion of the segment of up to
@@ -796,7 +872,12 @@ last modifier would.
   resolved concave corner and on a split long edge swept by a boundary; its
   measurement against an outline at the nominal depth, deeper, beyond the
   accepted range, with compensation inside and outside the outline, within the
-  margin, and with a step along an edge. A boundary swept in sub-micron steps across shallow concave
+  margin, and with a step along an edge. Fuzzy skin: the transfer onto hand-made
+  noisy loops across a straight edge, at an acute corner, with several crossings,
+  along an edge on the line, and its three outcomes; the surface pairs of segment
+  ends, of a piece of arc and of Center inside an edge, at a vertex and in a dead
+  stretch; a loop keeping its untextured centerline when copied, reversed or
+  turned. A boundary swept in sub-micron steps across shallow concave
   vertices of tessellated holes and notches must move a single segment end
   monotonically. On the centerline they cover
   clipping and binding: holes and components, contour origin and reversal,
@@ -808,8 +889,10 @@ last modifier would.
   consumers: strong targets in every mode, including a midpoint on an existing
   vertex or the closing edge and a zero-length segment, longest-arc selection
   (also of a longer segment over a zero-length one) and tie order in bed axes,
-  zero-length weak zones of every type,
-  priorities, weak boundaries that coincide or share an edge, enforced
+  zero-length weak zones of every type, with fuzzy skin strong points chosen on
+  the smooth loop and inserted into the noisy one or discarded when they cannot be
+  carried, and weak zones short, zero-length at a convex corner, reversed (for
+  every type) and across the start of both loops, priorities, weak boundaries that coincide or share an edge, enforced
   subdivision, whole-perimeter weak zones with painting and priorities, weak
   zones over painting's oversampled candidates, the warning type masks, usage
   tracking for the "had no effect" and whole-perimeter Blocked warnings, volume
@@ -824,8 +907,12 @@ last modifier would.
   modifier depth as above, flush and slightly deeper modifiers, a hole, a thin
   part they cannot shrink fully, a raft), XY compensation together with elephant
   foot compensation in one region and in several, an Arachne wall narrower than
-  its line, fuzzy skin on contours or holes, a modifier crossing only an open
-  thin wall, Enforced and Blocked zones,
+  its line, fuzzy skin on contours or holes (measured on the smooth centerline;
+  which loops keep it; with sine noise a modifier acts at the model surface, not
+  at the noise, also on part of a wall; a weak zone; elephant foot compensation in
+  one region and in several; a closed classic thin wall; loops that lost the
+  untextured centerline, as after loading cached data), a modifier
+  crossing only an open thin wall, Enforced and Blocked zones,
   a perimeter blocked all round under every seam position, a modifier with a
   hole, and the user warning.
 - [Seam placer tests](../../tests/fff_print/test_seam_placer.cpp) cover
