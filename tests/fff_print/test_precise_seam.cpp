@@ -11,6 +11,8 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/GCode/PreciseSeam.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Print.hpp"
 
 #include <algorithm>
@@ -592,6 +594,185 @@ TEST_CASE("Weak boundaries sharing a vertex refine both sides", "[PreciseSeam]")
     require_vertex(perimeter, mm(5.999, 0));
     require_vertex(perimeter, mm(6.001, 0));
     check_square_boundary(perimeter);
+}
+
+namespace {
+// A noisy loop made from a counterclockwise `smooth` loop as fuzzy skin makes one: points every 0.25 mm along each edge
+// from 0.125 mm, moved along the edge's outward normal by `amplitude`, alternately out and in, without the smooth
+// vertices.
+Polygon fuzzify(const Polygon &smooth, double amplitude)
+{
+    Polygon noisy;
+    double sign = 1.;
+    for (size_t edge = 0; edge < smooth.size(); ++edge) {
+        const Vec2d a = smooth[edge].cast<double>();
+        const Vec2d b = smooth[(edge + 1) % smooth.size()].cast<double>();
+        const Vec2d direction = (b - a).normalized();
+        for (double along = scale_(0.125); along < (b - a).norm(); along += scale_(0.25)) {
+            const Vec2d point = a + along * direction + sign * scale_(amplitude) * Vec2d(direction.y(), -direction.x());
+            sign = -sign;
+            noisy.points.emplace_back(coord_t(std::lround(point.x())), coord_t(std::lround(point.y())));
+        }
+    }
+    return noisy;
+}
+} // namespace
+
+TEST_CASE("With fuzzy skin a strong point is chosen on the smooth loop and inserted into the noisy one", "[PreciseSeam][Fuzzy]")
+{
+    const auto [type, x] = GENERATE(table<ModelVolumeType, double>({
+        {ModelVolumeType::PRECISE_SEAM_LEFT, 4.}, {ModelVolumeType::PRECISE_SEAM_CENTER, 5.},
+        {ModelVolumeType::PRECISE_SEAM_RIGHT, 6.}}));
+    CAPTURE(x);
+    SeamFixture fixture;
+    const Polygon smooth = rectangle(0, 0, 20, 20);
+    Polygon noisy = fuzzify(smooth, 0.1);
+    const size_t noisy_size = noisy.size();
+    // Across the front face from x = 4 to 6 mm.
+    const auto *modifier = fixture.add(type, {rectangle(4, -1, 6, 0.1)});
+    PreciseSeam::PreparedPerimeter prepared(smooth, PreciseSeam::surface_shift(0.4, 0.), false);
+    prepared.set_target(noisy, coord_t(scale_(0.5)));
+    REQUIRE(prepared.valid);
+    const auto seam = PreciseSeam::insert_strong_seam_point({modifier}, noisy, prepared, fixture.layer, fixture.cache);
+    REQUIRE(seam.has_value());
+    // Across the smooth edge, where the noisy edge between the points at x - 0.125 and x + 0.125 mm, 0.1 mm on either
+    // side, crosses y = 0; inserted with its two helpers.
+    CHECK(std::abs(seam->x() - mm(x, 0).x()) <= 1);
+    CHECK(std::abs(seam->y()) <= 1);
+    CHECK(std::find(noisy.points.begin(), noisy.points.end(), *seam) != noisy.points.end());
+    CHECK(noisy.size() == noisy_size + 3);
+    CHECK(smooth.size() == 4);
+}
+
+TEST_CASE("With fuzzy skin a strong point that cannot be carried is a discarded fragment", "[PreciseSeam][Fuzzy]")
+{
+    SeamFixture fixture;
+    const Polygon smooth = rectangle(0, 0, 20, 20);
+    // The whole noisy loop lies 0.3 mm outside, beyond a window of 0.1 mm.
+    Polygon noisy = rectangle(-0.3, -0.3, 20.3, 20.3);
+    const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, {rectangle(4, -1, 6, 0.1)});
+    PreciseSeam::PreparedPerimeter prepared(smooth, PreciseSeam::surface_shift(0.4, 0.), false);
+    prepared.set_target(noisy, coord_t(scale_(0.1)));
+    PreciseSeam::PreciseSeamWarnings warnings;
+    CHECK_FALSE(PreciseSeam::insert_strong_seam_point({modifier}, noisy, prepared, fixture.layer, fixture.cache, &warnings).has_value());
+    CHECK(warnings.failed_fragments == 1);
+    CHECK(warnings.failed_types == PreciseSeam::PreciseSeamWarnings::type_bit(ModelVolumeType::PRECISE_SEAM_CENTER));
+    CHECK(noisy.size() == 4);
+}
+
+TEST_CASE("With fuzzy skin a short weak zone keeps both boundaries on the noisy loop", "[PreciseSeam][Fuzzy]")
+{
+    using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    SeamFixture fixture;
+    const Polygon smooth = rectangle(0, 0, 20, 20);
+    Polygon noisy = fuzzify(smooth, 0.1);
+    const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, {rectangle(4, -1, 6, 0.1)});
+    PreciseSeam::PreparedPerimeter prepared(smooth, PreciseSeam::surface_shift(0.4, 0.), false);
+    prepared.set_target(noisy, coord_t(scale_(0.5)));
+    PreciseSeam::PreciseSeamWarnings warnings;
+    const auto segments = PreciseSeam::collect_weak_modifier_segments({modifier}, noisy, prepared, fixture.layer, fixture.cache, &warnings);
+    REQUIRE(segments.size() == 1);
+    CHECK(std::abs(segments.front().left_point.x() - mm(4, 0).x()) <= 1);
+    CHECK(std::abs(segments.front().right_point.x() - mm(6, 0).x()) <= 1);
+    CHECK(warnings.reversed_zones == 0);
+    // Exactly the noisy points across the zone are Enforced.
+    const auto types = weak_candidate_types(noisy, segments);
+    size_t enforced = 0;
+    for (size_t i = 0; i < noisy.size(); ++i) {
+        const bool inside = noisy[i].y() < scale_(1.) && noisy[i].x() >= mm(4, 0).x() - 1 && noisy[i].x() <= mm(6, 0).x() + 1;
+        CAPTURE(i, noisy[i].x(), noisy[i].y());
+        CHECK((types[i] == Type::Enforced) == inside);
+        enforced += types[i] == Type::Enforced;
+    }
+    CHECK(enforced > 8);
+}
+
+TEST_CASE("With fuzzy skin a zero-length weak zone at a convex corner spreads between its two arc points", "[PreciseSeam][Fuzzy]")
+{
+    SeamFixture fixture;
+    const Polygon smooth = rectangle(0, 0, 20, 20);
+    // The noisy loop cuts the corner (20, 0) outside it, along x - y = 20.05 mm.
+    Polygon noisy(Points{mm(0, 0), mm(19.9, -0.15), mm(20.15, 0.1), mm(20, 20), mm(0, 20)});
+    // Around the arc point at -45 degrees: a vertex point whose two arc points lie on either side of the bisector.
+    const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, {rectangle(20.11, -0.17, 20.17, -0.11)});
+    PreciseSeam::PreparedPerimeter prepared(smooth, PreciseSeam::surface_shift(0.4, 0.), false);
+    prepared.set_target(noisy, coord_t(scale_(0.5)));
+    PreciseSeam::PreciseSeamWarnings warnings;
+    const auto segments = PreciseSeam::collect_weak_modifier_segments({modifier}, noisy, prepared, fixture.layer, fixture.cache, &warnings);
+    REQUIRE(segments.size() == 1);
+    const Point &left = segments.front().left_point;
+    const Point &right = segments.front().right_point;
+    CAPTURE(left.x(), left.y(), right.x(), right.y());
+    // Both on the cut, in the order of the arc, mirror images across the bisector through the corner.
+    for (const Point &point : {left, right})
+        CHECK(std::abs(double(point.x() - point.y()) - scale_(20.05)) <= 2.);
+    CHECK(left.x() < right.x());
+    CHECK(std::abs(double(left.x() - mm(20, 0).x() + right.y())) <= 2.);
+    CHECK(warnings.reversed_zones == 0);
+}
+
+TEST_CASE("With fuzzy skin a weak zone whose boundaries reverse is reduced to its left one", "[PreciseSeam][Fuzzy]")
+{
+    using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    const auto [zone, type, background] = GENERATE(table<ModelVolumeType, Type, Type>({
+        {ModelVolumeType::PRECISE_SEAM_ENFORCED, Type::Enforced, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_BLOCKED, Type::Blocked, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_NEUTRAL, Type::Neutral, Type::Enforced}}));
+    CAPTURE(int(type));
+    SeamFixture fixture;
+    const Polygon smooth = rectangle(0, 0, 20, 20);
+    // Without displacement the noisy loop only cuts the corners: (19.875, 0) to (20, 0.125) at the corner (20, 0).
+    Polygon noisy = fuzzify(smooth, 0.);
+    // A wedge from the corner covering the front surface from x = 19.97 mm and the arc down to about 11 degrees below
+    // the horizontal. Across the cut behind the corner, the left boundary lands at (19.971, 0.096) and the right one,
+    // along the line to its arc point, near (19.896, 0.021): before the left one.
+    const auto *modifier = fixture.add(zone, {Polygon(Points{mm(20, 0), mm(19.85, -1), mm(21, -0.2)})});
+    PreciseSeam::PreparedPerimeter prepared(smooth, PreciseSeam::surface_shift(0.4, 0.), false);
+    prepared.set_target(noisy, coord_t(scale_(0.5)));
+    PreciseSeam::PreciseSeamWarnings warnings;
+    const auto segments = PreciseSeam::collect_weak_modifier_segments({modifier}, noisy, prepared, fixture.layer, fixture.cache, &warnings);
+    REQUIRE(segments.size() == 1);
+    CHECK_FALSE(segments.front().whole_perimeter);
+    CHECK(segments.front().left_point == segments.front().right_point);
+    CHECK(std::abs(segments.front().left_point.x() - mm(19.971, 0).x()) <= scale_(0.002));
+    CHECK(std::abs(segments.front().left_point.y() - mm(0, 0.096).y()) <= scale_(0.002));
+    CHECK(warnings.reversed_zones == 1);
+    // One candidate of the zone's type, as a zero-length zone types it; the rest keep their painted type.
+    const auto types = weak_candidate_types(noisy, segments, [background = background](const Point &) { return background; });
+    CHECK(std::count(types.begin(), types.end(), type) == 1);
+    CHECK(std::count(types.begin(), types.end(), background) == ptrdiff_t(types.size()) - 1);
+}
+
+TEST_CASE("With fuzzy skin a weak zone across the start of both loops keeps its order", "[PreciseSeam][Fuzzy]")
+{
+    using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    SeamFixture fixture;
+    const Polygon smooth = rectangle(0, 0, 20, 20);
+    // Both loops start at the corner (0, 0): the smooth one at it, the noisy one just after it.
+    Polygon noisy = fuzzify(smooth, 0.1);
+    const size_t noisy_size = noisy.size();
+    // Around the corner from y = 1 mm on the left side to x = 1 mm on the front.
+    const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, {rectangle(-1, -1, 1, 1)});
+    PreciseSeam::PreparedPerimeter prepared(smooth, PreciseSeam::surface_shift(0.4, 0.), false);
+    prepared.set_target(noisy, coord_t(scale_(0.5)));
+    PreciseSeam::PreciseSeamWarnings warnings;
+    const auto segments = PreciseSeam::collect_weak_modifier_segments({modifier}, noisy, prepared, fixture.layer, fixture.cache, &warnings);
+    REQUIRE(segments.size() == 1);
+    const auto &zone = segments.front();
+    CHECK(std::abs(zone.left_point.y() - mm(0, 1).y()) <= 1);
+    CHECK(std::abs(zone.left_point.x()) <= scale_(0.1) + 1);
+    CHECK(std::abs(zone.right_point.x() - mm(1, 0).x()) <= 1);
+    CHECK(std::abs(zone.right_point.y()) <= scale_(0.1) + 1);
+    CHECK(zone.left_position.edge_index > noisy_size / 2);
+    CHECK(zone.right_position.edge_index < 8);
+    CHECK(warnings.reversed_zones == 0);
+    // The corner is Enforced, the far side is not.
+    const auto types = weak_candidate_types(noisy, segments);
+    for (size_t i = 0; i < noisy.size(); ++i) {
+        const bool inside = std::max(noisy[i].x(), noisy[i].y()) <= mm(1, 1).x() + 1;
+        CAPTURE(i, noisy[i].x(), noisy[i].y());
+        CHECK((types[i] == Type::Enforced) == inside);
+    }
 }
 
 TEST_CASE("Weak processing applies every ready interval and leaves gaps unchanged", "[PreciseSeam][SegmentExtraction]")
@@ -1428,6 +1609,7 @@ struct ExportFixture {
 struct OuterLoop {
     Vec2d seam; // Relative to the loop's centre, which is the cube's centre.
     BoundingBoxf bounds;
+    float z = 0.f;
 };
 
 std::vector<OuterLoop> outer_wall_loops(const std::string &gcode)
@@ -1450,7 +1632,7 @@ std::vector<OuterLoop> outer_wall_loops(const std::string &gcode)
             in_loop = false;
         loop_z = self.z();
         if (!in_loop) {
-            loops.push_back({Vec2d(self.x(), self.y()), {}});
+            loops.push_back({Vec2d(self.x(), self.y()), {}, self.z()});
             loops.back().bounds.merge(loops.back().seam);
             in_loop = true;
         }
@@ -1726,30 +1908,23 @@ void make_frame(ExportFixture &fixture)
     fixture.add(ModelVolumeType::MODEL_PART, make_cube(6, 7, 2), Vec3d(7, 13, 0), "back side");
 }
 
-// Checks the outer loops, or the hole loops (under 10 mm wide), of every layer: those of the layers where at_front
-// holds have the seam on their front at x relative to their centre, the others away from it.
-void check_front_seams(const std::vector<OuterLoop> &loops, bool hole, const std::function<bool(size_t layer)> &at_front,
-                       double x, double front = 0.01)
+// Checks the outer loops, or the hole loops (under 10 mm wide), of every layer: all have the seam on their front
+// at x relative to their centre, or none has it at the front.
+void check_front_seams(const std::vector<OuterLoop> &loops, bool hole, bool at_front, double x, double front = 0.01)
 {
     size_t checked = 0;
     for (const OuterLoop &loop : loops) {
         if ((loop.bounds.size().x() < 10.) != hole)
             continue;
-        const size_t layer = checked++;
-        CAPTURE(layer, loop.seam.x(), loop.seam.y());
-        if (at_front(layer)) {
+        ++checked;
+        CAPTURE(checked, loop.seam.x(), loop.seam.y());
+        if (at_front) {
             CHECK_THAT(loop.seam.x(), Catch::Matchers::WithinAbs(x, 0.01));
             CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.min.y() - loop.bounds.center().y(), front));
         } else
             CHECK(loop.seam.y() > 0.); // The back seam, away from the helper.
     }
     CHECK(checked == 10);
-}
-
-// The same with all layers alike.
-void check_front_seams(const std::vector<OuterLoop> &loops, bool hole, bool at_front, double x, double front = 0.01)
-{
-    check_front_seams(loops, hole, [at_front](size_t) { return at_front; }, x, front);
 }
 } // namespace
 
@@ -1826,7 +2001,7 @@ TEST_CASE("A hole wall on elephant foot layers acts at the same modifier depth a
     check_front_seams(loops, true, true, 0.);
 }
 
-TEST_CASE("Loops with fuzzy skin keep the constant shift while the other kind is measured", "[PreciseSeam]")
+TEST_CASE("Loops with fuzzy skin are measured on their smooth centerline", "[PreciseSeam]")
 {
     // Fuzzy skin on the outer contours or on the holes, from the second layer on.
     const auto [fuzzy_skin, hole] = GENERATE(table<std::string, bool>({
@@ -1841,17 +2016,234 @@ TEST_CASE("Loops with fuzzy skin keep the constant shift while the other kind is
     fixture.config.set_deserialize_strict("fuzzy_skin_thickness", "0.001");
     set_elephant_foot(fixture);
     make_frame(fixture);
-    // 0.05 mm into the front face or the hole wall y = 7 mm. The constant shift puts the surface 0.3, 0.2 and 0.1 mm
-    // deeper on the first three layers, out of its reach.
+    // 0.05 mm into the front face or the hole wall y = 7 mm. A constant shift would put the surface 0.3, 0.2 and
+    // 0.1 mm deeper on the first three layers, out of its reach; measured, it acts on every layer, noisy or not.
     if (hole)
         fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 2.05, 4), Vec3d(9, 6.95, -1));
     else
         fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3.05, 4), Vec3d(4, -3, -1));
     const auto loops = outer_wall_loops(fixture.export_gcode());
-    // The fuzzy kind is measured on the first layer only; the modifier misses it on the next two.
-    const bool fuzzy = hole == (fuzzy_skin == "hole");
-    check_front_seams(loops, hole, [fuzzy](size_t layer) { return !fuzzy || layer == 0 || layer >= 3; },
-                      hole ? 0. : 5. - 10.);
+    check_front_seams(loops, hole, true, hole ? 0. : 5. - 10.);
+}
+
+namespace {
+// Fuzzy skin as a sine of 0.3 mm amplitude along the loop, the same on every run, from the first layer on.
+void set_ripple_fuzzy_skin(ExportFixture &fixture, const std::string &type)
+{
+    fixture.config.set_deserialize_strict("fuzzy_skin", type);
+    fixture.config.set_deserialize_strict("fuzzy_skin_noise_type", "ripple");
+    fixture.config.set_deserialize_strict("fuzzy_skin_thickness", "0.3");
+    fixture.config.set_deserialize_strict("fuzzy_skin_point_distance", "0.3");
+    fixture.config.set_deserialize_strict("fuzzy_skin_first_layer", "1");
+}
+
+// Checks the noisy outer loops, or hole loops, of a frame (make_frame()) against the smooth loop of the other kind on
+// the same layer, whose centre is the frame's. Every one has its seam at (x, y) from that centre, within `along` and
+// `across`, or none has it on the front.
+void check_fuzzy_seams(const std::vector<OuterLoop> &loops, bool hole, bool at_front, double x, double y, double along,
+                       double across)
+{
+    size_t checked = 0;
+    for (const OuterLoop &loop : loops) {
+        if ((loop.bounds.size().x() < 10.) != hole)
+            continue;
+        const auto smooth = std::find_if(loops.begin(), loops.end(), [&loop, hole](const OuterLoop &other) {
+            return other.z == loop.z && (other.bounds.size().x() < 10.) != hole;
+        });
+        REQUIRE(smooth != loops.end());
+        const Vec2d seam = loop.seam + loop.bounds.center() - smooth->bounds.center();
+        ++checked;
+        CAPTURE(checked, seam.x(), seam.y());
+        if (at_front) {
+            CHECK_THAT(seam.x(), Catch::Matchers::WithinAbs(x, along));
+            CHECK_THAT(seam.y(), Catch::Matchers::WithinAbs(y, across));
+        } else
+            CHECK(seam.y() > 0.); // The back seam, away from the helper.
+    }
+    CHECK(checked == 10);
+}
+} // namespace
+
+TEST_CASE("With fuzzy skin a modifier acts at the model surface, not at the noise", "[PreciseSeam]")
+{
+    const bool hole = GENERATE(false, true);
+    const bool reaches = GENERATE(true, false);
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(hole, reaches, generator);
+    ExportFixture fixture("back", 0, make_cube(7, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    fixture.config.set_deserialize_strict("elefant_foot_compensation", "0");
+    set_ripple_fuzzy_skin(fixture, hole ? "hole" : "external");
+    make_frame(fixture);
+    // 0.05 mm into or in front of the front face or the hole wall y = 7 mm. The noise reaches 0.1 mm beyond the model
+    // surface, so the surface of the noisy loop itself would reach the helper in front of it.
+    const double depth = reaches ? 0.05 : -0.05;
+    if (hole)
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 2. + depth, 4), Vec3d(9, 7. - depth, -1));
+    else
+        fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3. + depth, 4), Vec3d(4, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    // On the noisy loop across the smooth centerline, 0.2 mm inside the wall, within the noise.
+    check_fuzzy_seams(loops, hole, reaches, hole ? 0. : -5., hole ? -3.2 : -9.8, 0.01, 0.35);
+}
+
+TEST_CASE("With fuzzy skin a weak zone keeps its boundaries on the noisy loop", "[PreciseSeam]")
+{
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(generator);
+    ExportFixture fixture("back", 0, make_cube(7, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    fixture.config.set_deserialize_strict("elefant_foot_compensation", "0");
+    set_ripple_fuzzy_skin(fixture, "external");
+    make_frame(fixture);
+    // Enforced from x = 4 to 6 mm, 0.05 mm into the front face: the seam moves into the zone.
+    fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED, make_cube(2, 3.05, 4), Vec3d(4, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    check_fuzzy_seams(loops, false, true, -5., -9.8, 1.01, 0.35);
+}
+
+TEST_CASE("With fuzzy skin elephant foot layers act at the same modifier depth, in one region or several", "[PreciseSeam]")
+{
+    const bool several_regions = GENERATE(false, true);
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(several_regions, generator);
+    ExportFixture fixture("back", 0, make_cube(7, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    set_elephant_foot(fixture);
+    set_ripple_fuzzy_skin(fixture, "external");
+    make_frame(fixture);
+    if (several_regions) {
+        // A different infill density over the right half makes a second region without a wall between them.
+        fixture.add(ModelVolumeType::PARAMETER_MODIFIER, make_cube(15, 30, 4), Vec3d(10, -5, -1), "infill");
+        DynamicPrintConfig infill;
+        infill.set_key_value("sparse_infill_density", new ConfigOptionPercent(50));
+        fixture.model.objects.front()->volumes.back()->config.apply(infill);
+    }
+    // 0.05 mm into the front face; the walls of the first three layers lie 0.3, 0.2 and 0.1 mm deeper.
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3.05, 4), Vec3d(4, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    if (several_regions)
+        REQUIRE(fixture.print.get_object(0)->get_layer(0)->regions().size() > 1);
+    check_fuzzy_seams(loops, false, true, -5., -9.8, 0.01, 0.65);
+}
+
+namespace {
+// Calls `visit` on every extrusion loop of the object's layers, through nested collections.
+void for_each_loop(PrintObject &object, const std::function<void(ExtrusionLoop &)> &visit)
+{
+    const std::function<void(ExtrusionEntityCollection &)> walk = [&](ExtrusionEntityCollection &collection) {
+        for (ExtrusionEntity *entity : collection.entities) {
+            if (entity->is_collection())
+                walk(*static_cast<ExtrusionEntityCollection *>(entity));
+            else if (entity->is_loop())
+                visit(*static_cast<ExtrusionLoop *>(entity));
+        }
+    };
+    for (size_t layer = 0; layer < object.layer_count(); ++layer)
+        for (size_t region = 0; region < object.get_layer(int(layer))->regions().size(); ++region)
+            walk(object.get_layer(int(layer))->get_region(int(region))->perimeters);
+}
+} // namespace
+
+TEST_CASE("Only external loops that fuzzy skin changes keep their untextured centerline", "[PreciseSeam][Fuzzy]")
+{
+    const std::string fuzzy_skin = GENERATE(as<std::string>{}, "none", "external", "hole");
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(fuzzy_skin, generator);
+    ExportFixture fixture("back", 0, make_cube(7, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    set_ripple_fuzzy_skin(fixture, fuzzy_skin);
+    make_frame(fixture);
+    fixture.export_gcode();
+    size_t contours = 0;
+    size_t holes = 0;
+    for_each_loop(*fixture.print.get_object(0), [&](ExtrusionLoop &loop) {
+        if (loop.untextured == nullptr)
+            return;
+        // Only external walls, and the untextured line differs from the printed one.
+        CHECK(loop.role() == erExternalPerimeter);
+        CHECK(loop.untextured->points != loop.polygon().points);
+        ++((loop.loop_role() & elrHole) ? holes : contours);
+    });
+    // One contour and one hole on each of the 10 layers.
+    CHECK(contours == (fuzzy_skin == "external" ? 10u : 0u));
+    CHECK(holes == (fuzzy_skin == "hole" ? 10u : 0u));
+}
+
+TEST_CASE("With fuzzy skin on part of a wall a modifier acts at the model surface there", "[PreciseSeam][Fuzzy]")
+{
+    const bool reaches = GENERATE(true, false);
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(reaches, generator);
+    ExportFixture fixture("back", 0, make_cube(7, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    fixture.config.set_deserialize_strict("elefant_foot_compensation", "0");
+    // The classic generator builds a wall along the edge of the fuzzy region across the hole, printed as an overhang
+    // there; that would split the outer wall in the G-code into several loops.
+    fixture.config.set_deserialize_strict("detect_overhang_wall", "0");
+    make_frame(fixture);
+    // Fuzzy skin on the outer walls over the right half only.
+    fixture.add(ModelVolumeType::PARAMETER_MODIFIER, make_cube(15, 30, 4), Vec3d(10, -5, -1), "fuzzy half");
+    DynamicPrintConfig fuzzy;
+    fuzzy.set_key_value("fuzzy_skin", new ConfigOptionEnum<FuzzySkinType>(FuzzySkinType::External));
+    fuzzy.set_key_value("fuzzy_skin_noise_type", new ConfigOptionEnum<NoiseType>(NoiseType::Ripple));
+    fuzzy.set_key_value("fuzzy_skin_thickness", new ConfigOptionFloat(0.3));
+    fuzzy.set_key_value("fuzzy_skin_point_distance", new ConfigOptionFloat(0.3));
+    fuzzy.set_key_value("fuzzy_skin_first_layer", new ConfigOptionBool(true));
+    fixture.model.objects.front()->volumes.back()->config.apply(fuzzy);
+    // 0.05 mm into or in front of the front face at x = 14..16 mm, in the noisy part.
+    const double depth = reaches ? 0.05 : -0.05;
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 3. + depth, 4), Vec3d(14, -3, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    size_t textured = 0;
+    for_each_loop(*fixture.print.get_object(0), [&textured](ExtrusionLoop &loop) { textured += loop.untextured != nullptr; });
+    CHECK(textured >= 10);
+    check_fuzzy_seams(loops, false, reaches, 5., -9.8, 0.01, 0.35);
+}
+
+TEST_CASE("A closed thin wall with fuzzy skin keeps no untextured centerline in the classic generator", "[PreciseSeam][Fuzzy]")
+{
+    // A ring 0.3 mm thick, thinner than one line: the classic generator prints it as a closed thin wall, which it
+    // builds outside the loops of its perimeters and textures there.
+    ExportFixture fixture("back", 0, make_cylinder(5.15, 2));
+    fixture.config.set_deserialize_strict("wall_generator", "classic");
+    fixture.config.set_deserialize_strict("detect_thin_wall", "1");
+    fixture.config.set_deserialize_strict("elefant_foot_compensation", "0");
+    set_ripple_fuzzy_skin(fixture, "external");
+    fixture.add(ModelVolumeType::NEGATIVE_VOLUME, make_cylinder(4.85, 4), Vec3d(0.3, 0.3, -1), "bore");
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(1, 3, 4), Vec3d(4.65, -2, -1));
+    const auto loops = outer_wall_loops(fixture.export_gcode());
+    CHECK_FALSE(loops.empty());
+    size_t closed = 0;
+    for_each_loop(*fixture.print.get_object(0), [&closed](ExtrusionLoop &loop) {
+        ++closed;
+        CHECK(loop.untextured == nullptr);
+    });
+    CHECK(closed > 0);
+}
+
+TEST_CASE("Loops that lose their untextured centerline keep the noisy surface, as sliced data from a cache does", "[PreciseSeam][Fuzzy]")
+{
+    const std::string generator = GENERATE(as<std::string>{}, "classic", "arachne");
+    CAPTURE(generator);
+    ExportFixture fixture("back", 0, make_cube(7, 20, 2));
+    fixture.config.set_deserialize_strict("wall_generator", generator);
+    fixture.config.set_deserialize_strict("elefant_foot_compensation", "0");
+    set_ripple_fuzzy_skin(fixture, "external");
+    make_frame(fixture);
+    // 0.05 mm in front of the front face: clear of the model surface, within reach of the noise.
+    fixture.add(ModelVolumeType::PRECISE_SEAM_CENTER, make_cube(2, 2.95, 4), Vec3d(4, -3, -1));
+    fixture.print.apply(fixture.model, fixture.config);
+    fixture.print.process();
+    // Loading sliced data from a cache restores the extrusions without the field.
+    for_each_loop(*fixture.print.get_object(0), [](ExtrusionLoop &loop) { loop.untextured.reset(); });
+    const auto loops = outer_wall_loops(Test::gcode(fixture.print));
+    // The surface then follows the noise and reaches the modifier on some layers, as before.
+    size_t front = 0;
+    for (const OuterLoop &loop : loops)
+        if (loop.bounds.size().x() >= 10. && loop.seam.y() < 0.)
+            ++front;
+    CHECK(front > 0);
 }
 
 TEST_CASE("With a raft the modifier depth needed is that of the constant shift", "[PreciseSeam]")

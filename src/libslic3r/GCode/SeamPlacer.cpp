@@ -479,11 +479,16 @@ struct GlobalModelInfo {
 //Extract perimeter polygons of the given layer
 Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerRegion*> &corresponding_regions_out,
                                    std::vector<std::optional<bool>> &boundary_types_out,
+                                   std::vector<const Polygon*> &untextured_out,
                                    bool has_precise_seam_modifiers) {
   Polygons polygons;
   const auto boundary_type = [](const ExtrusionEntity *entity) -> std::optional<bool> {
     if (!entity->is_loop()) return std::nullopt;
     return (static_cast<const ExtrusionLoop*>(entity)->loop_role() & elrHole) != 0;
+  };
+  // The centerline of a loop before fuzzy skin, where the noise changed it.
+  const auto untextured = [](const ExtrusionEntity *entity) -> const Polygon* {
+    return entity->is_loop() ? static_cast<const ExtrusionLoop*>(entity)->untextured.get() : nullptr;
   };
   for (const LayerRegion *layer_region : layer->regions()) {
     for (const ExtrusionEntity *ex_entity : layer_region->perimeters.entities) {
@@ -500,6 +505,7 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
             polygons.emplace_back(std::move(p));
             corresponding_regions_out.push_back(layer_region);
             boundary_types_out.push_back(boundary_type(perimeter));
+            untextured_out.push_back(untextured(perimeter));
           }
         }
         if (polygons.size() == collection_begin) {
@@ -508,6 +514,7 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
           polygons.emplace_back(std::move(p));
           corresponding_regions_out.push_back(layer_region);
           boundary_types_out.push_back(boundary_type(ex_entity));
+          untextured_out.push_back(nullptr);
         }
       } else {
         Points p;
@@ -515,6 +522,7 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
         polygons.emplace_back(std::move(p));
         corresponding_regions_out.push_back(layer_region);
         boundary_types_out.push_back(boundary_type(ex_entity));
+        untextured_out.push_back(untextured(ex_entity));
       }
     }
   }
@@ -536,6 +544,7 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
     polygons.emplace_back(Points{ { 0, 0 } });
     corresponding_regions_out.push_back(nullptr);
     boundary_types_out.push_back(std::nullopt);
+    untextured_out.push_back(nullptr);
   }
 
   return polygons;
@@ -560,12 +569,16 @@ bool precise_seam_modifier_near(const GlobalModelInfo &global_model_info, const 
 // Layers where Precise Seam measures how deep the centerline lies below the model surface instead of taking half
 // the line width: the first layers with elephant foot compensation and every layer of Arachne perimeters.
 struct LayerShiftMeasurement {
-  std::unique_ptr<AABBTreeLines::LinesDistancer<Line>> outline; // Set when any loop of the layer is measured.
+  std::unique_ptr<AABBTreeLines::LinesDistancer<Line>> outline; // Set on a measured layer with modifier regions.
   double elephant_foot = 0.; // Compensation of this layer, mm.
   bool arachne = false;
   bool several_regions = false;
-  bool contours = false; // Which kinds of loops are measured; fuzzy skin keeps the nominal shift.
+  // Which kinds of noisy loops without their smooth centerline are measured; fuzzy skin keeps the nominal shift.
+  bool contours = false;
   bool holes = false;
+  // How far a point of a fuzzy skin loop may lie from its smooth centerline, scaled: the noise amplitude and the
+  // point distance, the farthest a chord cutting a convex corner passes from it.
+  coord_t fuzzy_window = 0;
 };
 
 LayerShiftMeasurement layer_shift_measurement(const PrintObject *po, size_t layer_idx,
@@ -579,10 +592,20 @@ LayerShiftMeasurement layer_shift_measurement(const PrintObject *po, size_t laye
     measurement.elephant_foot = config.elefant_foot_compensation.value * (1. - double(layer_idx) / double(foot_layers));
   // As LayerRegion::make_perimeters() chooses the generator.
   measurement.arachne = config.wall_generator.value == PerimeterGeneratorType::Arachne && !po->print()->config().spiral_mode.value;
-  // Without a modifier region on the layer no loop is measured: skip the outline index.
-  if ((measurement.elephant_foot <= 0. && !measurement.arachne) || !precise_seam_modifier_near(global_model_info, layer))
+  // Without a modifier region on the layer no loop is processed.
+  if (!precise_seam_modifier_near(global_model_info, layer))
     return measurement;
-  // Fuzzy skin moves the centerline off the smooth outline; measuring would pull some points back and leave others.
+  for (const LayerRegion *region : layer->regions()) {
+    const PrintRegionConfig &region_config = region->region().config();
+    if (region_config.fuzzy_skin.value != FuzzySkinType::None)
+      measurement.fuzzy_window = std::max(measurement.fuzzy_window,
+          coord_t(scale_(region_config.fuzzy_skin_thickness.value + region_config.fuzzy_skin_point_distance.value + 0.001)));
+  }
+  // Only these layers are measured: skip the outline index elsewhere.
+  if (measurement.elephant_foot <= 0. && !measurement.arachne)
+    return measurement;
+  // Fuzzy skin moves the centerline off the smooth outline; measuring a noisy loop would pull some points back and
+  // leave others. Loops that keep their smooth centerline are measured on it.
   measurement.contours = measurement.holes = true;
   for (const LayerRegion *region : layer->regions()) {
     const PrintRegionConfig &region_config = region->region().config();
@@ -592,8 +615,7 @@ LayerShiftMeasurement layer_shift_measurement(const PrintObject *po, size_t laye
     measurement.contours = measurement.contours && !Feature::FuzzySkin::should_fuzzify(fuzzy, int(layer->id()), 0, true);
     measurement.holes = measurement.holes && !Feature::FuzzySkin::should_fuzzify(fuzzy, int(layer->id()), 0, false);
   }
-  if (measurement.contours || measurement.holes)
-    measurement.outline = std::make_unique<AABBTreeLines::LinesDistancer<Line>>(to_lines(layer->lslices));
+  measurement.outline = std::make_unique<AABBTreeLines::LinesDistancer<Line>>(to_lines(layer->lslices));
   measurement.several_regions = layer->regions().size() > 1;
   return measurement;
 }
@@ -601,8 +623,8 @@ LayerShiftMeasurement layer_shift_measurement(const PrintObject *po, size_t laye
 // The measured shift of one closed loop, or an empty profile where the constant shift applies.
 PreciseSeam::ShiftProfile measured_shift_profile(const Polygon &polygon, bool hole, double compensation,
                                                  const LayerRegion *region, const LayerShiftMeasurement &measurement,
-                                                 const GlobalModelInfo &global_model_info) {
-  if (!measurement.outline || !(hole ? measurement.holes : measurement.contours))
+                                                 const GlobalModelInfo &global_model_info, bool smooth) {
+  if (!measurement.outline || (!smooth && !(hole ? measurement.holes : measurement.contours)))
     return {};
   const Layer *layer = region->layer();
   const PrintObject *object = layer->object();
@@ -766,7 +788,8 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
                                const GlobalModelInfo &global_model_info, PrintObjectSeamData::LayerSeams &result,
                                PreciseSeam::PreciseSeamWarnings* warnings = nullptr,
                                std::optional<bool> boundary_hole = std::nullopt,
-                               const LayerShiftMeasurement *shift_measurement = nullptr) {
+                               const LayerShiftMeasurement *shift_measurement = nullptr,
+                               const Polygon *untextured = nullptr) {
   if (orig_polygon.size() == 0) {
     return;
   }
@@ -794,18 +817,32 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     if (hole && compensation > 0. && layer->regions().size() > 1)
       compensation = 0.;
     const coord_t shift = PreciseSeam::surface_shift(region->flow(FlowRole::frExternalPerimeter).width(), compensation);
+    // With fuzzy skin, modifiers are evaluated on the smooth centerline and the result is carried onto the noisy
+    // loop. Normalized as the loop is: no repeated points, counterclockwise.
+    Polygon smooth;
+    if (untextured != nullptr) {
+      smooth = *untextured;
+      smooth.points.erase(std::unique(smooth.points.begin(), smooth.points.end()), smooth.points.end());
+      while (smooth.size() > 1 && smooth.points.front() == smooth.points.back())
+        smooth.points.pop_back();
+      smooth.make_counter_clockwise();
+    }
+    const bool fuzzy = smooth.size() >= 3;
+    const Polygon &source = fuzzy ? smooth : polygon;
     // Where the centerline is not at its nominal depth, the shift is measured against the layer outline.
     PreciseSeam::ShiftProfile profile;
     if (shift_measurement != nullptr)
-      profile = measured_shift_profile(polygon, hole, compensation, region, *shift_measurement, global_model_info);
+      profile = measured_shift_profile(source, hole, compensation, region, *shift_measurement, global_model_info, fuzzy);
     // Share validation, bounds and clipping line across all modifiers while the polygon is unchanged.
     // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
-    // Built in place: the preparation borrows the polygon and is neither copied nor moved.
+    // Built in place: the preparation borrows the polygons and is neither copied nor moved.
     std::optional<PreciseSeam::PreparedPerimeter> preparation;
     if (profile.empty())
-      preparation.emplace(polygon, shift, hole);
+      preparation.emplace(source, shift, hole);
     else
-      preparation.emplace(polygon, std::move(profile), hole);
+      preparation.emplace(source, std::move(profile), hole);
+    if (fuzzy)
+      preparation->set_target(polygon, shift_measurement != nullptr ? shift_measurement->fuzzy_window : 0);
     const PreciseSeam::PreparedPerimeter &prepared = *preparation;
     seam_point = PreciseSeam::insert_strong_seam_point(
         strong_volumes, polygon, prepared, layer, global_model_info.precise_seam_slices, warnings);
@@ -1761,17 +1798,19 @@ void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerI
                         auto unscaled_z = layer->slice_z;
                         std::vector<const LayerRegion*> regions;
                         std::vector<std::optional<bool>> boundary_types;
+                        std::vector<const Polygon*> untextured;
                         //NOTE corresponding region ptr may be null, if the layer has zero perimeters
                         const bool has_precise_seam_modifiers = !global_model_info.precise_seam_strong_volumes.empty() ||
                                                                !global_model_info.precise_seam_weak_volumes.empty();
-                        Polygons polygons = extract_perimeter_polygons(layer, regions, boundary_types, has_precise_seam_modifiers);
+                        Polygons polygons = extract_perimeter_polygons(layer, regions, boundary_types, untextured, has_precise_seam_modifiers);
                         // Built once per layer, only on layers with Precise Seam modifier regions.
                         const LayerShiftMeasurement shift_measurement = has_precise_seam_modifiers ?
                             layer_shift_measurement(po, layer_idx, global_model_info) : LayerShiftMeasurement{};
                         for (size_t poly_index = 0; poly_index < polygons.size(); ++poly_index) {
                           process_perimeter_polygon(polygons[poly_index], unscaled_z,
                                                     regions[poly_index], global_model_info, layer_seams,
-                                                    warnings, boundary_types[poly_index], &shift_measurement);
+                                                    warnings, boundary_types[poly_index], &shift_measurement,
+                                                    untextured[poly_index]);
                         }
                         auto functor = SeamCandidateCoordinateFunctor { layer_seams.points };
                         seam_data.layers[layer_idx].points_tree =
@@ -2349,6 +2388,13 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
               << " fragments discarded; first " << PreciseSeam::failed_fragment_log_limit
               << " logged (parallel processing order), " << (failed - PreciseSeam::failed_fragment_log_limit)
               << " omitted";
+      // Fuzzy skin degradations are log-only totals.
+      const size_t approximate = precise_seam_warnings.approximate_transfers.load(std::memory_order_relaxed);
+      const size_t reversed = precise_seam_warnings.reversed_zones.load(std::memory_order_relaxed);
+      if (approximate > 0 || reversed > 0)
+          BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamFuzzySkin] " << approximate
+              << " points carried onto noisy loops without their surface line, " << reversed
+              << " weak zones reduced to one point after their boundaries reversed";
       // Recoveries are log-only: no user warning, but the same bounded detail and a total.
       const size_t recovered = precise_seam_warnings.recovered_fragments.load(std::memory_order_relaxed);
       if (recovered > PreciseSeam::failed_fragment_log_limit)

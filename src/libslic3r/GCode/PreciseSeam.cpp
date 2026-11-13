@@ -1,6 +1,7 @@
 // Precise Seam implementation. Design: docs/HLSD/precise-seam.md
 #include "PreciseSeam.hpp"
 #include "PreciseSeamInternal.hpp"
+#include "libslic3r/AABBTreeLines.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Point.hpp"
@@ -21,6 +22,8 @@
 #include <unordered_map>
 #include <cassert>
 #include <cmath>
+#include <initializer_list>
+#include <limits>
 #include <tbb/parallel_for.h>
 #include <vector>
 #include <utility>
@@ -66,6 +69,17 @@ PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter, coord_t surface_s
 }
 
 PreparedPerimeter::~PreparedPerimeter() = default;
+
+void PreparedPerimeter::set_target(const Polygon &noisy, coord_t noise_window)
+{
+    target = &noisy;
+    window = noise_window;
+    const size_t count = noisy.size();
+    bool usable = count >= 3;
+    for (size_t edge = 0; usable && edge < count; ++edge)
+        usable = noisy.points[edge] != noisy.points[(edge + 1) % count];
+    valid = valid && usable;
+}
 
 // Import EnforcedBlockedSeamPoint from SeamPlacerImpl namespace for convenience
 using SeamPlacerImpl::EnforcedBlockedSeamPoint;
@@ -661,6 +675,62 @@ SurfaceLine build_surface_line(const Polygon &perimeter, const ShiftProfile &pro
         surface.bounds.merge(point);
     return surface;
 }
+
+Transfer transfer_point(const AABBTreeLines::LinesDistancer<Line> &target, const Point &point, const Point &surface,
+                        double window)
+{
+    const std::vector<Line> &lines = target.get_lines();
+    const size_t count = lines.size();
+    // A position on the noisy loop; a vertex is represented by its outgoing edge.
+    const auto position = [&lines, count](size_t index, double parameter, const Vec2d &at) -> CenterlinePoint {
+        if (parameter >= 1.)
+            return {(index + 1) % count, 0., lines[index].b};
+        if (parameter <= 0.)
+            return {index, 0., lines[index].a};
+        return {index, parameter, Point(coord_t(std::lround(at.x())), coord_t(std::lround(at.y())))};
+    };
+    const Vec2d from = point.cast<double>();
+    const Vec2d pair = (surface - point).cast<double>();
+    if (pair.squaredNorm() >= double(TOLERANCE_SQUARED)) {
+        // The line through the pair; a crossing within the window lies on an edge within the window of the point.
+        const Vec2d direction = pair.normalized();
+        std::optional<CenterlinePoint> crossing;
+        double nearest = window;
+        for (const size_t index : target.all_lines_in_radius(point, window)) {
+            const Vec2d a = lines[index].a.cast<double>();
+            const Vec2d ab = lines[index].b.cast<double>() - a;
+            const Vec2d to_a = a - from;
+            const double denominator = cross2(direction, ab);
+            double parameter = 0.;
+            double along = 0.;
+            if (std::abs(denominator) <= EPSILON * ab.norm()) {
+                // An edge along the line gives its point nearest to the point; one beside the line gives nothing.
+                if (std::abs(cross2(direction, to_a)) > 1.)
+                    continue;
+                parameter = std::clamp(-to_a.dot(ab) / ab.squaredNorm(), 0., 1.);
+                along = std::abs((to_a + parameter * ab).dot(direction));
+            } else {
+                parameter = cross2(to_a, direction) / denominator;
+                if (parameter < 0. || parameter > 1.)
+                    continue;
+                along = std::abs(cross2(to_a, ab) / denominator);
+            }
+            // The nearest crossing; of equally near ones the first found, in the deterministic order of the tree.
+            if (along > window || (crossing && along >= nearest))
+                continue;
+            nearest = along;
+            crossing = position(index, parameter, a + parameter * ab);
+        }
+        if (crossing)
+            return {TransferOutcome::Exact, *crossing};
+    }
+    const auto [distance, index, nearest] = target.distance_from_lines_extra<false>(point);
+    if (index >= count || distance > window)
+        return {TransferOutcome::Failed, {0, 0., point}};
+    const Vec2d a = lines[index].a.cast<double>();
+    const Vec2d ab = lines[index].b.cast<double>() - a;
+    return {TransferOutcome::Approximate, position(index, std::clamp((nearest - a).dot(ab) / ab.squaredNorm(), 0., 1.), nearest)};
+}
 } // namespace detail
 
 const detail::SurfaceLine &PreparedPerimeter::surface() const
@@ -672,8 +742,139 @@ const detail::SurfaceLine &PreparedPerimeter::surface() const
     return *m_surface;
 }
 
+const AABBTreeLines::LinesDistancer<Line> &PreparedPerimeter::target_lines() const
+{
+    assert(valid && target != nullptr);
+    if (!m_target_lines)
+        m_target_lines = std::make_unique<AABBTreeLines::LinesDistancer<Line>>(target->lines());
+    return *m_target_lines;
+}
+
+// The edges of the surface polygon that make the arc or bridge of a vertex, in order; empty for a vertex without them.
+static std::vector<size_t> vertex_chain(const detail::SurfaceLine &surface, size_t vertex)
+{
+    const size_t count = surface.elements.size();
+    const auto of_vertex = [&surface, vertex](size_t i) { return surface.elements[i].vertex && surface.elements[i].source == vertex; };
+    size_t first = 0;
+    while (first < count && !of_vertex(first))
+        ++first;
+    std::vector<size_t> chain;
+    if (first == count)
+        return chain;
+    // The run may wrap round the start of the polygon.
+    for (size_t k = 0; k < count && of_vertex((first + count - 1) % count); ++k)
+        first = (first + count - 1) % count;
+    for (size_t k = 0, i = first; k < count && of_vertex(i); ++k, i = (i + 1) % count)
+        chain.push_back(i);
+    return chain;
+}
+
+// Arc length along a chain of surface polygon edges at the foot of a point, and the point at an arc length.
+static double chain_position(const detail::SurfaceLine &surface, const std::vector<size_t> &chain, const Point &point)
+{
+    double best = std::numeric_limits<double>::max();
+    double result = 0.;
+    double start = 0.;
+    for (const size_t i : chain) {
+        const Vec2d a = surface.polygon[i].cast<double>();
+        const Vec2d ab = surface.polygon[(i + 1) % surface.polygon.size()].cast<double>() - a;
+        const double t = std::clamp((point.cast<double>() - a).dot(ab) / ab.squaredNorm(), 0., 1.);
+        const double distance = (a + t * ab - point.cast<double>()).squaredNorm();
+        if (distance < best) {
+            best = distance;
+            result = start + t * ab.norm();
+        }
+        start += ab.norm();
+    }
+    return result;
+}
+
+static Point chain_point(const detail::SurfaceLine &surface, const std::vector<size_t> &chain, double position)
+{
+    Vec2d at = surface.polygon[chain.front()].cast<double>();
+    for (const size_t i : chain) {
+        const Vec2d a = surface.polygon[i].cast<double>();
+        const Vec2d ab = surface.polygon[(i + 1) % surface.polygon.size()].cast<double>() - a;
+        const double length = ab.norm();
+        at = a + ab * std::clamp(position / length, 0., 1.);
+        if (position <= length)
+            break;
+        position -= length;
+    }
+    return Point(coord_t(std::lround(at.x())), coord_t(std::lround(at.y())));
+}
+
+static double chain_length(const detail::SurfaceLine &surface, const std::vector<size_t> &chain)
+{
+    double length = 0.;
+    for (const size_t i : chain)
+        length += (surface.polygon[(i + 1) % surface.polygon.size()] - surface.polygon[i]).cast<double>().norm();
+    return length;
+}
+
+// The crossing of the shifted edges at a resolved concave vertex, where its dead stretch begins and ends.
+static std::optional<Point> concave_crossing(const detail::SurfaceLine &surface, size_t vertex)
+{
+    for (const detail::SurfaceGap &gap : surface.gaps)
+        if (!surface.elements[gap.start_element].vertex && surface.elements[gap.start_element].source == vertex)
+            return gap.start;
+    return std::nullopt;
+}
+
+// The surface point paired with a Center point of the smooth centerline: on a shifted edge, the point of that edge at
+// the same parameter; at a vertex, the middle of its arc or bridge (of the piece covered, for a zero-length segment);
+// in the dead stretch of a concave corner, the crossing that makes it.
+static Point center_surface_point(const PreparedPerimeter &prepared, const PerimeterSegment &segment, const Point &point,
+                                  size_t edge)
+{
+    if (prepared.shift == 0)
+        return point;
+    const detail::SurfaceLine &surface = prepared.surface();
+    const Polygon &perimeter = prepared.polygon;
+    const size_t count = perimeter.size();
+    std::optional<size_t> vertex;
+    if (segment.edge_indices.empty())
+        vertex = segment.begin.edge_index;
+    else if (point == perimeter[edge])
+        vertex = edge;
+    else if (point == perimeter[(edge + 1) % count])
+        vertex = (edge + 1) % count;
+    if (vertex) {
+        const std::vector<size_t> chain = vertex_chain(surface, *vertex);
+        if (chain.empty())
+            return concave_crossing(surface, *vertex).value_or(point);
+        double from = 0.;
+        double to = chain_length(surface, chain);
+        if (segment.edge_indices.empty()) {
+            from = chain_position(surface, chain, segment.surface_first);
+            to = chain_position(surface, chain, segment.surface_last);
+        }
+        return chain_point(surface, chain, 0.5 * (from + to));
+    }
+    const Vec2d a = perimeter[edge].cast<double>();
+    const Vec2d ab = perimeter[(edge + 1) % count].cast<double>() - a;
+    const double t = std::clamp((point.cast<double>() - a).dot(ab) / ab.squaredNorm(), 0., 1.);
+    double highest = 0.;
+    for (size_t i = 0; i < surface.elements.size(); ++i) {
+        const detail::SurfaceElement &element = surface.elements[i];
+        if (element.vertex || element.source != edge)
+            continue;
+        highest = std::max(highest, element.end);
+        // Each part of a shifted edge maps linearly onto its range of the source edge.
+        if (t >= element.begin && t <= element.end && element.end > element.begin) {
+            const Vec2d from = surface.polygon[i].cast<double>();
+            const Vec2d at = from + (t - element.begin) / (element.end - element.begin) *
+                                        (surface.polygon[(i + 1) % surface.polygon.size()].cast<double>() - from);
+            return Point(coord_t(std::lround(at.x())), coord_t(std::lround(at.y())));
+        }
+    }
+    // A dead stretch, next to the vertex beyond the edge's surface or before it.
+    return concave_crossing(surface, t > highest ? (edge + 1) % count : edge).value_or(point);
+}
+
 // Finalize one joined strong segment; only Center needs temporary per-edge lengths.
-static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mode, bool compare_lengths)
+static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mode, bool compare_lengths,
+                                   const PreparedPerimeter &prepared)
 {
     const bool center = mode == ModelVolumeType::PRECISE_SEAM_CENTER;
     std::vector<double> edge_lengths;
@@ -690,12 +891,18 @@ static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mo
         }
     }
     if (mode == ModelVolumeType::PRECISE_SEAM_LEFT) {
-        segment.strong_target = StrongSeamTarget{segment.polyline.points.front(), segment.begin.edge_index};
+        segment.strong_target = StrongSeamTarget{segment.polyline.points.front(), segment.begin.edge_index, segment.surface_first};
         return;
     }
-    segment.strong_target = StrongSeamTarget{segment.polyline.points.back(), segment.end.edge_index};
+    segment.strong_target = StrongSeamTarget{segment.polyline.points.back(), segment.end.edge_index, segment.surface_last};
     if (!center)
         return;
+    // Only a point carried onto a noisy loop needs the pair of the middle.
+    const auto pair_center = [&segment, &prepared]() {
+        if (prepared.target != nullptr)
+            segment.strong_target->surface = center_surface_point(prepared, segment, segment.strong_target->point,
+                                                                  segment.strong_target->edge_index);
+    };
 
     // The total is now known; reuse local lengths to locate its half without new square roots.
     double remaining = segment.length * 0.5;
@@ -706,10 +913,12 @@ static void prepare_strong_segment(PerimeterSegment &segment, ModelVolumeType mo
             const Point &b = segment.polyline.points[i + 1];
             segment.strong_target = StrongSeamTarget{
                 a + ((remaining / length) * (b - a).cast<double>()).cast<coord_t>(), segment.edge_indices[i]};
+            pair_center();
             return;
         }
         remaining -= length;
     }
+    pair_center();
 }
 
 // Clipper returns a single point where a border only touches the line: nothing to bind.
@@ -777,7 +986,7 @@ static std::vector<detail::ClippedEdgeInterval> surface_intervals(const Prepared
         const CenterlinePoint first = to_centerline(interval.edge, interval.begin, interval.first);
         const CenterlinePoint last = to_centerline(interval.edge, interval.end, interval.last);
         // An arc gives a vertex point, a shifted edge the same interval on its source edge.
-        intervals.push_back({first.edge, first.parameter, last.parameter, first.point, last.point});
+        intervals.push_back({first.edge, first.parameter, last.parameter, first.point, last.point, interval.first, interval.last});
     }
 
     // A stretch counts as reached when coverage ends at its end point on the same element; the snapping
@@ -847,6 +1056,20 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
             if (interval.end > merged.back().end) {
                 merged.back().end = interval.end;
                 merged.back().last = interval.last;
+                merged.back().surface_last = interval.surface_last;
+            } else if (prepared.target != nullptr && interval.begin == interval.end && merged.back().begin == merged.back().end &&
+                       interval.surface_first && merged.back().surface_first) {
+                // Separate pieces of one arc make one vertex point, from the piece nearest the arc's start to the
+                // end of the farthest, whatever order sorting left them in.
+                const detail::SurfaceLine &surface = prepared.surface();
+                const std::vector<size_t> chain = vertex_chain(surface, interval.edge);
+                const auto at = [&](const std::optional<Point> &point) { return chain_position(surface, chain, *point); };
+                if (!chain.empty()) {
+                    if (at(interval.surface_first) < at(merged.back().surface_first))
+                        merged.back().surface_first = interval.surface_first;
+                    if (at(interval.surface_last) > at(merged.back().surface_last))
+                        merged.back().surface_last = interval.surface_last;
+                }
             }
         } else
             merged.push_back(interval);
@@ -868,20 +1091,25 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
                 PerimeterSegment segment;
                 segment.begin = segment.end = begin;
                 segment.polyline.points.push_back(interval.first);
+                segment.surface_first = interval.surface_first.value_or(interval.first);
+                segment.surface_last = interval.surface_last.value_or(interval.last);
                 result.segments.push_back(std::move(segment));
-            }
+            } else // The arc beyond the segment's last edge: its surface point pairs with the vertex the segment ends at.
+                result.segments.back().surface_last = interval.surface_last.value_or(interval.last);
             continue;
         }
         if (!continues) {
             PerimeterSegment segment;
             segment.begin = begin;
             segment.polyline.points.push_back(interval.first);
+            segment.surface_first = interval.surface_first.value_or(interval.first);
             result.segments.push_back(std::move(segment));
         }
         PerimeterSegment &segment = result.segments.back();
         segment.polyline.points.push_back(interval.last);
         segment.edge_indices.push_back(interval.edge);
         segment.end = end;
+        segment.surface_last = interval.surface_last.value_or(interval.last);
     }
     if (result.segments.size() > 1 && same_position(result.segments.back().end, result.segments.front().begin)) {
         // Only the artificial cut at vertex zero can join the last and first intervals.
@@ -891,6 +1119,7 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
         tail.polyline.points.insert(tail.polyline.points.end(), head.polyline.points.begin() + 1, head.polyline.points.end());
         tail.edge_indices.insert(tail.edge_indices.end(), head.edge_indices.begin(), head.edge_indices.end());
         tail.end = head.end;
+        tail.surface_last = head.surface_last;
         head = std::move(tail);
     }
     // A full loop must cover every original edge, not merely have equal endpoint coordinates. Vertex points
@@ -940,7 +1169,7 @@ SegmentExtraction extract_perimeter_segments(const PreparedPerimeter &prepared, 
     // Strong skips full containment and weak handles it by type; neither needs strong data for it.
     if (!result.full_containment && is_precise_seam_strong(mode))
         for (PerimeterSegment &segment : result.segments)
-            prepare_strong_segment(segment, mode, result.segments.size() > 1);
+            prepare_strong_segment(segment, mode, result.segments.size() > 1, prepared);
     return result;
 }
 
@@ -1103,6 +1332,25 @@ static void record_extraction(PreciseSeamWarnings *warnings, const ModelVolume *
         PreciseSeamWarnings::set(usage.reached);
 }
 
+// Carries a point found on the smooth loop onto the noisy loop it is inserted into, through the line to its surface
+// point. Counts the approximate outcomes, and logs a failure like a discarded fragment, which it then counts as.
+static detail::Transfer to_insertion(const PreparedPerimeter &prepared, const Point &point, const Point &surface,
+                                     const ExtractionContext &context)
+{
+    const detail::Transfer moved = detail::transfer_point(prepared.target_lines(), point, surface, double(prepared.window));
+    if (context.warnings != nullptr && moved.outcome == detail::TransferOutcome::Approximate)
+        context.warnings->approximate_transfers.fetch_add(1, std::memory_order_relaxed);
+    if (moved.outcome == detail::TransferOutcome::Failed) {
+        if (context.warnings != nullptr && context.modifier != nullptr)
+            PreciseSeamWarnings::mark(context.warnings->failed_types, context.modifier->type());
+        if (context.warnings == nullptr ||
+            context.warnings->failed_fragments.fetch_add(1, std::memory_order_relaxed) < failed_fragment_log_limit)
+            BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamTransferFailed] No point of the fuzzy skin loop near the seam point"
+                << detail::fragment_location(context, 0) << " window=" << prepared.window;
+    }
+    return moved;
+}
+
 // Strong priority is per modifier, never a global maximum across different modifiers.
 std::optional<Point> insert_strong_seam_point(
     const std::vector<const ModelVolume*> &strong_volumes,
@@ -1112,7 +1360,7 @@ std::optional<Point> insert_strong_seam_point(
     const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings)
 {
-    assert(&prepared.polygon == &polygon);
+    assert(&prepared.insertion() == &polygon);
     if (strong_volumes.empty() || layer == nullptr || !prepared.valid)
         return std::nullopt;
     const size_t layer_id = layer->id() - layer->object()->slicing_parameters().raft_layers();
@@ -1138,19 +1386,35 @@ std::optional<Point> insert_strong_seam_point(
         // Lengths are compared exactly: for a symmetric modifier the chosen face may alternate between
         // layers, which is accepted (the user gets the multiple-intersections warning).
         StrongSeamTarget target{Point(0, 0), 0};
+        // The winner's point on the smooth loop breaks ties, so the noise of a fuzzy skin loop never changes the winner.
+        Point chosen(0, 0);
         double longest = -1.;
+        const ExtractionContext context{layer, modifier, warnings};
         for (const PerimeterSegment &segment : extracted.segments) {
             assert(segment.strong_target.has_value());
             const StrongSeamTarget &candidate = *segment.strong_target;
             // Slice coordinates already include object rotation and retain bed axes.
             // Centering/instance translation cannot change rear (+Y), then left (-X) ordering.
-            const bool farther_or_left = candidate.point.y() > target.point.y() ||
-                (candidate.point.y() == target.point.y() && candidate.point.x() < target.point.x());
-            if (segment.length > longest || (segment.length == longest && farther_or_left)) {
-                longest = segment.length;
-                target = candidate;
+            const bool farther_or_left = candidate.point.y() > chosen.y() ||
+                (candidate.point.y() == chosen.y() && candidate.point.x() < chosen.x());
+            if (!(segment.length > longest || (segment.length == longest && farther_or_left)))
+                continue;
+            StrongSeamTarget inserted = candidate;
+            // Chosen on the smooth loop, inserted into the noisy one with fuzzy skin. A point that cannot be carried
+            // is a discarded fragment: its segment takes no part.
+            if (prepared.target != nullptr) {
+                const detail::Transfer moved = to_insertion(prepared, candidate.point, candidate.surface.value_or(candidate.point), context);
+                if (moved.outcome == detail::TransferOutcome::Failed)
+                    continue;
+                inserted = StrongSeamTarget{moved.position.point, moved.position.edge};
             }
+            longest = segment.length;
+            chosen = candidate.point;
+            target = inserted;
         }
+        // Every segment failed to be carried: the turn passes to the next modifier.
+        if (longest < 0.)
+            continue;
         const auto [seam_point, seam_index] = insert_point_into_perimeter(target.point, target.edge_index, polygon);
         // Preserve the insertion order: refining before first would shift the seam index.
         refine_at_vertex(seam_index, +1, polygon);
@@ -1347,10 +1611,54 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const ModifierRegionsCache &slices_cache,
     PreciseSeamWarnings* warnings)
 {
-    assert(&prepared.polygon == &polygon);
+    assert(&prepared.insertion() == &polygon);
     std::vector<WeakModifierSegment> result;
     if (weak_volumes.empty() || layer == nullptr || !prepared.valid)
         return result;
+    // With fuzzy skin the zones are found on the smooth loop and their boundaries carried onto the noisy one. Arc
+    // lengths along both, before any insertion, tell a zone whose boundaries came out in the reverse order.
+    std::vector<double> source_arc;
+    std::vector<double> target_arc;
+    const auto arcs_of = [](const Polygon &polygon, std::vector<double> &arcs) {
+        arcs.push_back(0.);
+        for (size_t edge = 0; edge < polygon.size(); ++edge)
+            arcs.push_back(arcs.back() + (polygon[(edge + 1) % polygon.size()] - polygon[edge]).cast<double>().norm());
+    };
+    const auto arc_at = [](const std::vector<double> &arcs, const PerimeterPosition &position) {
+        return arcs[position.edge_index] + position.parameter * (arcs[position.edge_index + 1] - arcs[position.edge_index]);
+    };
+    // The share of the loop from one position forward to another, across its start if need be.
+    const auto share = [&arc_at](const std::vector<double> &arcs, const PerimeterPosition &from, const PerimeterPosition &to) {
+        const double length = arc_at(arcs, to) - arc_at(arcs, from);
+        return (length >= 0. ? length : length + arcs.back()) / arcs.back();
+    };
+    // False when a boundary cannot be carried: the zone is then a discarded fragment.
+    const auto carry = [&](const PerimeterSegment &segment, WeakModifierSegment &zone, const ExtractionContext &context) {
+        if (target_arc.empty()) {
+            arcs_of(prepared.polygon, source_arc);
+            arcs_of(*prepared.target, target_arc);
+        }
+        const detail::Transfer left = to_insertion(prepared, segment.polyline.points.front(), segment.surface_first, context);
+        if (left.outcome == detail::TransferOutcome::Failed)
+            return false;
+        detail::Transfer right = to_insertion(prepared, segment.polyline.points.back(), segment.surface_last, context);
+        if (right.outcome == detail::TransferOutcome::Failed)
+            return false;
+        // The zone's share of the noisy loop differs from its share of the smooth one by more than half a loop when its
+        // boundaries came out in the reverse order: it is reduced to its left boundary, a declared degradation.
+        const PerimeterPosition left_position{left.position.edge, left.position.parameter};
+        const PerimeterPosition right_position{right.position.edge, right.position.parameter};
+        if (std::abs(share(target_arc, left_position, right_position) - share(source_arc, segment.begin, segment.end)) > 0.5) {
+            right = left;
+            if (context.warnings != nullptr)
+                context.warnings->reversed_zones.fetch_add(1, std::memory_order_relaxed);
+        }
+        zone.left_point = left.position.point;
+        zone.left_position = {left.position.edge, left.position.parameter};
+        zone.right_point = right.position.point;
+        zone.right_position = {right.position.edge, right.position.parameter};
+        return true;
+    };
 
     // Modifier cache indices exclude raft layers, unlike Layer::id().
     const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
@@ -1372,6 +1680,8 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         for (const PerimeterSegment &segment : extracted.segments) {
             result.push_back({type, segment.polyline.points.front(), segment.begin,
                                    segment.polyline.points.back(), segment.end, false, modifier_volume});
+            if (prepared.target != nullptr && !carry(segment, result.back(), context))
+                result.pop_back();
         }
     }
     // Boundary insertion, refinement and last-write-wins priority use the established path.

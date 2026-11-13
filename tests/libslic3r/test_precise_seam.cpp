@@ -9,6 +9,8 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/AABBTreeLines.hpp"
 #include "libslic3r/Line.hpp"
+#include <memory>
+#include "libslic3r/ExtrusionEntity.hpp"
 
 #include <algorithm>
 #include <initializer_list>
@@ -1756,4 +1758,180 @@ TEST_CASE("A shift changing in the middle of a long edge is sampled along it", "
     }
     for (size_t edge = 1; edge < 4; ++edge)
         CHECK(profile.interior[edge].empty());
+}
+
+namespace {
+// The edges of a noisy loop as Precise Seam indexes them.
+AABBTreeLines::LinesDistancer<Line> noisy_lines(const Polygon &noisy) { return AABBTreeLines::LinesDistancer<Line>(noisy.lines()); }
+
+// A point within a unit of `expected`.
+void check_point(const Point &point, const Point &expected)
+{
+    CAPTURE(point.x(), point.y(), expected.x(), expected.y());
+    CHECK((point - expected).cast<double>().norm() <= 1.5);
+}
+} // namespace
+
+TEST_CASE("A point moves onto the noisy edge that the line to its surface point crosses", "[PreciseSeam][Fuzzy]")
+{
+    // Smooth edge along y = 0; its surface point lies 0.195 mm towards air at y < 0. The noisy edge from (9, -0.1) to
+    // (11, 0.1) crosses x = 10 at (10, 0), halfway along.
+    const Polygon noisy(Points{mm(-0.1, -0.1), mm(9, -0.1), mm(11, 0.1), mm(20.1, -0.1), mm(20.1, 20.1), mm(-0.1, 20.1)});
+    const auto moved = PreciseSeam::detail::transfer_point(noisy_lines(noisy), mm(10, 0), mm(10, -0.195), scale_(0.4));
+    CHECK(moved.outcome == PreciseSeam::detail::TransferOutcome::Exact);
+    CHECK(moved.position.edge == 1);
+    CHECK_THAT(moved.position.parameter, Catch::Matchers::WithinAbs(0.5, 1e-9));
+    check_point(moved.position.point, mm(10, 0));
+}
+
+TEST_CASE("Of several crossings the one nearest to the point is taken", "[PreciseSeam][Fuzzy]")
+{
+    // A fold of the noisy loop: x = 10 crosses it at y = 0.3, 0.175 and -0.05.
+    const Polygon noisy(Points{mm(0, 0.3), mm(11, 0.3), mm(9, 0.05), mm(11, -0.15), mm(20, -0.15), mm(20, 20), mm(0, 20)});
+    const auto moved = PreciseSeam::detail::transfer_point(noisy_lines(noisy), mm(10, 0), mm(10, -0.195), scale_(0.4));
+    CHECK(moved.outcome == PreciseSeam::detail::TransferOutcome::Exact);
+    CHECK(moved.position.edge == 2);
+    check_point(moved.position.point, mm(10, -0.05));
+}
+
+TEST_CASE("At an acute corner the point stays on its own side of the noisy loop", "[PreciseSeam][Fuzzy]")
+{
+    // A 20 degree wedge from the origin: one side along y = 0, the other along (cos 20, sin 20). The noisy loop lies
+    // 0.1 mm outside both. Across the first side at x = 1 the line also crosses the other side's noise, 0.47 mm away.
+    const double angle = 20. * PI / 180.;
+    const Vec2d along(std::cos(angle), std::sin(angle));
+    const Vec2d outward(-std::sin(angle), std::cos(angle));
+    const auto other = [&](double distance) {
+        const Vec2d point = distance * along + 0.1 * outward;
+        return mm(point.x(), point.y());
+    };
+    const Polygon noisy(Points{mm(-0.29, -0.1), mm(0.5, -0.1), mm(1.5, -0.1), mm(5, -0.1), other(5), other(1.5), other(0.5)});
+    const auto moved = PreciseSeam::detail::transfer_point(noisy_lines(noisy), mm(1, 0), mm(1, -0.195), scale_(0.6));
+    CHECK(moved.outcome == PreciseSeam::detail::TransferOutcome::Exact);
+    CHECK(moved.position.edge == 1);
+    check_point(moved.position.point, mm(1, -0.1));
+}
+
+TEST_CASE("A transfer is exact, approximate or fails", "[PreciseSeam][Fuzzy]")
+{
+    using Outcome = PreciseSeam::detail::TransferOutcome;
+    // The noisy edge near the point runs from (8, -0.1) to (9.9, -0.1): x = 10 misses it.
+    const Polygon noisy(Points{mm(0, -0.1), mm(8, -0.1), mm(9.9, -0.1), mm(9.9, 20), mm(0, 20)});
+    const auto lines = noisy_lines(noisy);
+    // No crossing within the window: the nearest point of the loop, (9.9, 0) on the edge up from the corner.
+    const auto missed = PreciseSeam::detail::transfer_point(lines, mm(10, 0), mm(10, -0.195), scale_(0.4));
+    CHECK(missed.outcome == Outcome::Approximate);
+    CHECK(missed.position.edge == 2);
+    check_point(missed.position.point, mm(9.9, 0));
+    // A pair that coincides, as on the centerline path, has no line: the same nearest point.
+    const auto no_line = PreciseSeam::detail::transfer_point(lines, mm(10, 0), mm(10, 0), scale_(0.4));
+    CHECK(no_line.outcome == Outcome::Approximate);
+    CHECK(no_line.position.edge == 2);
+    check_point(no_line.position.point, mm(9.9, 0));
+    // Nothing within the window.
+    CHECK(PreciseSeam::detail::transfer_point(lines, mm(10, 0), mm(10, -0.195), scale_(0.05)).outcome == Outcome::Failed);
+    // An edge along the line gives its point nearest to the point: (9.9, 0) itself for a line along x = 9.9.
+    const auto collinear = PreciseSeam::detail::transfer_point(lines, mm(9.9, 0.05), mm(9.9, 0.2), scale_(0.4));
+    CHECK(collinear.outcome == Outcome::Exact);
+    CHECK(collinear.position.edge == 2);
+    check_point(collinear.position.point, mm(9.9, 0.05));
+}
+
+TEST_CASE("Segments keep the surface points their ends were carried from", "[PreciseSeam][Fuzzy]")
+{
+    const auto mode = GENERATE(ModelVolumeType::PRECISE_SEAM_LEFT, ModelVolumeType::PRECISE_SEAM_CENTER,
+                               ModelVolumeType::PRECISE_SEAM_RIGHT);
+    const Polygon square = rectangle(0, 0, 20, 20);
+    const auto extracted = surface_extraction(square, rectangle(4, -1, 6, 0.1), false, mode);
+    REQUIRE(extracted.segments.size() == 1);
+    const auto &segment = extracted.segments.front();
+    CHECK(segment.polyline.points.front() == mm(4, 0));
+    CHECK(segment.polyline.points.back() == mm(6, 0));
+    CHECK(segment.surface_first == Point(mm(4, 0).x(), -surface_distance));
+    CHECK(segment.surface_last == Point(mm(6, 0).x(), -surface_distance));
+    REQUIRE(segment.strong_target.has_value());
+    // Center's pair is worked out only for a point carried onto a noisy loop.
+    if (mode == ModelVolumeType::PRECISE_SEAM_CENTER)
+        CHECK_FALSE(segment.strong_target->surface.has_value());
+    else
+        CHECK(segment.strong_target->surface == (mode == ModelVolumeType::PRECISE_SEAM_LEFT ? segment.surface_first : segment.surface_last));
+    // On the centerline path the ends are their own pairs.
+    const auto centerline = surface_extraction(square, rectangle(4, -1, 6, 0.1), false, mode, 0);
+    REQUIRE(centerline.segments.size() == 1);
+    CHECK(centerline.segments.front().surface_first == mm(4, 0));
+    CHECK(centerline.segments.front().surface_last == mm(6, 0));
+}
+
+TEST_CASE("A piece of a convex corner's arc keeps both its ends", "[PreciseSeam][Fuzzy]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    // Around the arc point at -45 degrees from (20, 0): one vertex point, two different surface points on the arc.
+    const auto arc = surface_extraction(square, rectangle(20.11, -0.17, 20.17, -0.11), false, ModelVolumeType::PRECISE_SEAM_ENFORCED);
+    REQUIRE(arc.segments.size() == 1);
+    const auto &segment = arc.segments.front();
+    CHECK(segment.polyline.points == Points{mm(20, 0)});
+    CHECK(segment.surface_first != segment.surface_last);
+    // Both on the arc of radius 0.2 mm around the vertex, within the sagitta of its chords; the first one nearer the
+    // bottom edge, where the arc starts.
+    for (const Point &point : {segment.surface_first, segment.surface_last})
+        CHECK(std::abs((point - mm(20, 0)).cast<double>().norm() - double(surface_distance)) <= 41.);
+    CHECK(segment.surface_first.y() < segment.surface_last.y());
+}
+
+TEST_CASE("Center pairs with the middle of its edge, arc or concave crossing when carried", "[PreciseSeam][Fuzzy]")
+{
+    // Any usable noisy loop: only the pairs worked out for carrying are checked here.
+    const auto center = [](const Polygon &perimeter, const Polygon &region) {
+        PreciseSeam::PreparedPerimeter prepared(perimeter, surface_distance, false);
+        prepared.set_target(perimeter, coord_t(scale_(0.5)));
+        auto extracted = PreciseSeam::extract_perimeter_segments(prepared, PreciseSeam::prepare_modifier_regions({ExPolygon(region)}),
+                                                                 ModelVolumeType::PRECISE_SEAM_CENTER);
+        REQUIRE(extracted.segments.size() == 1);
+        REQUIRE(extracted.segments.front().strong_target.has_value());
+        REQUIRE(extracted.segments.front().strong_target->surface.has_value());
+        return *extracted.segments.front().strong_target;
+    };
+    const Polygon square = rectangle(0, 0, 20, 20);
+    const double half = double(surface_distance) / std::sqrt(2.);
+    // Inside an edge: the point of the shifted edge at the same parameter.
+    const auto edge = center(square, rectangle(4, -1, 6, 0.1));
+    CHECK(edge.point == mm(5, 0));
+    CHECK(*edge.surface == Point(mm(5, 0).x(), -surface_distance));
+    // At a vertex the segment passes: the middle of the whole arc, at -45 degrees.
+    const auto vertex = center(square, rectangle(19, -1, 21, 1));
+    CHECK(vertex.point == mm(20, 0));
+    CHECK((*vertex.surface - Point(mm(20, 0).x() + coord_t(half), -coord_t(half))).cast<double>().norm() <= 41.);
+    // A zero-length segment: the middle of its piece of arc, about -45 degrees too for this symmetric piece.
+    const auto piece = center(square, rectangle(20.11, -0.17, 20.17, -0.11));
+    CHECK(piece.point == mm(20, 0));
+    CHECK((*piece.surface - Point(mm(20, 0).x() + coord_t(half), -coord_t(half))).cast<double>().norm() <= 41.);
+    // In the dead stretch of the concave corner (10, 10) of the L, at its vertex and beside it: the crossing (10.2, 10.2).
+    const auto at_corner = center(l_shape(), rectangle(10.1, 10.1, 10.4, 10.4));
+    CHECK(at_corner.point == mm(10, 10));
+    check_point(*at_corner.surface, mm(10.2, 10.2));
+    const auto beside = center(l_shape(), rectangle(10.1, 10.1, 10.6, 10.4));
+    check_point(beside.point, mm(10.1, 10));
+    check_point(*beside.surface, mm(10.2, 10.2));
+}
+
+TEST_CASE("A loop keeps its untextured centerline when copied, reversed or turned", "[PreciseSeam][Fuzzy]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    ExtrusionPath path(erExternalPerimeter);
+    path.polyline = Polyline3(square.split_at_first_point());
+    ExtrusionLoop loop(std::move(path));
+    const auto untextured = std::make_shared<const Polygon>(square);
+    loop.untextured = untextured;
+    const ExtrusionLoop copy = loop;
+    CHECK(copy.untextured == untextured);
+    const std::unique_ptr<ExtrusionEntity> clone(loop.clone());
+    CHECK(static_cast<const ExtrusionLoop *>(clone.get())->untextured == untextured);
+    loop.reverse();
+    CHECK(loop.untextured == untextured);
+    loop.make_counter_clockwise();
+    CHECK(loop.untextured == untextured);
+    CHECK(loop.split_at_vertex(mm(20, 0)));
+    CHECK(loop.untextured == untextured);
+    // The geometry it holds is never changed through the loop.
+    CHECK(untextured->points == square.points);
 }

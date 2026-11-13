@@ -1,12 +1,15 @@
 #pragma once
 
 #include "PreciseSeam.hpp"
+#include "libslic3r/AABBTreeLines.hpp"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Line.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/libslic3r.h"
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 namespace Slic3r::PreciseSeam::detail {
@@ -18,6 +21,9 @@ struct ClippedEdgeInterval {
     double end;
     Point first;
     Point last;
+    // The points of the reconstructed surface that `first` and `last` were carried from, on the surface path.
+    std::optional<Point> surface_first;
+    std::optional<Point> surface_last;
 };
 
 // Source of one edge of the surface line: a source edge shifted towards air, or the arc (convex) or
@@ -71,6 +77,23 @@ struct CenterlinePoint {
 // `to` before `from` on one edge appends nothing.
 void cover_centerline(const Polygon &perimeter, CenterlinePoint from, const CenterlinePoint &to,
                       std::vector<ClippedEdgeInterval> &intervals);
+
+// How a point of the smooth centerline of a fuzzy skin loop was carried onto its noisy loop.
+enum class TransferOutcome {
+    Exact,       // The crossing of the line through the point and its surface point nearest to the point.
+    Approximate, // The pair coincides or the line crosses nothing within the window: the nearest point of the loop.
+    Failed,      // Nothing of the noisy loop within the window.
+};
+
+struct Transfer {
+    TransferOutcome outcome;
+    CenterlinePoint position; // On the noisy loop; unset when the transfer failed.
+};
+
+// Carries `point` onto the noisy loop whose edges `target` indexes (line i is edge i), within `window` of it. An edge
+// lying along the line gives its point nearest to `point`.
+Transfer transfer_point(const AABBTreeLines::LinesDistancer<Line> &target, const Point &point, const Point &surface,
+                        double window);
 
 struct FragmentBindingFailure {
     size_t pair_index = 0;
