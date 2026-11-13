@@ -560,8 +560,9 @@ exceeded, one summary marker reports the total.
   segments separated by gaps of a few units; their zones then cover nearly the
   whole perimeter instead of being treated as full containment.
 - **Concave corners not resolved exactly.** At a very sharp inner corner that
-  the slicer bevels, with variable Arachne widths or with artificially fine
-  relief, the surface line keeps its tails and bridges. A modifier boundary
+  the slicer bevels, with variable Arachne widths, with fuzzy skin whose points
+  are closer than the trim of a corner (`d * tan(turn / 2)`) or with
+  artificially fine relief, the surface line keeps its tails and bridges. A modifier boundary
   closer than `d` to such a corner can give an extra segment, the
   multiple-intersection warning and a position error of up to `d`; a modifier in
   the air closer than `d` to such a corner can act.
