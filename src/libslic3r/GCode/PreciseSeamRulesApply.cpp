@@ -470,15 +470,16 @@ void schedule_relay(RuleContext &context, const PrintObject &object, const Modif
                 const Layer &model_layer = *object.layers()[layer];
                 relay_strong_volumes(order, effective, layer, end, seniors);
                 std::vector<uint8_t> row(group.members.size(), 0);
-                for (const ProbePerimeter &perimeter : perimeters(model_layer)) {
+                for (const ProbePerimeter &perimeter : perimeters(model_layer, layer)) {
                     // Each run takes a fresh counterclockwise copy, as the main pass does, since a placed seam
                     // changes the polygon.
                     const auto places = [&](const std::vector<const ModelVolume*> &volumes) {
                         Polygon polygon = perimeter.polygon;
                         polygon.make_counter_clockwise();
                         // The same surface as the main pass, so a probe wins exactly where the modifier would.
-                        const PreparedPerimeter prepared(polygon, perimeter.surface_shift, perimeter.is_hole);
-                        return insert_strong_seam_point_by_rules(volumes, polygon, prepared, &model_layer, slices, nullptr, effective, true)
+                        std::optional<PreparedPerimeter> prepared;
+                        prepare_perimeter(prepared, polygon, perimeter.surface);
+                        return insert_strong_seam_point_by_rules(volumes, polygon, *prepared, &model_layer, slices, nullptr, effective, true)
                             .has_value();
                     };
                     // A perimeter that the seniors take is no win for any member.

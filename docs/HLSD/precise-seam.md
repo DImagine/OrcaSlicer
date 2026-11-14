@@ -298,6 +298,11 @@ print and is tested on its own.
   for nearly equidistant shapes and for many short or repeated boundaries. A
   magnet reaches a perimeter where it finds a point or, on a crossing, acts by
   its type; full containment gives it no warning. Relay groups take magnets as they are: a found point is a win.
+  With fuzzy skin the magnet, apex and tip points are found on the smooth
+  centerline and carried onto the noisy loop as points without a surface line
+  (its nearest point within the window). A magnet or crossing apex that cannot
+  be carried passes the turn, a Center tip falls back to the middle of its
+  crossing; crossings and weak zones are carried as in the Precise Seam drivers.
 - **Magnet apex.** Inside an angle the nearest point lies on a side, never at
   the tip: from a centre at distance d from the tip, on the bisector of an angle
   2α, a side is d·sin α away and the tip d. `apex` therefore starts from the
@@ -362,7 +367,8 @@ print and is tested on its own.
 - **Relay pre-pass.** Strong groups only: who wins depends on the geometry, so
   `schedule_relay()` runs before the main pass, group by group in block order. In parallel over
   the layers it takes the perimeters as the main pass extracts them, with the
-  same surface shift and side, and runs
+  same surface (`PerimeterSurface`: side, shift or measured profile, smooth
+  centerline of fuzzy skin, built by one function for both), and runs
   the strong driver on a fresh copy of each, first with the seniors, then on a
   free perimeter with each member alone until it wins. These probes are quiet:
   no log, no counters, no usage flags, so the real pass reports everything once.

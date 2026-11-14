@@ -117,6 +117,16 @@ struct ShiftProfile {
     bool empty() const { return vertices.empty(); }
 };
 
+// How Precise Seam sees one closed loop: its side, the shift to the model surface and, with fuzzy skin, its smooth
+// centerline. Built once per loop by the seam placer, for the main pass and the relay probes alike.
+struct PerimeterSurface {
+    bool hole = false;
+    coord_t shift = 0;
+    ShiftProfile profile; // The measured shift; empty when it is `shift` everywhere.
+    Polygon smooth;       // With fuzzy skin, the smooth centerline, counterclockwise; empty otherwise.
+    coord_t window = 0;   // How far the noisy loop may lie from `smooth`.
+};
+
 // Borrows the source polygon; use only until insertion/refinement changes that polygon.
 struct PreparedPerimeter {
     // The smooth centerline modifiers are evaluated on.
@@ -154,6 +164,10 @@ private:
     mutable std::unique_ptr<detail::SurfaceLine> m_surface;
     mutable std::unique_ptr<AABBTreeLines::LinesDistancer<Line>> m_target_lines;
 };
+
+// Builds in `out` the preparation of `polygon` (counterclockwise, the loop the seam goes into) for `surface`: on its
+// smooth centerline with fuzzy skin, else on `polygon` itself. Borrows both polygons.
+void prepare_perimeter(std::optional<PreparedPerimeter> &out, const Polygon &polygon, const PerimeterSurface &surface);
 
 // What measuring the shift along one perimeter needs. Lengths in mm.
 struct ShiftMeasurement {

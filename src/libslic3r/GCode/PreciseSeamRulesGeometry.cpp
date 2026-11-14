@@ -608,13 +608,39 @@ static void record_extraction(PreciseSeamWarnings *warnings, const ModelVolume *
         PreciseSeamWarnings::set(usage.reached);
 }
 
+// Inserts a point of the polygon the seam goes into and refines around it.
+static Point insert_and_refine(const Point &point, size_t edge, Polygon &polygon)
+{
+    const auto [seam_point, seam_index] = insert_point_into_perimeter(point, edge, polygon);
+    // Preserve the insertion order: refining before first would shift the seam index.
+    refine_at_vertex(seam_index, +1, polygon);
+    refine_at_vertex(seam_index, -1, polygon);
+    return seam_point;
+}
+
+// Inserts a point found on the smooth loop, carried onto the noisy one with fuzzy skin; a point without a surface line
+// goes to the nearest point of the noisy loop. Nullopt when it cannot be carried: the turn then passes on.
+static std::optional<Point> insert_seam_point(const PreparedPerimeter &prepared, Polygon &polygon, const Point &point,
+                                              size_t edge, const Point &surface, const ExtractionContext &context)
+{
+    Point at = point;
+    if (prepared.target != nullptr) {
+        const detail::Transfer moved = to_insertion(prepared, point, surface, context);
+        if (moved.outcome == detail::TransferOutcome::Failed)
+            return std::nullopt;
+        at = moved.position.point;
+        edge = moved.position.edge;
+    }
+    return insert_and_refine(at, edge, polygon);
+}
+
 std::optional<Point> insert_strong_seam_point_by_rules(const std::vector<const ModelVolume*> &strong_volumes, Polygon &polygon,
                                                        const PreparedPerimeter &prepared, const Layer *layer,
                                                        const ModifierRegionsCache &slices_cache, PreciseSeamWarnings *warnings,
                                                        const EffectiveModifiers &effective, bool quiet)
 {
     // Mirrors insert_strong_seam_point() in PreciseSeam.cpp: keep the shared steps in step.
-    assert(&prepared.polygon == &polygon);
+    assert(&prepared.insertion() == &polygon);
     // A probe records nothing: the usage flags and warning masks belong to the real pass.
     assert(!quiet || warnings == nullptr);
     if (strong_volumes.empty() || layer == nullptr || !prepared.valid)
@@ -629,27 +655,27 @@ std::optional<Point> insert_strong_seam_point_by_rules(const std::vector<const M
         if (it == slices_cache.end() || layer_id >= it->second.size())
             continue;
         const ModelVolumeType type = *active;
-        const SegmentExtraction extracted = extract_perimeter_segments(
-            prepared, it->second[layer_id], type, {layer, modifier, warnings, quiet});
+        const ExtractionContext context{layer, modifier, warnings, quiet};
+        const SegmentExtraction extracted = extract_perimeter_segments(prepared, it->second[layer_id], type, context);
         // A magnet that does not cross the perimeter puts the seam at the nearest point, whatever the type.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet_acts(extracted, *magnet)) {
             const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet, type, resolution_threshold(*layer));
             record_extraction(warnings, modifier, type, extracted, point.has_value());
             if (!point)
                 continue;
-            const auto [seam_point, seam_index] = insert_point_into_perimeter(point->point, point->position.edge_index, polygon);
-            refine_at_vertex(seam_index, +1, polygon);
-            refine_at_vertex(seam_index, -1, polygon);
-            return seam_point;
+            if (const std::optional<Point> seam_point = insert_seam_point(prepared, polygon, point->point, point->position.edge_index,
+                                                                          point->point, context))
+                return seam_point;
+            continue;
         }
         record_extraction(warnings, modifier, type, extracted);
         // apex: two or more crossings put the seam at the tip of the corner between them.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier); magnet != nullptr && magnet->magnet_apex)
             if (const std::optional<MagnetPoint> tip = find_crossing_apex(prepared, it->second[layer_id], extracted, resolution_threshold(*layer))) {
-                const auto [seam_point, seam_index] = insert_point_into_perimeter(tip->point, tip->position.edge_index, polygon);
-                refine_at_vertex(seam_index, +1, polygon);
-                refine_at_vertex(seam_index, -1, polygon);
-                return seam_point;
+                if (const std::optional<Point> seam_point = insert_seam_point(prepared, polygon, tip->point, tip->position.edge_index,
+                                                                              tip->point, context))
+                    return seam_point;
+                continue;
             }
         // Full containment leaves no intersection to place the point on: skipped with a warning.
         if (extracted.full_containment) {
@@ -665,27 +691,42 @@ std::optional<Point> insert_strong_seam_point_by_rules(const std::vector<const M
 
         // Lengths are compared exactly: for a symmetric modifier the chosen face may alternate between
         // layers, which is accepted (the user gets the multiple-intersections warning).
+        // The winner is chosen on the smooth loop; with fuzzy skin a segment whose point cannot be carried takes no part.
         StrongSeamTarget target{Point(0, 0), 0};
+        // The winner's point and edge in the polygon the seam goes into.
+        StrongSeamTarget inserted = target;
         const PerimeterSegment *chosen = nullptr;
         double longest = -1.;
         for (const PerimeterSegment &segment : extracted.segments) {
             assert(segment.strong_target.has_value());
             const StrongSeamTarget &candidate = *segment.strong_target;
-            const bool farther_or_left = rear_then_left(candidate.point, target.point);
-            if (segment.length > longest || (segment.length == longest && farther_or_left)) {
-                longest = segment.length;
-                target = candidate;
-                chosen = &segment;
+            if (!(segment.length > longest || (segment.length == longest && rear_then_left(candidate.point, target.point))))
+                continue;
+            StrongSeamTarget carried = candidate;
+            if (prepared.target != nullptr) {
+                const detail::Transfer moved = to_insertion(prepared, candidate.point, candidate.surface.value_or(candidate.point), context);
+                if (moved.outcome == detail::TransferOutcome::Failed)
+                    continue;
+                carried = StrongSeamTarget{moved.position.point, moved.position.edge};
             }
+            longest = segment.length;
+            target = candidate;
+            inserted = carried;
+            chosen = &segment;
         }
-        // apex: from the middle of the chosen crossing to the tip of its corner.
-        if (const EffectiveModifier *apex = apex_of(effective, modifier); apex != nullptr && type == ModelVolumeType::PRECISE_SEAM_CENTER)
-            target = find_segment_apex(prepared, *chosen, target, apex_threshold(*apex, *layer));
-        const auto [seam_point, seam_index] = insert_point_into_perimeter(target.point, target.edge_index, polygon);
-        // Preserve the insertion order: refining before first would shift the seam index.
-        refine_at_vertex(seam_index, +1, polygon);
-        refine_at_vertex(seam_index, -1, polygon);
-        return seam_point; // No later strong modifier or weak processing for this perimeter.
+        // Every segment failed to be carried: the turn passes to the next modifier.
+        if (chosen == nullptr)
+            continue;
+        // apex: from the middle of the chosen crossing to the tip of its corner; the middle itself if the tip cannot
+        // be carried.
+        if (const EffectiveModifier *apex = apex_of(effective, modifier); apex != nullptr && type == ModelVolumeType::PRECISE_SEAM_CENTER) {
+            const StrongSeamTarget tip = find_segment_apex(prepared, *chosen, target, apex_threshold(*apex, *layer));
+            if (tip.point != target.point)
+                if (const std::optional<Point> seam_point = insert_seam_point(prepared, polygon, tip.point, tip.edge_index,
+                                                                              tip.surface.value_or(tip.point), context))
+                    return seam_point;
+        }
+        return insert_and_refine(inserted.point, inserted.edge_index, polygon); // No later strong modifier or weak processing.
     }
     return std::nullopt;
 }
@@ -696,10 +737,25 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments_by_rules(const s
                                                                          PreciseSeamWarnings *warnings, const EffectiveModifiers &effective)
 {
     // Mirrors collect_weak_modifier_segments() in PreciseSeam.cpp: keep the shared steps in step.
-    assert(&prepared.polygon == &polygon);
+    assert(&prepared.insertion() == &polygon);
     std::vector<WeakModifierSegment> result;
     if (weak_volumes.empty() || layer == nullptr || !prepared.valid)
         return result;
+    // With fuzzy skin the zones are found on the smooth loop and their boundaries carried onto the noisy one.
+    std::vector<double> source_arc;
+    // A zone of one point, carried as a point without a surface line; dropped when it cannot be carried.
+    const auto push_point = [&](SeamPlacerImpl::EnforcedBlockedSeamPoint type, const MagnetPoint &point, const ModelVolume *modifier,
+                                const ExtractionContext &context) {
+        if (prepared.target == nullptr) {
+            result.push_back({type, point.point, point.position, point.point, point.position, false, modifier});
+            return;
+        }
+        const detail::Transfer moved = to_insertion(prepared, point.point, point.point, context);
+        if (moved.outcome == detail::TransferOutcome::Failed)
+            return;
+        const PerimeterPosition position{moved.position.edge, moved.position.parameter};
+        result.push_back({type, moved.position.point, position, moved.position.point, position, false, modifier});
+    };
 
     // Modifier cache indices exclude raft layers, unlike Layer::id().
     const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
@@ -720,14 +776,14 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments_by_rules(const s
             const std::optional<MagnetPoint> point = acting_magnet_point(prepared, it->second[layer_id], extracted, *magnet, volume_type, resolution_threshold(*layer));
             record_extraction(warnings, modifier_volume, volume_type, extracted, point.has_value());
             if (point)
-                result.push_back({type, point->point, point->position, point->point, point->position, false, modifier_volume});
+                push_point(type, *point, modifier_volume, context);
             continue;
         }
         record_extraction(warnings, modifier_volume, volume_type, extracted);
         // apex: two or more crossings type the tip of the corner between them only.
         if (const EffectiveModifier *magnet = magnet_of(effective, modifier_volume); magnet != nullptr && magnet->magnet_apex)
             if (const std::optional<MagnetPoint> tip = find_crossing_apex(prepared, it->second[layer_id], extracted, resolution_threshold(*layer))) {
-                result.push_back({type, tip->point, tip->position, tip->point, tip->position, false, modifier_volume});
+                push_point(type, *tip, modifier_volume, context);
                 continue;
             }
         // Full containment works like seam painting all round: the whole perimeter takes the type.
@@ -739,6 +795,8 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments_by_rules(const s
         for (const PerimeterSegment &segment : extracted.segments) {
             result.push_back({type, segment.polyline.points.front(), segment.begin,
                                    segment.polyline.points.back(), segment.end, false, modifier_volume});
+            if (prepared.target != nullptr && !carry_weak_zone(prepared, segment, result.back(), context, source_arc))
+                result.pop_back();
         }
     }
     // Boundary insertion, refinement and last-write-wins priority use the established path.

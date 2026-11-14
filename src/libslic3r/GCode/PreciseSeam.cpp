@@ -170,6 +170,19 @@ ShiftProfile measure_shift_profile(const Polygon &perimeter, bool hole, const Sh
     return profile;
 }
 
+void prepare_perimeter(std::optional<PreparedPerimeter> &out, const Polygon &polygon, const PerimeterSurface &surface)
+{
+    const bool fuzzy = surface.smooth.size() >= 3;
+    const Polygon &source = fuzzy ? surface.smooth : polygon;
+    // Built in place: the preparation borrows the polygons and is neither copied nor moved.
+    if (surface.profile.empty())
+        out.emplace(source, surface.shift, surface.hole);
+    else
+        out.emplace(source, surface.profile, surface.hole);
+    if (fuzzy)
+        out->set_target(polygon, surface.window);
+}
+
 PreparedPerimeter::PreparedPerimeter(const Polygon &perimeter, ShiftProfile shift_profile, bool is_hole)
     : PreparedPerimeter(perimeter, coord_t(0), is_hole)
 {
@@ -1353,8 +1366,8 @@ static void record_extraction(PreciseSeamWarnings *warnings, const ModelVolume *
 
 // Carries a point found on the smooth loop onto the noisy loop it is inserted into, through the line to its surface
 // point. Counts the approximate outcomes, and logs a failure like a discarded fragment, which it then counts as.
-static detail::Transfer to_insertion(const PreparedPerimeter &prepared, const Point &point, const Point &surface,
-                                     const ExtractionContext &context)
+detail::Transfer to_insertion(const PreparedPerimeter &prepared, const Point &point, const Point &surface,
+                              const ExtractionContext &context)
 {
     const detail::Transfer moved = detail::transfer_point(prepared.target_lines(), point, surface, double(prepared.window));
     if (context.warnings != nullptr && moved.outcome == detail::TransferOutcome::Approximate)
@@ -1362,8 +1375,8 @@ static detail::Transfer to_insertion(const PreparedPerimeter &prepared, const Po
     if (moved.outcome == detail::TransferOutcome::Failed) {
         if (context.warnings != nullptr && context.modifier != nullptr)
             PreciseSeamWarnings::mark(context.warnings->failed_types, context.modifier->type());
-        if (context.warnings == nullptr ||
-            context.warnings->failed_fragments.fetch_add(1, std::memory_order_relaxed) < failed_fragment_log_limit)
+        if (!context.quiet && (context.warnings == nullptr ||
+            context.warnings->failed_fragments.fetch_add(1, std::memory_order_relaxed) < failed_fragment_log_limit))
             BOOST_LOG_TRIVIAL(warning) << "[PreciseSeamTransferFailed] No point of the fuzzy skin loop near the seam point"
                 << detail::fragment_location(context, 0) << " window=" << prepared.window;
     }
@@ -1621,22 +1634,13 @@ std::vector<WeakModifierSegment> prepare_weak_modifier_segments(
     return result;
 }
 
-// Collect every modifier's ready segments before insertions can shift source edge indices.
-std::vector<WeakModifierSegment> collect_weak_modifier_segments(
-    const std::vector<const ModelVolume*> &weak_volumes,
-    Polygon &polygon,
-    const PreparedPerimeter &prepared,
-    const Layer *layer,
-    const ModifierRegionsCache &slices_cache,
-    PreciseSeamWarnings* warnings)
+// Carries a weak zone found on the smooth loop of a fuzzy skin perimeter onto its noisy loop. `source_arc` caches the
+// arc lengths of the smooth loop for the zones of one perimeter. False when a boundary cannot be carried: the zone is
+// then a discarded fragment.
+bool carry_weak_zone(const PreparedPerimeter &prepared, const PerimeterSegment &segment, WeakModifierSegment &zone,
+                     const ExtractionContext &context, std::vector<double> &source_arc)
 {
-    assert(&prepared.insertion() == &polygon);
-    std::vector<WeakModifierSegment> result;
-    if (weak_volumes.empty() || layer == nullptr || !prepared.valid)
-        return result;
-    // With fuzzy skin the zones are found on the smooth loop and their boundaries carried onto the noisy one; before
-    // any insertion, a policy tells some zones whose boundaries came out in the reverse order.
-    std::vector<double> source_arc;
+    // Before any insertion, a policy tells some zones whose boundaries came out in the reverse order.
     const auto arc_at = [&source_arc](const PerimeterPosition &position) {
         return source_arc[position.edge_index] +
                position.parameter * (source_arc[position.edge_index + 1] - source_arc[position.edge_index]);
@@ -1714,32 +1718,46 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
             return decide(right, left, segment.polyline.points.back(), rest + window);
         return false;
     };
-    // False when a boundary cannot be carried: the zone is then a discarded fragment.
-    const auto carry = [&](const PerimeterSegment &segment, WeakModifierSegment &zone, const ExtractionContext &context) {
-        if (source_arc.empty()) {
-            source_arc.push_back(0.);
-            const Polygon &smooth = prepared.polygon;
-            for (size_t edge = 0; edge < smooth.size(); ++edge)
-                source_arc.push_back(source_arc.back() + (smooth[(edge + 1) % smooth.size()] - smooth[edge]).cast<double>().norm());
-        }
-        const detail::Transfer left = to_insertion(prepared, segment.polyline.points.front(), segment.surface_first, context);
-        if (left.outcome == detail::TransferOutcome::Failed)
-            return false;
-        detail::Transfer right = to_insertion(prepared, segment.polyline.points.back(), segment.surface_last, context);
-        if (right.outcome == detail::TransferOutcome::Failed)
-            return false;
-        // A zone whose boundaries came out in the reverse order is reduced to its left boundary, a declared degradation.
-        if (reversed(segment, left.position, right.position)) {
-            right = left;
-            if (context.warnings != nullptr)
-                context.warnings->reversed_zones.fetch_add(1, std::memory_order_relaxed);
-        }
-        zone.left_point = left.position.point;
-        zone.left_position = {left.position.edge, left.position.parameter};
-        zone.right_point = right.position.point;
-        zone.right_position = {right.position.edge, right.position.parameter};
-        return true;
-    };
+    if (source_arc.empty()) {
+        source_arc.push_back(0.);
+        const Polygon &smooth = prepared.polygon;
+        for (size_t edge = 0; edge < smooth.size(); ++edge)
+            source_arc.push_back(source_arc.back() + (smooth[(edge + 1) % smooth.size()] - smooth[edge]).cast<double>().norm());
+    }
+    const detail::Transfer left = to_insertion(prepared, segment.polyline.points.front(), segment.surface_first, context);
+    if (left.outcome == detail::TransferOutcome::Failed)
+        return false;
+    detail::Transfer right = to_insertion(prepared, segment.polyline.points.back(), segment.surface_last, context);
+    if (right.outcome == detail::TransferOutcome::Failed)
+        return false;
+    // A zone whose boundaries came out in the reverse order is reduced to its left boundary, a declared degradation.
+    if (reversed(segment, left.position, right.position)) {
+        right = left;
+        if (context.warnings != nullptr)
+            context.warnings->reversed_zones.fetch_add(1, std::memory_order_relaxed);
+    }
+    zone.left_point = left.position.point;
+    zone.left_position = {left.position.edge, left.position.parameter};
+    zone.right_point = right.position.point;
+    zone.right_position = {right.position.edge, right.position.parameter};
+    return true;
+}
+
+// Collect every modifier's ready segments before insertions can shift source edge indices.
+std::vector<WeakModifierSegment> collect_weak_modifier_segments(
+    const std::vector<const ModelVolume*> &weak_volumes,
+    Polygon &polygon,
+    const PreparedPerimeter &prepared,
+    const Layer *layer,
+    const ModifierRegionsCache &slices_cache,
+    PreciseSeamWarnings* warnings)
+{
+    assert(&prepared.insertion() == &polygon);
+    std::vector<WeakModifierSegment> result;
+    if (weak_volumes.empty() || layer == nullptr || !prepared.valid)
+        return result;
+    // With fuzzy skin the zones are found on the smooth loop and their boundaries carried onto the noisy one.
+    std::vector<double> source_arc;
 
     // Modifier cache indices exclude raft layers, unlike Layer::id().
     const size_t raft_layers = layer->object()->slicing_parameters().raft_layers();
@@ -1761,7 +1779,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         for (const PerimeterSegment &segment : extracted.segments) {
             result.push_back({type, segment.polyline.points.front(), segment.begin,
                                    segment.polyline.points.back(), segment.end, false, modifier_volume});
-            if (prepared.target != nullptr && !carry(segment, result.back(), context))
+            if (prepared.target != nullptr && !carry_weak_zone(prepared, segment, result.back(), context, source_arc))
                 result.pop_back();
         }
     }

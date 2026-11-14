@@ -713,6 +713,44 @@ PreciseSeam::ShiftProfile measured_shift_profile(const Polygon &polygon, bool ho
   return PreciseSeam::measure_shift_profile(polygon, hole, shift_measurement);
 }
 
+// How Precise Seam sees one closed loop `polygon` (normalized, counterclockwise) of `region`; `untextured` is its
+// centerline before fuzzy skin, where the noise changed it.
+PreciseSeam::PerimeterSurface perimeter_surface(const Polygon &polygon, const Polygon *untextured, const LayerRegion *region,
+                                                bool hole, const LayerShiftMeasurement *shift_measurement,
+                                                const GlobalModelInfo &global_model_info) {
+  PreciseSeam::PerimeterSurface surface;
+  surface.hole = hole;
+  // Modifiers act where they cross the model surface the user sees: the centerline lies half a line width
+  // inside the printed wall, which XY compensation moved away from the model.
+  double compensation = hole ? global_model_info.precise_seam_hole_compensation
+                             : global_model_info.precise_seam_contour_compensation;
+  // With several regions on a layer slicing never shrinks a hole: it clips the regions by the compensated
+  // islands, and clipping cannot add material. A negative hole setting then has no effect.
+  if (hole && compensation > 0. && region->layer()->regions().size() > 1)
+    compensation = 0.;
+  surface.shift = PreciseSeam::surface_shift(region->flow(FlowRole::frExternalPerimeter).width(), compensation);
+  // With fuzzy skin, modifiers are evaluated on the smooth centerline and the result is carried onto the noisy
+  // loop. Normalized as the loop is: no repeated points, counterclockwise.
+  if (untextured != nullptr) {
+    Polygon &smooth = surface.smooth;
+    smooth = *untextured;
+    smooth.points.erase(std::unique(smooth.points.begin(), smooth.points.end()), smooth.points.end());
+    while (smooth.size() > 1 && smooth.points.front() == smooth.points.back())
+      smooth.points.pop_back();
+    smooth.make_counter_clockwise();
+    if (smooth.size() < 3)
+      smooth.clear();
+  }
+  const bool fuzzy = !surface.smooth.empty();
+  // Where the centerline is not at its nominal depth, the shift is measured against the layer outline.
+  if (shift_measurement != nullptr) {
+    surface.profile = measured_shift_profile(fuzzy ? surface.smooth : polygon, hole, compensation, region,
+                                             *shift_measurement, global_model_info, fuzzy);
+    surface.window = shift_measurement->fuzzy_window;
+  }
+  return surface;
+}
+
 // Painted range of a loop along its length from its first vertex; `end` exceeds the loop length if the range
 // passes the first vertex.
 struct PaintedInterval {
@@ -865,42 +903,12 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
   std::vector<PreciseSeam::WeakModifierSegment> weak_segments;
   // Closed loops only: the G-code of an open extrusion (thin wall) does not depend on where its seam is.
   if (layer != nullptr && boundary_hole.has_value() && (!strong_volumes.empty() || !weak_volumes.empty())) {
-    // Modifiers act where they cross the model surface the user sees: the centerline lies half a line width
-    // inside the printed wall, which XY compensation moved away from the model.
-    const bool hole = *boundary_hole;
-    double compensation = hole ? global_model_info.precise_seam_hole_compensation
-                               : global_model_info.precise_seam_contour_compensation;
-    // With several regions on a layer slicing never shrinks a hole: it clips the regions by the compensated
-    // islands, and clipping cannot add material. A negative hole setting then has no effect.
-    if (hole && compensation > 0. && layer->regions().size() > 1)
-      compensation = 0.;
-    const coord_t shift = PreciseSeam::surface_shift(region->flow(FlowRole::frExternalPerimeter).width(), compensation);
-    // With fuzzy skin, modifiers are evaluated on the smooth centerline and the result is carried onto the noisy
-    // loop. Normalized as the loop is: no repeated points, counterclockwise.
-    Polygon smooth;
-    if (untextured != nullptr) {
-      smooth = *untextured;
-      smooth.points.erase(std::unique(smooth.points.begin(), smooth.points.end()), smooth.points.end());
-      while (smooth.size() > 1 && smooth.points.front() == smooth.points.back())
-        smooth.points.pop_back();
-      smooth.make_counter_clockwise();
-    }
-    const bool fuzzy = smooth.size() >= 3;
-    const Polygon &source = fuzzy ? smooth : polygon;
-    // Where the centerline is not at its nominal depth, the shift is measured against the layer outline.
-    PreciseSeam::ShiftProfile profile;
-    if (shift_measurement != nullptr)
-      profile = measured_shift_profile(source, hole, compensation, region, *shift_measurement, global_model_info, fuzzy);
+    const PreciseSeam::PerimeterSurface surface =
+        perimeter_surface(polygon, untextured, region, *boundary_hole, shift_measurement, global_model_info);
     // Share validation, bounds and clipping line across all modifiers while the polygon is unchanged.
     // A strong insertion ends processing; otherwise weak reads the same preparation before inserting.
-    // Built in place: the preparation borrows the polygons and is neither copied nor moved.
     std::optional<PreciseSeam::PreparedPerimeter> preparation;
-    if (profile.empty())
-      preparation.emplace(source, shift, hole);
-    else
-      preparation.emplace(source, std::move(profile), hole);
-    if (fuzzy)
-      preparation->set_target(polygon, shift_measurement != nullptr ? shift_measurement->fuzzy_window : 0);
+    PreciseSeam::prepare_perimeter(preparation, polygon, surface);
     const PreciseSeam::PreparedPerimeter &prepared = *preparation;
     // An object with layer rules takes the drivers for rules; any other keeps the Precise Seam drivers.
     if (const auto &rules = global_model_info.precise_seam_rules) {
@@ -2399,24 +2407,24 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       // Relay: who holds the turn of each group on each layer, from the same perimeters as the main pass.
       if (global_model_info.precise_seam_rules)
           PreciseSeam::schedule_relay(*global_model_info.precise_seam_rules, *po, global_model_info.precise_seam_slices,
-              [&global_model_info](const Layer &layer) {
+              [po, &global_model_info](const Layer &layer, size_t layer_idx) {
                   std::vector<const LayerRegion*> regions;
                   // Boundary types tell holes from contours, as in the main pass.
                   std::vector<std::optional<bool>> boundary_types;
+                  std::vector<const Polygon*> untextured;
                   // An object with relay groups has strong modifiers, so the main pass normalizes too.
-                  Polygons polygons = extract_perimeter_polygons(&layer, regions, boundary_types, true);
-                  // Without a region the main pass leaves Precise Seam out, as for the placeholder of a layer
-                  // without perimeters.
+                  Polygons polygons = extract_perimeter_polygons(&layer, regions, boundary_types, untextured, true);
+                  const LayerShiftMeasurement shift_measurement = layer_shift_measurement(po, layer_idx, global_model_info);
+                  // The main pass leaves Precise Seam out without a region, as for the placeholder of a layer without
+                  // perimeters, and for open extrusions.
                   std::vector<PreciseSeam::ProbePerimeter> out;
                   for (size_t i = 0; i < polygons.size(); ++i)
-                      if (regions[i] != nullptr && !polygons[i].empty()) {
-                          // Side and surface shift exactly as process_perimeter_polygon() derives them.
-                          const bool   hole         = boundary_types[i].value_or(polygons[i].is_clockwise());
-                          const double compensation = hole ? global_model_info.precise_seam_hole_compensation
-                                                           : global_model_info.precise_seam_contour_compensation;
-                          const coord_t shift = PreciseSeam::surface_shift(
-                              regions[i]->flow(FlowRole::frExternalPerimeter).width(), compensation);
-                          out.push_back({std::move(polygons[i]), shift, hole});
+                      if (regions[i] != nullptr && boundary_types[i].has_value() && !polygons[i].empty()) {
+                          Polygon polygon = std::move(polygons[i]);
+                          polygon.make_counter_clockwise();
+                          PreciseSeam::PerimeterSurface surface = perimeter_surface(
+                              polygon, untextured[i], regions[i], *boundary_types[i], &shift_measurement, global_model_info);
+                          out.push_back({std::move(polygon), std::move(surface)});
                       }
                   return out;
               },

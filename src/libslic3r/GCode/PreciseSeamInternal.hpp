@@ -139,5 +139,12 @@ void refine_at_vertex(size_t point_idx, int direction, Polygon &perimeter_polygo
 SeamPlacerImpl::EnforcedBlockedSeamPoint convert_weak_modifier_type(ModelVolumeType type);
 // Inserts the boundaries of weak zones into the perimeter, in modifier priority order.
 std::vector<WeakModifierSegment> prepare_weak_modifier_segments(std::vector<WeakModifierSegment> result, Polygon &polygon);
+// Carries a point of the smooth loop onto the noisy loop of a fuzzy skin perimeter through the line to its surface
+// point; a failure counts as a discarded fragment.
+detail::Transfer to_insertion(const PreparedPerimeter &prepared, const Point &point, const Point &surface,
+                              const ExtractionContext &context);
+// Carries the boundaries of a weak zone onto that noisy loop; false when one cannot be carried.
+bool carry_weak_zone(const PreparedPerimeter &prepared, const PerimeterSegment &segment, WeakModifierSegment &zone,
+                     const ExtractionContext &context, std::vector<double> &source_arc);
 
 } // namespace Slic3r::PreciseSeam
