@@ -821,9 +821,24 @@ static std::optional<Point> concave_crossing(const detail::SurfaceLine &surface,
     return std::nullopt;
 }
 
+// Where the shifted edge leaving a vertex starts: the surface point of a vertex without an arc or bridge (collinear
+// edges or no shift there), with the shift profile at the vertex.
+static std::optional<Point> edge_start(const detail::SurfaceLine &surface, size_t vertex)
+{
+    std::optional<size_t> first;
+    for (size_t i = 0; i < surface.elements.size(); ++i)
+        if (!surface.elements[i].vertex && surface.elements[i].source == vertex &&
+            (!first || surface.elements[i].begin < surface.elements[*first].begin))
+            first = i;
+    if (!first)
+        return std::nullopt;
+    return surface.polygon[*first];
+}
+
 // The surface point paired with a Center point of the smooth centerline: on a shifted edge, the point of that edge at
-// the same parameter; at a vertex, the middle of its arc or bridge (of the piece covered, for a zero-length segment);
-// in the dead stretch of a concave corner, the crossing that makes it.
+// the same parameter; at a vertex, the middle of its arc or bridge (of the piece covered, for a zero-length segment),
+// or where its shifted edges meet when it has neither; in the dead stretch of a concave corner, the crossing that
+// makes it.
 static Point center_surface_point(const PreparedPerimeter &prepared, const PerimeterSegment &segment, const Point &point,
                                   size_t edge)
 {
@@ -841,8 +856,12 @@ static Point center_surface_point(const PreparedPerimeter &prepared, const Perim
         vertex = (edge + 1) % count;
     if (vertex) {
         const std::vector<size_t> chain = vertex_chain(surface, *vertex);
-        if (chain.empty())
-            return concave_crossing(surface, *vertex).value_or(point);
+        if (chain.empty()) {
+            if (const std::optional<Point> crossing = concave_crossing(surface, *vertex))
+                return *crossing;
+            // The shifted edges meet at one point; it is the vertex itself only where the shift there is zero.
+            return edge_start(surface, *vertex).value_or(point);
+        }
         double from = 0.;
         double to = chain_length(surface, chain);
         if (segment.edge_indices.empty()) {
@@ -1627,10 +1646,25 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     const auto arc_at = [](const std::vector<double> &arcs, const PerimeterPosition &position) {
         return arcs[position.edge_index] + position.parameter * (arcs[position.edge_index + 1] - arcs[position.edge_index]);
     };
-    // The share of the loop from one position forward to another, across its start if need be.
-    const auto share = [&arc_at](const std::vector<double> &arcs, const PerimeterPosition &from, const PerimeterPosition &to) {
+    // The length of the loop from one position forward to another, across its start if need be.
+    const auto forward = [&arc_at](const std::vector<double> &arcs, const PerimeterPosition &from, const PerimeterPosition &to) {
         const double length = arc_at(arcs, to) - arc_at(arcs, from);
-        return (length >= 0. ? length : length + arcs.back()) / arcs.back();
+        return length >= 0. ? length : length + arcs.back();
+    };
+    // Each boundary lands within the window of its smooth point and the noise keeps the order along the loop, so the
+    // boundaries can only swap where they lie close together: across a short zone, or across the short rest of the
+    // loop outside an almost whole one. Longer on both sides, the order holds.
+    const double close = 4. * double(prepared.window);
+    const auto reversed = [&](const PerimeterSegment &segment, const PerimeterPosition &left, const PerimeterPosition &right) {
+        const double zone = forward(source_arc, segment.begin, segment.end);
+        const double ahead = forward(target_arc, left, right);
+        const double behind = target_arc.back() - ahead;
+        // A loop comparable with the window has both sides short; the zone's rule applies (a stated limitation).
+        if (zone < close)
+            return ahead > behind;
+        if (source_arc.back() - zone < close)
+            return ahead < behind;
+        return false;
     };
     // False when a boundary cannot be carried: the zone is then a discarded fragment.
     const auto carry = [&](const PerimeterSegment &segment, WeakModifierSegment &zone, const ExtractionContext &context) {
@@ -1644,11 +1678,10 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         detail::Transfer right = to_insertion(prepared, segment.polyline.points.back(), segment.surface_last, context);
         if (right.outcome == detail::TransferOutcome::Failed)
             return false;
-        // The zone's share of the noisy loop differs from its share of the smooth one by more than half a loop when its
-        // boundaries came out in the reverse order: it is reduced to its left boundary, a declared degradation.
+        // A zone whose boundaries came out in the reverse order is reduced to its left boundary, a declared degradation.
         const PerimeterPosition left_position{left.position.edge, left.position.parameter};
         const PerimeterPosition right_position{right.position.edge, right.position.parameter};
-        if (std::abs(share(target_arc, left_position, right_position) - share(source_arc, segment.begin, segment.end)) > 0.5) {
+        if (reversed(segment, left_position, right_position)) {
             right = left;
             if (context.warnings != nullptr)
                 context.warnings->reversed_zones.fetch_add(1, std::memory_order_relaxed);

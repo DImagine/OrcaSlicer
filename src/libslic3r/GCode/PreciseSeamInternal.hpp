@@ -91,7 +91,8 @@ struct Transfer {
 };
 
 // Carries `point` onto the noisy loop whose edges `target` indexes (line i is edge i), within `window` of it. An edge
-// lying along the line gives its point nearest to `point`.
+// lying along the line gives its point nearest to `point`. Every edge must have non-zero length, as
+// PreparedPerimeter::set_target() requires of the loop.
 Transfer transfer_point(const AABBTreeLines::LinesDistancer<Line> &target, const Point &point, const Point &surface,
                         double window);
 

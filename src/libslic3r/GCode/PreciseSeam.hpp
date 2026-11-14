@@ -137,8 +137,9 @@ struct PreparedPerimeter {
     // A profile whose largest shift is within the snapping radius keeps the centerline, as a constant one does.
     PreparedPerimeter(const Polygon &perimeter, ShiftProfile shift_profile, bool is_hole);
     ~PreparedPerimeter();
-    // Sets the noisy loop made from `polygon` by fuzzy skin and the largest distance of its points from `polygon`;
-    // an unusable loop (as the constructor checks) makes the preparation invalid.
+    // Sets the noisy loop made from `polygon` by fuzzy skin and the window within which its points are looked for
+    // around `polygon`: an estimate from the fuzzy skin settings, not a measured largest distance. An unusable loop
+    // (as the constructor checks) makes the preparation invalid.
     void set_target(const Polygon &noisy, coord_t noise_window);
     // The polygon insertion changes.
     const Polygon &insertion() const { return target != nullptr ? *target : polygon; }

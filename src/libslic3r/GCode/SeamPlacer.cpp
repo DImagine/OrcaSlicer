@@ -576,10 +576,64 @@ struct LayerShiftMeasurement {
   // Which kinds of noisy loops without their smooth centerline are measured; fuzzy skin keeps the nominal shift.
   bool contours = false;
   bool holes = false;
-  // How far a point of a fuzzy skin loop may lie from its smooth centerline, scaled: the noise amplitude and the
-  // point distance, the farthest a chord cutting a convex corner passes from it.
+  // How far a point of a fuzzy skin loop is expected to lie from its smooth centerline, scaled: an estimate from the
+  // settings (see fuzzy_skin_window()), not a measured largest distance.
   coord_t fuzzy_window = 0;
 };
+
+// The largest |GetValue()| of the noise fuzzy skin scales by its thickness. libnoise's coherent noise lies within
+// [-1, 1]; Perlin and Billow add octaves weighted by powers of the persistence (Billow folds each one into [-1, 1] and
+// adds 0.5), RidgedMulti adds octaves of [0, 1] weighted by powers of 1/2 (its default lacunarity is 2) and maps their
+// sum s to 1.25 s - 1. Uniform, Voronoi (displacement 1, no distance) and Ripple stay within [-1, 1].
+double fuzzy_skin_noise_bound(const FuzzySkinConfig &fuzzy) {
+  const int octaves = std::max(fuzzy.noise_octaves, 1);
+  const auto octave_sum = [octaves](double ratio) {
+    double sum = 0.;
+    double weight = 1.;
+    for (int octave = 0; octave < octaves; ++octave, weight *= ratio)
+      sum += weight;
+    return sum;
+  };
+  switch (fuzzy.noise_type) {
+  case NoiseType::Perlin: return octave_sum(std::abs(fuzzy.noise_persistence));
+  case NoiseType::Billow: return octave_sum(std::abs(fuzzy.noise_persistence)) + 0.5;
+  case NoiseType::RidgedMulti: return std::max(1., 1.25 * octave_sum(0.5) - 1.);
+  default: return 1.;
+  }
+}
+
+// The window within which a point of a fuzzy skin loop is looked for around its smooth centerline, in mm. Regions
+// texture a loop one after another, each over the result of the previous ones, so the amplitudes of different noises
+// add up; regions differing only in which walls they texture make the same noise once. Arachne's combined mode moves
+// a point by half its change of width, which adds half the smallest width it keeps (as FuzzySkin.cpp works it out
+// from the layer height). The largest point distance on top is the farthest a chord cutting a convex corner passes
+// from it, and a micrometre the rounding.
+double fuzzy_skin_window(const Layer &layer, bool arachne) {
+  std::vector<FuzzySkinConfig> noises;
+  double amplitudes = 0.;
+  double point_distance = 0.;
+  for (const LayerRegion *region : layer.regions()) {
+    const PrintRegionConfig &config = region->region().config();
+    if (config.fuzzy_skin.value == FuzzySkinType::None)
+      continue;
+    // The type is left out of the comparison, as FuzzySkin.cpp merges regions that differ only in it.
+    const FuzzySkinConfig fuzzy{FuzzySkinType::External, scaled<coord_t>(config.fuzzy_skin_thickness.value),
+                                scaled<coord_t>(config.fuzzy_skin_point_distance.value), false,
+                                config.fuzzy_skin_noise_type.value, config.fuzzy_skin_scale.value,
+                                config.fuzzy_skin_octaves.value, config.fuzzy_skin_persistence.value,
+                                config.fuzzy_skin_mode.value, config.fuzzy_skin_ripples_per_layer.value,
+                                config.fuzzy_skin_ripple_offset.value,
+                                config.fuzzy_skin_layers_between_ripple_offset.value, int(layer.id())};
+    point_distance = std::max(point_distance, config.fuzzy_skin_point_distance.value);
+    if (std::find(noises.begin(), noises.end(), fuzzy) != noises.end())
+      continue;
+    noises.push_back(fuzzy);
+    amplitudes += config.fuzzy_skin_thickness.value * fuzzy_skin_noise_bound(fuzzy);
+    if (arachne && fuzzy.mode == FuzzySkinMode::Combined && fuzzy.noise_type != NoiseType::Ripple)
+      amplitudes += 0.5 * layer.height * (1. - 0.25 * PI) * 1.05;
+  }
+  return noises.empty() ? 0. : amplitudes + point_distance + 0.001;
+}
 
 LayerShiftMeasurement layer_shift_measurement(const PrintObject *po, size_t layer_idx,
                                               const GlobalModelInfo &global_model_info) {
@@ -595,12 +649,7 @@ LayerShiftMeasurement layer_shift_measurement(const PrintObject *po, size_t laye
   // Without a modifier region on the layer no loop is processed.
   if (!precise_seam_modifier_near(global_model_info, layer))
     return measurement;
-  for (const LayerRegion *region : layer->regions()) {
-    const PrintRegionConfig &region_config = region->region().config();
-    if (region_config.fuzzy_skin.value != FuzzySkinType::None)
-      measurement.fuzzy_window = std::max(measurement.fuzzy_window,
-          coord_t(scale_(region_config.fuzzy_skin_thickness.value + region_config.fuzzy_skin_point_distance.value + 0.001)));
-  }
+  measurement.fuzzy_window = coord_t(scale_(fuzzy_skin_window(*layer, measurement.arachne)));
   // Only these layers are measured: skip the outline index elsewhere.
   if (measurement.elephant_foot <= 0. && !measurement.arachne)
     return measurement;

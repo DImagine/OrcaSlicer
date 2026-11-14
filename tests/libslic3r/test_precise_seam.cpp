@@ -1914,6 +1914,80 @@ TEST_CASE("Center pairs with the middle of its edge, arc or concave crossing whe
     check_point(*beside.surface, mm(10.2, 10.2));
 }
 
+TEST_CASE("Center at a vertex between collinear edges pairs with the point where their shifted edges meet", "[PreciseSeam][Fuzzy]")
+{
+    // The smooth loop has the vertex (10, 0) between two collinear edges, without an arc; Center across x = 9..11 mm
+    // falls on it. Turned, the vertex is vertex zero. With a shift profile of 0.3 mm along the front and 0.2 mm on
+    // the other sides, the surface lies 0.3 mm below it.
+    const auto [turned, profiled] = GENERATE(table<bool, bool>({{false, false}, {true, false}, {false, true}}));
+    CAPTURE(turned, profiled);
+    Points points{mm(0, 0), mm(10, 0), mm(20, 0), mm(20, 20), mm(0, 20)};
+    if (turned)
+        std::rotate(points.begin(), points.begin() + 1, points.end());
+    const Polygon smooth(points);
+    // The noisy edge near the vertex runs from (9, -0.1) to (11, 0.3) mm; the rest of the noisy loop lies over 1 mm
+    // away. The line x = 10 mm crosses that edge halfway, at (10, 0.1).
+    const Polygon noisy(Points{mm(-0.1, -0.1), mm(9, -0.1), mm(11, 0.3), mm(20.1, -0.1), mm(20.1, 20.1), mm(-0.1, 20.1)});
+    PreciseSeam::ShiftProfile profile;
+    profile.vertices = {coord_t(scale_(0.3)), coord_t(scale_(0.3)), coord_t(scale_(0.3)), surface_distance, surface_distance};
+    const auto prepared = profiled ? std::make_unique<PreciseSeam::PreparedPerimeter>(smooth, profile, false) :
+                                     std::make_unique<PreciseSeam::PreparedPerimeter>(smooth, surface_distance, false);
+    prepared->set_target(noisy, coord_t(scale_(0.5)));
+    REQUIRE(prepared->valid);
+    const auto extracted = PreciseSeam::extract_perimeter_segments(
+        *prepared, PreciseSeam::prepare_modifier_regions({ExPolygon(rectangle(9, -1, 11, 0.1))}), ModelVolumeType::PRECISE_SEAM_CENTER);
+    REQUIRE(extracted.segments.size() == 1);
+    REQUIRE(extracted.segments.front().strong_target.has_value());
+    const auto &target = *extracted.segments.front().strong_target;
+    CHECK(target.point == mm(10, 0));
+    REQUIRE(target.surface.has_value());
+    check_point(*target.surface, mm(10, profiled ? -0.3 : -0.2));
+    const auto moved = PreciseSeam::detail::transfer_point(noisy_lines(noisy), target.point, *target.surface, scale_(0.5));
+    CHECK(moved.outcome == PreciseSeam::detail::TransferOutcome::Exact);
+    check_point(moved.position.point, mm(10, 0.1));
+}
+
+TEST_CASE("Separate pieces of one arc make one vertex point from the first piece's start to the last one's end", "[PreciseSeam][Fuzzy]")
+{
+    const Polygon square = rectangle(0, 0, 20, 20);
+    PreciseSeam::PreparedPerimeter prepared(square, surface_distance, false);
+    prepared.set_target(square, coord_t(scale_(0.5)));
+    // Two boxes on the arc of radius 0.2 mm around the corner (20, 0), which runs from -90 to 0 degrees: the first
+    // covers it from x = 20.0384 mm (about -79 degrees) to about -61 degrees, the second from about -29 degrees to
+    // y = -0.0384 mm (about -11 degrees). Neither touches the shifted edges.
+    const ExPolygons regions{ExPolygon(rectangle(20.0384, -0.2179, 20.0984, -0.1579)),
+                             ExPolygon(rectangle(20.1579, -0.0984, 20.2179, -0.0384))};
+    const auto extracted = PreciseSeam::extract_perimeter_segments(prepared, PreciseSeam::prepare_modifier_regions(regions),
+                                                                   ModelVolumeType::PRECISE_SEAM_ENFORCED);
+    REQUIRE(extracted.segments.size() == 1);
+    const auto &segment = extracted.segments.front();
+    CHECK(segment.polyline.points == Points{mm(20, 0)});
+    CAPTURE(segment.surface_first.x(), segment.surface_first.y(), segment.surface_last.x(), segment.surface_last.y());
+    CHECK(std::abs(segment.surface_first.x() - mm(20.0384, 0).x()) <= 2);
+    CHECK(std::abs(segment.surface_last.y() - mm(0, -0.0384).y()) <= 2);
+    // On the arc, within the sagitta of its chords.
+    for (const Point &point : {segment.surface_first, segment.surface_last})
+        CHECK(std::abs((point - mm(20, 0)).cast<double>().norm() - double(surface_distance)) <= 41.);
+}
+
+TEST_CASE("A segment across the start of the loop keeps the surface points of its outer ends", "[PreciseSeam][Fuzzy]")
+{
+    // The square starts at its corner (0, 0); the zone runs from y = 1 mm on the left side through the corner to
+    // x = 1 mm on the front, whose surface points lie 0.2 mm outside.
+    const Polygon square = rectangle(0, 0, 20, 20);
+    REQUIRE(square[0] == mm(0, 0));
+    PreciseSeam::PreparedPerimeter prepared(square, surface_distance, false);
+    prepared.set_target(square, coord_t(scale_(0.5)));
+    const auto extracted = PreciseSeam::extract_perimeter_segments(
+        prepared, PreciseSeam::prepare_modifier_regions({ExPolygon(rectangle(-1, -1, 1, 1))}), ModelVolumeType::PRECISE_SEAM_ENFORCED);
+    REQUIRE(extracted.segments.size() == 1);
+    const auto &segment = extracted.segments.front();
+    check_point(segment.polyline.points.front(), mm(0, 1));
+    check_point(segment.polyline.points.back(), mm(1, 0));
+    check_point(segment.surface_first, mm(-0.2, 1));
+    check_point(segment.surface_last, mm(1, -0.2));
+}
+
 TEST_CASE("A loop keeps its untextured centerline when copied, reversed or turned", "[PreciseSeam][Fuzzy]")
 {
     const Polygon square = rectangle(0, 0, 20, 20);
