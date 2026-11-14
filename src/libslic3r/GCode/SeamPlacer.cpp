@@ -581,10 +581,11 @@ struct LayerShiftMeasurement {
   coord_t fuzzy_window = 0;
 };
 
-// The largest |GetValue()| of the noise fuzzy skin scales by its thickness. libnoise's coherent noise lies within
-// [-1, 1]; Perlin and Billow add octaves weighted by powers of the persistence (Billow folds each one into [-1, 1] and
-// adds 0.5), RidgedMulti adds octaves of [0, 1] weighted by powers of 1/2 (its default lacunarity is 2) and maps their
-// sum s to 1.25 s - 1. Uniform, Voronoi (displacement 1, no distance) and Ripple stay within [-1, 1].
+// The largest |GetValue()| of the noise fuzzy skin scales by its thickness, assuming libnoise's coherent noise lies
+// within [-1, 1] as libnoise states (a premise, not checked here). Perlin and Billow add octaves weighted by powers of
+// the persistence (Billow folds each one into [-1, 1] and adds 0.5), RidgedMulti adds octaves of [0, 1] weighted by
+// powers of 1/2 (its default lacunarity is 2) and maps their sum s to 1.25 s - 1. Uniform, Voronoi (displacement 1,
+// no distance) and Ripple stay within [-1, 1].
 double fuzzy_skin_noise_bound(const FuzzySkinConfig &fuzzy) {
   const int octaves = std::max(fuzzy.noise_octaves, 1);
   const auto octave_sum = [octaves](double ratio) {
@@ -602,7 +603,8 @@ double fuzzy_skin_noise_bound(const FuzzySkinConfig &fuzzy) {
   }
 }
 
-// The window within which a point of a fuzzy skin loop is looked for around its smooth centerline, in mm. Regions
+// The window within which a point of a fuzzy skin loop is looked for around its smooth centerline, in mm: an estimate
+// from the settings, not a proven bound. Regions without fuzzy skin, or with it disabled, make no noise. Regions
 // texture a loop one after another, each over the result of the previous ones, so the amplitudes of different noises
 // add up; regions differing only in which walls they texture make the same noise once. Arachne's combined mode moves
 // a point by half its change of width, which adds half the smallest width it keeps (as FuzzySkin.cpp works it out
@@ -614,7 +616,7 @@ double fuzzy_skin_window(const Layer &layer, bool arachne) {
   double point_distance = 0.;
   for (const LayerRegion *region : layer.regions()) {
     const PrintRegionConfig &config = region->region().config();
-    if (config.fuzzy_skin.value == FuzzySkinType::None)
+    if (config.fuzzy_skin.value == FuzzySkinType::None || config.fuzzy_skin.value == FuzzySkinType::Disabled_fuzzy)
       continue;
     // The type is left out of the comparison, as FuzzySkin.cpp merges regions that differ only in it.
     const FuzzySkinConfig fuzzy{FuzzySkinType::External, scaled<coord_t>(config.fuzzy_skin_thickness.value),

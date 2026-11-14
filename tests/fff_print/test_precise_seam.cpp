@@ -818,37 +818,123 @@ TEST_CASE("With fuzzy skin a long weak zone keeps its boundaries where noise len
     CHECK(typed >= 161);
 }
 
+namespace {
+// Everything round the 20 x 20 mm square but its front surface from x = `from` to `to` mm.
+Polygon all_but_front(double from, double to)
+{
+    return Polygon(Points{mm(-1, -1), mm(from, -1), mm(from, 0.1), mm(to, 0.1), mm(to, -1), mm(21, -1), mm(21, 21), mm(-1, 21)});
+}
+
+// The 20 x 20 mm square whose front surface between x = 9 and 11 mm zigzags 1 mm either side every 0.01 mm
+// (x = 9 + 0.01 j, y = (-1)^j for j = 1..199): that stretch is about 398 mm long against 78 mm for the rest.
+Polygon zigzag_between_9_and_11()
+{
+    Points points{mm(0, 0), mm(9, 0)};
+    for (int j = 1; j < 200; ++j)
+        points.push_back(mm(9. + 0.01 * j, j % 2 == 0 ? 1. : -1.));
+    for (const Point &point : {mm(11, 0), mm(20, 0), mm(20, 20), mm(0, 20)})
+        points.push_back(point);
+    return Polygon(points);
+}
+
+// Collects the zones of one weak modifier over `region` on the 20 x 20 mm square carried onto `noisy` within `window`
+// mm, and checks they make one zone from `left` to `right` (within a unit), with no zone reduced.
+std::vector<PreciseSeam::WeakModifierSegment> carried_weak_zone(SeamFixture &fixture, ModelVolumeType type, const Polygon &region,
+                                                                Polygon &noisy, double window, const Point &left, const Point &right)
+{
+    const Polygon smooth = rectangle(0, 0, 20, 20);
+    const auto *modifier = fixture.add(type, {region});
+    PreciseSeam::PreparedPerimeter prepared(smooth, PreciseSeam::surface_shift(0.4, 0.), false);
+    prepared.set_target(noisy, coord_t(scale_(window)));
+    PreciseSeam::PreciseSeamWarnings warnings;
+    auto segments = PreciseSeam::collect_weak_modifier_segments({modifier}, noisy, prepared, fixture.layer, fixture.cache, &warnings);
+    REQUIRE(segments.size() == 1);
+    CHECK_FALSE(segments.front().whole_perimeter);
+    const Point &carried_left = segments.front().left_point;
+    const Point &carried_right = segments.front().right_point;
+    CAPTURE(carried_left.x(), carried_left.y(), carried_right.x(), carried_right.y());
+    CHECK((carried_left - left).cast<double>().norm() <= 1.5);
+    CHECK((carried_right - right).cast<double>().norm() <= 1.5);
+    CHECK(warnings.reversed_zones == 0);
+    return segments;
+}
+} // namespace
+
 TEST_CASE("With fuzzy skin a weak zone almost all round the loop keeps its order", "[PreciseSeam][Fuzzy]")
 {
     using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    const auto [zone, type, background] = GENERATE(table<ModelVolumeType, Type, Type>({
+        {ModelVolumeType::PRECISE_SEAM_ENFORCED, Type::Enforced, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_BLOCKED, Type::Blocked, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_NEUTRAL, Type::Neutral, Type::Enforced}}));
+    CAPTURE(int(type));
     SeamFixture fixture;
     const Polygon smooth = rectangle(0, 0, 20, 20);
     Polygon noisy = fuzzify(smooth, 0.1);
     // Everything but the front surface from x = 9.5 to 10.5 mm: a zone from (10.5, 0) round the loop, across its start,
-    // to (9.5, 0), whose rest of 1 mm is shorter than four windows of 0.5 mm.
-    const auto *modifier = fixture.add(ModelVolumeType::PRECISE_SEAM_ENFORCED,
-        {Polygon(Points{mm(-1, -1), mm(9.5, -1), mm(9.5, 0.1), mm(10.5, 0.1), mm(10.5, -1), mm(21, -1), mm(21, 21), mm(-1, 21)})});
-    PreciseSeam::PreparedPerimeter prepared(smooth, PreciseSeam::surface_shift(0.4, 0.), false);
-    prepared.set_target(noisy, coord_t(scale_(0.5)));
-    PreciseSeam::PreciseSeamWarnings warnings;
-    const auto segments = PreciseSeam::collect_weak_modifier_segments({modifier}, noisy, prepared, fixture.layer, fixture.cache, &warnings);
-    REQUIRE(segments.size() == 1);
-    const auto &zone_segment = segments.front();
-    CHECK_FALSE(zone_segment.whole_perimeter);
-    // The noisy edges between the points at x = 10.375 and 10.625 mm, and 9.375 and 9.625 mm, 0.1 mm either side,
-    // cross the boundaries' lines at y = 0.
-    CHECK(std::abs(zone_segment.left_point.x() - mm(10.5, 0).x()) <= 1);
-    CHECK(std::abs(zone_segment.left_point.y()) <= 1);
-    CHECK(std::abs(zone_segment.right_point.x() - mm(9.5, 0).x()) <= 1);
-    CHECK(std::abs(zone_segment.right_point.y()) <= 1);
-    CHECK(warnings.reversed_zones == 0);
-    // All of the loop but the gap is Enforced.
-    const auto types = weak_candidate_types(noisy, segments);
+    // to (9.5, 0), whose rest of 1 mm is shorter than four windows of 0.5 mm. The noisy edges between the points at
+    // x = 10.375 and 10.625 mm, and 9.375 and 9.625 mm, 0.1 mm either side, cross the boundaries' lines at y = 0.
+    const auto segments = carried_weak_zone(fixture, zone, all_but_front(9.5, 10.5), noisy, 0.5, mm(10.5, 0), mm(9.5, 0));
+    // All of the loop but the gap takes the zone's type.
+    const auto types = weak_candidate_types(noisy, segments, [background = background](const Point &) { return background; });
     for (size_t i = 0; i < noisy.size(); ++i) {
         const bool gap = noisy[i].y() < mm(0, 1).y() && noisy[i].x() > mm(9.5, 0).x() + 1 && noisy[i].x() < mm(10.5, 0).x() - 1;
         CAPTURE(i, noisy[i].x(), noisy[i].y());
-        CHECK((types[i] == Type::Enforced) == !gap);
+        CHECK(types[i] == (gap ? background : type));
     }
+}
+
+TEST_CASE("With fuzzy skin a short weak zone keeps its boundaries where noise lengthens it many times over", "[PreciseSeam][Fuzzy]")
+{
+    using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    const auto [zone, type, background] = GENERATE(table<ModelVolumeType, Type, Type>({
+        {ModelVolumeType::PRECISE_SEAM_ENFORCED, Type::Enforced, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_BLOCKED, Type::Blocked, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_NEUTRAL, Type::Neutral, Type::Enforced}}));
+    CAPTURE(int(type));
+    SeamFixture fixture;
+    Polygon noisy = zigzag_between_9_and_11();
+    // The zone covers the front surface from x = 9 to 11 mm, 2 mm of the smooth loop, shorter than four windows of
+    // 1.011 mm (1 mm amplitude, 0.01 mm point distance and 1 um). The lines x = 9 and x = 11 mm through its boundaries
+    // meet the noisy loop at the boundaries themselves; the zigzag stays within 2 + 1.011 mm of (9, 0).
+    const auto segments = carried_weak_zone(fixture, zone, rectangle(9, -0.3, 11, 0.05), noisy, 1.011, mm(9, 0), mm(11, 0));
+    // The whole zigzag with its ends takes the zone's type, the rest keeps the painted one.
+    const auto types = weak_candidate_types(noisy, segments, [background = background](const Point &) { return background; });
+    size_t typed = 0;
+    for (size_t i = 0; i < noisy.size(); ++i) {
+        const bool inside = noisy[i].x() >= mm(9, 0).x() - 1 && noisy[i].x() <= mm(11, 0).x() + 1 && noisy[i].y() <= mm(0, 1).y();
+        CAPTURE(i, noisy[i].x(), noisy[i].y());
+        CHECK(types[i] == (inside ? type : background));
+        typed += inside;
+    }
+    CHECK(typed >= 201);
+}
+
+TEST_CASE("With fuzzy skin a weak zone almost all round keeps its boundaries where noise lengthens its rest many times over", "[PreciseSeam][Fuzzy]")
+{
+    using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    const auto [zone, type, background] = GENERATE(table<ModelVolumeType, Type, Type>({
+        {ModelVolumeType::PRECISE_SEAM_ENFORCED, Type::Enforced, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_BLOCKED, Type::Blocked, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_NEUTRAL, Type::Neutral, Type::Enforced}}));
+    CAPTURE(int(type));
+    SeamFixture fixture;
+    Polygon noisy = zigzag_between_9_and_11();
+    // Everything but the front surface from x = 9 to 11 mm: a zone from (11, 0) round the loop, across its start, to
+    // (9, 0), whose rest of 2 mm is shorter than four windows of 1.011 mm. The zigzag of that rest stays within
+    // 2 + 1.011 mm of (9, 0).
+    const auto segments = carried_weak_zone(fixture, zone, all_but_front(9, 11), noisy, 1.011, mm(11, 0), mm(9, 0));
+    // All of the loop but the zigzag between the boundaries takes the zone's type; refining the boundaries adds a point
+    // into the zigzag next to each of them.
+    const auto types = weak_candidate_types(noisy, segments, [background = background](const Point &) { return background; });
+    size_t untyped = 0;
+    for (size_t i = 0; i < noisy.size(); ++i) {
+        const bool gap = noisy[i].y() <= mm(0, 1).y() && noisy[i].x() > mm(9, 0).x() + 1 && noisy[i].x() < mm(11, 0).x() - 1;
+        CAPTURE(i, noisy[i].x(), noisy[i].y());
+        CHECK(types[i] == (gap ? background : type));
+        untyped += gap;
+    }
+    CHECK(untyped >= 199);
 }
 
 TEST_CASE("Weak processing applies every ready interval and leaves gaps unchanged", "[PreciseSeam][SegmentExtraction]")

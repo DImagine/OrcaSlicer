@@ -822,7 +822,7 @@ static std::optional<Point> concave_crossing(const detail::SurfaceLine &surface,
 }
 
 // Where the shifted edge leaving a vertex starts: the surface point of a vertex without an arc or bridge (collinear
-// edges or no shift there), with the shift profile at the vertex.
+// edges or no shift there), with the shift profile at the vertex. Empty when that edge has no element left.
 static std::optional<Point> edge_start(const detail::SurfaceLine &surface, size_t vertex)
 {
     std::optional<size_t> first;
@@ -859,7 +859,8 @@ static Point center_surface_point(const PreparedPerimeter &prepared, const Perim
         if (chain.empty()) {
             if (const std::optional<Point> crossing = concave_crossing(surface, *vertex))
                 return *crossing;
-            // The shifted edges meet at one point; it is the vertex itself only where the shift there is zero.
+            // The shifted edges meet at one point, the vertex itself where the shift there is zero. Without an element
+            // of the edge the point itself is kept, an emergency fallback.
             return edge_start(surface, *vertex).value_or(point);
         }
         double from = 0.;
@@ -1634,43 +1635,62 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     std::vector<WeakModifierSegment> result;
     if (weak_volumes.empty() || layer == nullptr || !prepared.valid)
         return result;
-    // With fuzzy skin the zones are found on the smooth loop and their boundaries carried onto the noisy one. Arc
-    // lengths along both, before any insertion, tell a zone whose boundaries came out in the reverse order.
+    // With fuzzy skin the zones are found on the smooth loop and their boundaries carried onto the noisy one; before
+    // any insertion, a policy tells some zones whose boundaries came out in the reverse order.
     std::vector<double> source_arc;
-    std::vector<double> target_arc;
-    const auto arcs_of = [](const Polygon &polygon, std::vector<double> &arcs) {
-        arcs.push_back(0.);
-        for (size_t edge = 0; edge < polygon.size(); ++edge)
-            arcs.push_back(arcs.back() + (polygon[(edge + 1) % polygon.size()] - polygon[edge]).cast<double>().norm());
+    const auto arc_at = [&source_arc](const PerimeterPosition &position) {
+        return source_arc[position.edge_index] +
+               position.parameter * (source_arc[position.edge_index + 1] - source_arc[position.edge_index]);
     };
-    const auto arc_at = [](const std::vector<double> &arcs, const PerimeterPosition &position) {
-        return arcs[position.edge_index] + position.parameter * (arcs[position.edge_index + 1] - arcs[position.edge_index]);
+    // The length of the smooth loop from one position forward to another, across its start if need be.
+    const auto forward = [&](const PerimeterPosition &from, const PerimeterPosition &to) {
+        const double length = arc_at(to) - arc_at(from);
+        return length >= 0. ? length : length + source_arc.back();
     };
-    // The length of the loop from one position forward to another, across its start if need be.
-    const auto forward = [&arc_at](const std::vector<double> &arcs, const PerimeterPosition &from, const PerimeterPosition &to) {
-        const double length = arc_at(arcs, to) - arc_at(arcs, from);
-        return length >= 0. ? length : length + arcs.back();
+    // Whether the noisy loop from one carried position forward to another leaves the circle around `center`: either
+    // position or a vertex between them, across the start of the loop. Positions on one edge with the second behind the
+    // first go round the whole loop.
+    const auto leaves = [&prepared](const detail::CenterlinePoint &from, const detail::CenterlinePoint &to, const Point &center,
+                                    double radius) {
+        const Polygon &noisy = *prepared.target;
+        const size_t count = noisy.size();
+        const auto outside = [&center, limit = radius * radius](const Point &point) {
+            return (point - center).cast<double>().squaredNorm() > limit;
+        };
+        if (outside(from.point) || outside(to.point))
+            return true;
+        size_t vertices = (to.edge + count - from.edge) % count;
+        if (vertices == 0 && to.parameter < from.parameter)
+            vertices = count;
+        for (size_t i = 1; i <= vertices; ++i)
+            if (outside(noisy[(from.edge + i) % count]))
+                return true;
+        return false;
     };
-    // Each boundary lands within the window of its smooth point and the noise keeps the order along the loop, so the
-    // boundaries can only swap where they lie close together: across a short zone, or across the short rest of the
-    // loop outside an almost whole one. Longer on both sides, the order holds.
-    const double close = 4. * double(prepared.window);
-    const auto reversed = [&](const PerimeterSegment &segment, const PerimeterPosition &left, const PerimeterPosition &right) {
-        const double zone = forward(source_arc, segment.begin, segment.end);
-        const double ahead = forward(target_arc, left, right);
-        const double behind = target_arc.back() - ahead;
-        // A loop comparable with the window has both sides short; the zone's rule applies (a stated limitation).
-        if (zone < close)
-            return ahead > behind;
-        if (source_arc.back() - zone < close)
-            return ahead < behind;
+    // A policy, not a proven guarantee. Each boundary lands within the window of its smooth point, so the noisy arc
+    // between the carried boundaries of a zone shorter than four windows stays within the zone's length plus a window
+    // of its smooth left boundary, however much the noise lengthens it, while an arc round the rest of the loop leaves
+    // that circle; the same holds round the smooth right boundary for the short rest of an almost whole zone. Longer on
+    // both sides, the order is not checked: a transfer onto another part of the loop there is a limitation of the
+    // direct transfer. A loop comparable with the window has both sides short, and the zone's rule applies.
+    const double window = double(prepared.window);
+    const auto reversed = [&](const PerimeterSegment &segment, const detail::CenterlinePoint &left,
+                              const detail::CenterlinePoint &right) {
+        const double zone = forward(segment.begin, segment.end);
+        const double rest = source_arc.back() - zone;
+        if (zone < 4. * window)
+            return leaves(left, right, segment.polyline.points.front(), zone + window);
+        if (rest < 4. * window)
+            return leaves(right, left, segment.polyline.points.back(), rest + window);
         return false;
     };
     // False when a boundary cannot be carried: the zone is then a discarded fragment.
     const auto carry = [&](const PerimeterSegment &segment, WeakModifierSegment &zone, const ExtractionContext &context) {
-        if (target_arc.empty()) {
-            arcs_of(prepared.polygon, source_arc);
-            arcs_of(*prepared.target, target_arc);
+        if (source_arc.empty()) {
+            source_arc.push_back(0.);
+            const Polygon &smooth = prepared.polygon;
+            for (size_t edge = 0; edge < smooth.size(); ++edge)
+                source_arc.push_back(source_arc.back() + (smooth[(edge + 1) % smooth.size()] - smooth[edge]).cast<double>().norm());
         }
         const detail::Transfer left = to_insertion(prepared, segment.polyline.points.front(), segment.surface_first, context);
         if (left.outcome == detail::TransferOutcome::Failed)
@@ -1679,9 +1699,7 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         if (right.outcome == detail::TransferOutcome::Failed)
             return false;
         // A zone whose boundaries came out in the reverse order is reduced to its left boundary, a declared degradation.
-        const PerimeterPosition left_position{left.position.edge, left.position.parameter};
-        const PerimeterPosition right_position{right.position.edge, right.position.parameter};
-        if (reversed(segment, left_position, right_position)) {
+        if (reversed(segment, left.position, right.position)) {
             right = left;
             if (context.warnings != nullptr)
                 context.warnings->reversed_zones.fetch_add(1, std::memory_order_relaxed);
