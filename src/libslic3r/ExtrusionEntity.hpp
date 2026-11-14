@@ -476,9 +476,10 @@ public:
     bool print_after_infill = false;
     // ORCA: The centerline of this loop before surface texturing (fuzzy skin), or null. The perimeter generator sets
     // it on an external loop whose points the texture changed; Precise Seam reconstructs the model surface from it.
-    // Copying, moving, reversing or turning the start of the same geometry keeps it; giving the loop different
-    // geometry must reset it. Kept whether or not Precise Seam is used, since adding its helpers does not
-    // regenerate perimeters. The storage could be optimized later.
+    // Copying, moving, reversing or turning the start of the same geometry keeps it, and so does simplifying or
+    // arc fitting the paths: that is still the same textured loop. Giving the loop other geometry must reset it.
+    // Kept whether or not Precise Seam is used, since adding its helpers does not regenerate perimeters. The
+    // storage could be optimized later.
     std::shared_ptr<const Polygon> untextured;
 
     ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : m_loop_role(role) {}
