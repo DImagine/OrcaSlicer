@@ -741,16 +741,18 @@ exceeded, one summary marker reports the total.
   acute corner), the nearest crossing may belong to another place than the one
   the smooth point was textured into. Points carried without the line
   (approximate outcome) do not lie on it, and weak zones whose boundaries reverse
-  are reduced to one point. The window is estimated from the settings; a noise
-  that moves a boundary farther makes its transfer fail, while inner points of a
-  noisy arc farther than the window can mislead the order policy. The order of a
+  are reduced to one point. The window is estimated from the settings. A transfer
+  fails only when neither a crossing nor a nearest point of the noisy loop lies
+  within the window, so a boundary that the noise moved farther may be carried
+  onto another crossing or point within it instead; inner points of a noisy arc
+  farther than the window can mislead the order policy. The order of a
   weak zone's boundaries is checked only where the zone or the rest of the loop is
   shorter than four windows; where both are longer, boundaries carried onto
   another part of the loop are not noticed. A loop that lies wholly within the
   circle of that check (its spread comparable with the window) leaves the
   decision to the lengths of the two noisy arcs: noise lengthening one of them
-  unevenly may then reduce a correct zone or miss a reversal. On a loop
-  comparable with the window both sides are short, and the zone's rule decides. Sliced data loaded from a cache keeps only the
+  unevenly may then reduce a correct zone or miss a reversal. When both smooth
+  arcs are shorter than four windows, the zone's rule takes priority. Sliced data loaded from a cache keeps only the
   extrusions, without the untextured centerline: such loops keep the noisy
   surface and the nominal shift, so the same project may get another seam after
   loading. The tests only clear the field by hand; they do not go through
