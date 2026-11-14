@@ -10,6 +10,9 @@
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/GCode/PreciseSeam.hpp"
+#include "libslic3r/Line.hpp"
+#include "libslic3r/AABBTreeLines.hpp"
+#include "libslic3r/GCode/PreciseSeamInternal.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -736,6 +739,67 @@ TEST_CASE("With fuzzy skin a weak zone whose boundaries reverse is reduced to it
     CHECK(segments.front().left_point == segments.front().right_point);
     CHECK(std::abs(segments.front().left_point.x() - mm(19.971, 0).x()) <= scale_(0.002));
     CHECK(std::abs(segments.front().left_point.y() - mm(0, 0.096).y()) <= scale_(0.002));
+    CHECK(warnings.reversed_zones == 1);
+    // One candidate of the zone's type, as a zero-length zone types it; the rest keep their painted type.
+    const auto types = weak_candidate_types(noisy, segments, [background = background](const Point &) { return background; });
+    CHECK(std::count(types.begin(), types.end(), type) == 1);
+    CHECK(std::count(types.begin(), types.end(), background) == ptrdiff_t(types.size()) - 1);
+}
+
+TEST_CASE("With fuzzy skin a weak zone whose boundaries reverse on a loop within the circle of the check is reduced to its left one", "[PreciseSeam][Fuzzy]")
+{
+    using Type = SeamPlacerImpl::EnforcedBlockedSeamPoint;
+    const auto [zone, type, background] = GENERATE(table<ModelVolumeType, Type, Type>({
+        {ModelVolumeType::PRECISE_SEAM_ENFORCED, Type::Enforced, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_BLOCKED, Type::Blocked, Type::Neutral},
+        {ModelVolumeType::PRECISE_SEAM_NEUTRAL, Type::Neutral, Type::Enforced}}));
+    CAPTURE(int(type));
+    SeamFixture fixture;
+    // The smooth loop is a box of 1 x 1.2 mm whose top left half zigzags between y = 0.5 and 1.2 mm
+    // (x = 0.5 - 0.05 j for j = 1..9): about 10.92 mm long, yet within 1.35 mm of (0.4, 0). The noisy loop is the
+    // same but cuts the corner (1, 0) along the chord from (0.25, 0) to (1, 0.9), y = 1.2 x - 0.3.
+    Points top;
+    for (int j = 1; j <= 9; ++j)
+        top.push_back(mm(0.5 - 0.05 * j, j % 2 == 1 ? 0.5 : 1.2));
+    top.push_back(mm(0, 1.2));
+    Points smooth_points{mm(0, 0), mm(1, 0), mm(1, 1.2), mm(0.5, 1.2)};
+    Points noisy_points{mm(0, 0), mm(0.25, 0), mm(1, 0.9), mm(1, 1.2), mm(0.5, 1.2)};
+    smooth_points.insert(smooth_points.end(), top.begin(), top.end());
+    noisy_points.insert(noisy_points.end(), top.begin(), top.end());
+    const Polygon smooth(smooth_points);
+    Polygon noisy(noisy_points);
+    // The window of 1.402 mm (0.001 mm thickness, 1.4 mm point distance and 1 um): the zone below is shorter than four
+    // windows, its rest longer.
+    const double window = 1.402;
+    // The boundaries as they are carried, before the order is checked. The line x = 0.4 mm through the left one
+    // crosses the chord at (0.4, 0.18), a fifth along it; the line through the right one, the corner (1, 0), along
+    // its arc point's direction (1, -0.2) crosses the chord at (5/14, 9/70), a seventh along it: behind the left one.
+    const AABBTreeLines::LinesDistancer<Line> lines(noisy.lines());
+    const auto left = PreciseSeam::detail::transfer_point(lines, mm(0.4, 0), mm(0.4, -0.045), scale_(window));
+    CHECK(left.outcome == PreciseSeam::detail::TransferOutcome::Exact);
+    CHECK(left.position.edge == 1);
+    CHECK_THAT(left.position.parameter, Catch::Matchers::WithinAbs(0.2, 1e-6));
+    CHECK((left.position.point - mm(0.4, 0.18)).cast<double>().norm() <= 1.5);
+    const auto right = PreciseSeam::detail::transfer_point(lines, mm(1, 0), mm(1.2, -0.04), scale_(window));
+    CHECK(right.outcome == PreciseSeam::detail::TransferOutcome::Exact);
+    CHECK(right.position.edge == 1);
+    CHECK_THAT(right.position.parameter, Catch::Matchers::WithinAbs(1. / 7., 1e-6));
+    CHECK((right.position.point - mm(5. / 14., 9. / 70.)).cast<double>().norm() <= 1.5);
+    // A triangle over the front surface from x = 0.4 mm and the arc of the corner (1, 0) down to its edge along
+    // (1, -0.2): one zone from (0.4, 0) to (1, 0), 0.6 mm long. The whole noisy loop lies within the circle of
+    // 0.6 + 1.402 mm around (0.4, 0), so the noisy arc from the left boundary forward round the loop, far the longer,
+    // tells the reversal.
+    const auto *modifier = fixture.add(zone, {Polygon(Points{mm(1, 0), mm(-5. / 3., -0.2), mm(2, -0.2)})});
+    PreciseSeam::PreparedPerimeter prepared(smooth, PreciseSeam::surface_shift(0.1, 0.), false);
+    prepared.set_target(noisy, coord_t(scale_(window)));
+    REQUIRE(prepared.valid);
+    PreciseSeam::PreciseSeamWarnings warnings;
+    const auto segments = PreciseSeam::collect_weak_modifier_segments({modifier}, noisy, prepared, fixture.layer, fixture.cache, &warnings);
+    REQUIRE(segments.size() == 1);
+    CHECK_FALSE(segments.front().whole_perimeter);
+    CHECK(segments.front().left_point == segments.front().right_point);
+    CAPTURE(segments.front().left_point.x(), segments.front().left_point.y());
+    CHECK((segments.front().left_point - mm(0.4, 0.18)).cast<double>().norm() <= 3.);
     CHECK(warnings.reversed_zones == 1);
     // One candidate of the zone's type, as a zero-length zone types it; the rest keep their painted type.
     const auto types = weak_candidate_types(noisy, segments, [background = background](const Point &) { return background; });

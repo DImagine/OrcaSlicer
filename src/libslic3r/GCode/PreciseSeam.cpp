@@ -1647,41 +1647,71 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
         const double length = arc_at(to) - arc_at(from);
         return length >= 0. ? length : length + source_arc.back();
     };
-    // Whether the noisy loop from one carried position forward to another leaves the circle around `center`: either
-    // position or a vertex between them, across the start of the loop. Positions on one edge with the second behind the
-    // first go round the whole loop.
-    const auto leaves = [&prepared](const detail::CenterlinePoint &from, const detail::CenterlinePoint &to, const Point &center,
-                                    double radius) {
+    // Walks the noisy loop from one carried position forward to another: the first position, every vertex between them
+    // across the start of the loop, then the second position. Positions on one edge with the second behind the first go
+    // round the whole loop. Stops where `visit` returns false.
+    const auto walk = [&prepared](const detail::CenterlinePoint &from, const detail::CenterlinePoint &to, const auto &visit) {
         const Polygon &noisy = *prepared.target;
         const size_t count = noisy.size();
-        const auto outside = [&center, limit = radius * radius](const Point &point) {
-            return (point - center).cast<double>().squaredNorm() > limit;
-        };
-        if (outside(from.point) || outside(to.point))
-            return true;
         size_t vertices = (to.edge + count - from.edge) % count;
         if (vertices == 0 && to.parameter < from.parameter)
             vertices = count;
+        if (!visit(from.point))
+            return;
         for (size_t i = 1; i <= vertices; ++i)
-            if (outside(noisy[(from.edge + i) % count]))
-                return true;
-        return false;
+            if (!visit(noisy[(from.edge + i) % count]))
+                return;
+        visit(to.point);
     };
-    // A policy, not a proven guarantee. Each boundary lands within the window of its smooth point, so the noisy arc
-    // between the carried boundaries of a zone shorter than four windows stays within the zone's length plus a window
-    // of its smooth left boundary, however much the noise lengthens it, while an arc round the rest of the loop leaves
-    // that circle; the same holds round the smooth right boundary for the short rest of an almost whole zone. Longer on
-    // both sides, the order is not checked: a transfer onto another part of the loop there is a limitation of the
-    // direct transfer. A loop comparable with the window has both sides short, and the zone's rule applies.
+    // Whether that noisy arc leaves the circle around `center`: a point of it lies farther than `radius`.
+    const auto leaves = [&walk](const detail::CenterlinePoint &from, const detail::CenterlinePoint &to, const Point &center,
+                                double radius) {
+        bool outside = false;
+        walk(from, to, [&outside, &center, limit = radius * radius](const Point &point) {
+            outside = (point - center).cast<double>().squaredNorm() > limit;
+            return !outside;
+        });
+        return outside;
+    };
+    // The length of that noisy arc.
+    const auto noisy_length = [&walk](const detail::CenterlinePoint &from, const detail::CenterlinePoint &to) {
+        double length = 0.;
+        std::optional<Point> last;
+        walk(from, to, [&length, &last](const Point &point) {
+            if (last)
+                length += (point - *last).cast<double>().norm();
+            last = point;
+            return true;
+        });
+        return length;
+    };
+    // A policy, not a proven guarantee. It assumes the points of a zone's true noisy arc lie within the window of the
+    // smooth zone, as its boundaries do; the window is an estimate. Then for a zone shorter than four windows that arc
+    // stays within the circle around its smooth left boundary whose radius is the zone's length plus a window, however
+    // much the noise lengthens it, and the arc round the rest of the loop leaves the circle wherever the loop spreads
+    // beyond it (its length tells nothing). So: the arc forward from the left boundary to the right one leaving the
+    // circle reverses the zone; the other arc leaving it keeps the order; with both inside, a loop that lies within the
+    // circle, the longer arc is taken for the rest of the loop, which may reduce a zone wrongly or miss a reversal. The
+    // same holds round the smooth right boundary for the short rest of an almost whole zone, with the arcs swapped.
+    // Longer on both sides, the order is not checked: a transfer onto another part of the loop there is a limitation of
+    // the direct transfer.
     const double window = double(prepared.window);
+    const auto decide = [&](const detail::CenterlinePoint &from, const detail::CenterlinePoint &to, const Point &center,
+                            double radius) {
+        if (leaves(from, to, center, radius))
+            return true;
+        if (leaves(to, from, center, radius))
+            return false;
+        return noisy_length(from, to) > noisy_length(to, from);
+    };
     const auto reversed = [&](const PerimeterSegment &segment, const detail::CenterlinePoint &left,
                               const detail::CenterlinePoint &right) {
         const double zone = forward(segment.begin, segment.end);
         const double rest = source_arc.back() - zone;
         if (zone < 4. * window)
-            return leaves(left, right, segment.polyline.points.front(), zone + window);
+            return decide(left, right, segment.polyline.points.front(), zone + window);
         if (rest < 4. * window)
-            return leaves(right, left, segment.polyline.points.back(), rest + window);
+            return decide(right, left, segment.polyline.points.back(), rest + window);
         return false;
     };
     // False when a boundary cannot be carried: the zone is then a discarded fragment.
