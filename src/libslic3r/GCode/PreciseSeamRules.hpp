@@ -111,7 +111,7 @@ struct RuleLayerOperation {
 struct LayerRules {
     std::vector<RuleLayerOperation> operations; // Valid layer sets in application order.
     std::optional<ModelVolumeType>  type;       // First type label over all sources.
-    std::optional<int64_t>          priority;   // First priority over all sources, prN in millionths; pr-negN gives -N.
+    std::optional<int64_t>          priority;   // First priority over all sources, prN in millionths; pr-N gives -N.
     std::optional<RelayLabel>       relay;      // First relay label over all sources.
     std::optional<uint32_t>         relay_seed; // seed of that relay-random element; not part of the group label.
     std::optional<std::string>      id;         // Trimmed original text of the first id element; the language ignores it.
