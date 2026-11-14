@@ -445,8 +445,8 @@ struct TypeWord {
     }
 };
 
-// priority = "pr" ["-neg"] decimal: a weight in millionths, the higher first; pr-negN weighs -N, and pr0, pr-neg0
-// and no priority weigh the same. pr-N is no priority: a minus that only follows pr is easy to miss.
+// priority = "pr" ["-"] decimal: a weight in millionths, the higher first; pr-N weighs -N, and pr0, pr-0
+// and no priority weigh the same.
 struct PriorityWord {
     struct Payload {
         int64_t priority = 0;
@@ -455,7 +455,7 @@ struct PriorityWord {
     {
         if (!c.eat("pr"))
             return ParseStatus::NotMine;
-        const bool                   negative = c.eat("-neg");
+        const bool                   negative = c.eat('-');
         const std::optional<int64_t> value    = c.millionths();
         if (!value)
             return ParseStatus::Invalid;

@@ -3575,9 +3575,9 @@ TEST_CASE("A weak relay group stands at its most senior member, and each member 
         CHECK(init.row(A) == "1010");
         CHECK(init.row(B) == "0101");
     }
-    SECTION("pr-neg puts its member after the volumes without priority; its group stands at another member")
+    SECTION("A negative priority puts its member after the volumes without priority; its group stands at another member")
     {
-        const ModelVolume *Y = add_modifier(fixture, green, "relay,pr-neg1");
+        const ModelVolume *Y = add_modifier(fixture, green, "relay,pr-1");
         const ModelVolume *W = add_modifier(fixture, ModelVolumeType::PRECISE_SEAM_BLOCKED, "");
         const ModelVolume *Z = add_modifier(fixture, green, "relay");
         const WeakInit init(fixture, 4);
