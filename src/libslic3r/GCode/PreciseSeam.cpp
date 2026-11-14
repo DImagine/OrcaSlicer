@@ -1691,8 +1691,9 @@ std::vector<WeakModifierSegment> collect_weak_modifier_segments(
     // much the noise lengthens it, and the arc round the rest of the loop leaves the circle wherever the loop spreads
     // beyond it (its length tells nothing). So: the arc forward from the left boundary to the right one leaving the
     // circle reverses the zone; the other arc leaving it keeps the order; with both inside, a loop that lies within the
-    // circle, the longer arc is taken for the rest of the loop, which may reduce a zone wrongly or miss a reversal. The
-    // same holds round the smooth right boundary for the short rest of an almost whole zone, with the arcs swapped.
+    // circle, the longer arc is taken for the rest of the loop, which may reduce a zone wrongly or miss a reversal.
+    // Coinciding carried positions within the circle give two arcs of zero length and keep the order. The same holds
+    // round the smooth right boundary for the short rest of an almost whole zone, with the arcs swapped.
     // Longer on both sides, the order is not checked: a transfer onto another part of the loop there is a limitation of
     // the direct transfer.
     const double window = double(prepared.window);
