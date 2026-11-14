@@ -309,19 +309,23 @@ repeated points, counterclockwise).
   transfer fails drops out, and the next one wins.
 - **Weak zones** carry each boundary separately. Before anything is inserted, a
   policy, not a proven guarantee, tells some zones whose boundaries came out in
-  the reverse order. Each boundary lands within the window of its smooth point,
-  so the noisy arc between the carried boundaries of a short zone stays near the
-  smooth zone, however much the noise lengthens it, while an arc round the rest
-  of the loop goes far from it. Lengths of noisy arcs tell nothing, as the noise
-  may lengthen a stretch many times over. With a threshold of four windows on the
-  smooth loop:
-  - a zone shorter than that is reversed when the noisy arc from its carried
-    left boundary forward to its right one leaves the circle around its smooth
-    left boundary whose radius is the zone's length plus a window;
-  - otherwise, a zone whose rest of the loop is that short is reversed when the
-    noisy arc from its carried right boundary forward to its left one leaves the
-    circle around its smooth right boundary whose radius is the rest's length
-    plus a window;
+  the reverse order. It assumes that the points of a zone's true noisy arc lie
+  within the window of the smooth zone, as its carried boundaries do; the window
+  is an estimate. A short zone's true arc then stays within a circle around its
+  smooth boundary, however much the noise lengthens it, while the arc round the
+  rest of the loop leaves that circle wherever the loop spreads beyond it; its
+  length tells nothing, as the noise may lengthen a stretch many times over. With
+  a threshold of four windows on the smooth loop:
+  - for a zone shorter than that, the circle lies around its smooth left boundary
+    with the zone's length plus a window for radius. The zone is reversed when the
+    noisy arc from its carried left boundary forward to its right one leaves the
+    circle; otherwise it keeps its order when the arc from the right boundary
+    forward to the left one leaves it; with both arcs inside, it is reversed when
+    the first arc is the longer;
+  - otherwise, for a zone whose rest of the loop is that short, the same holds
+    around its smooth right boundary, with the rest's length plus a window for
+    radius and the arcs swapped: the arc from the right boundary forward to the
+    left one is the rest's;
   - otherwise the order is not checked; a transfer onto another part of the loop
     there is a limitation of the direct transfer.
 
@@ -738,11 +742,15 @@ exceeded, one summary marker reports the total.
   the smooth point was textured into. Points carried without the line
   (approximate outcome) do not lie on it, and weak zones whose boundaries reverse
   are reduced to one point. The window is estimated from the settings; a noise
-  that moves points farther makes their transfers fail. The order of a weak
-  zone's boundaries is a policy checked only where the zone or the rest of the
-  loop is shorter than four windows; where both are longer, boundaries carried
-  onto another part of the loop are not noticed. On a loop comparable with the
-  window both are short, and the zone's rule decides. Sliced data loaded from a cache keeps only the
+  that moves a boundary farther makes its transfer fail, while inner points of a
+  noisy arc farther than the window can mislead the order policy. The order of a
+  weak zone's boundaries is checked only where the zone or the rest of the loop is
+  shorter than four windows; where both are longer, boundaries carried onto
+  another part of the loop are not noticed. A loop that lies wholly within the
+  circle of that check (its spread comparable with the window) leaves the
+  decision to the lengths of the two noisy arcs: noise lengthening one of them
+  unevenly may then reduce a correct zone or miss a reversal. On a loop
+  comparable with the window both sides are short, and the zone's rule decides. Sliced data loaded from a cache keeps only the
   extrusions, without the untextured centerline: such loops keep the noisy
   surface and the nominal shift, so the same project may get another seam after
   loading. The tests only clear the field by hand; they do not go through
@@ -929,7 +937,8 @@ last modifier would.
   zero-length weak zones of every type, with fuzzy skin strong points chosen on
   the smooth loop and inserted into the noisy one or discarded when they cannot be
   carried, and weak zones short, zero-length at a convex corner, reversed (for
-  every type), across the start of both loops, long or short with noise
+  every type, also on a loop that lies wholly within the circle of the order
+  check), across the start of both loops, long or short with noise
   lengthening only their part of the loop and almost all round, also with noise
   lengthening only the short rest (each for every type), priorities, weak boundaries that coincide or share an edge, enforced
   subdivision, whole-perimeter weak zones with painting and priorities, weak
