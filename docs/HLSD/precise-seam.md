@@ -256,8 +256,9 @@ fuzzy skin on that kind of loop). A list of points equal to the printed one is
 not kept. The field is kept for every such loop, whether or not the object has
 Precise Seam volumes, because adding a volume does not regenerate perimeters
 (see [Print invalidation](#print-invalidation)). Copying, moving, reversing or
-turning the start of the loop keeps it; giving the loop other geometry must
-reset it.
+turning the start of the loop keeps it, and so do the simplification and arc
+fitting of its paths after the generator, which leave the same textured loop;
+giving the loop other geometry must reset it.
 
 For such a loop the preparation has two polygons: the smooth centerline, from
 which the surface is reconstructed and on which the shift is measured, clipping,
@@ -275,13 +276,22 @@ repeated points, counterclockwise).
   Center, the middle by length of the smooth segment, takes as its pair the point
   of the shifted edge at the same parameter (shift profile included), the middle
   of the arc or bridge at a vertex (of the piece covered, for a zero-length
-  segment), or the crossing `K` in the dead stretch of a concave corner.
+  segment), the point where the shifted edges meet at a vertex without either
+  (collinear edges), or the crossing `K` in the dead stretch of a concave
+  corner.
 - **Transfer.** The line through the surface point and the smooth point is
   intersected with the edges of the noisy loop within a window of the smooth
   point, and the crossing nearest to it is taken; an edge lying along the line
-  gives its point nearest to the smooth point. The window is the largest noise
-  amplitude of the layer's regions plus their point distance, the farthest a
-  chord cutting a convex corner passes from it. There are three outcomes:
+  gives its point nearest to the smooth point. The window is an estimate from the
+  settings, not a measured distance. Regions texture a loop one after another,
+  each over the result of the previous ones, so it adds up the amplitudes of the
+  layer's different noises (regions that differ only in which walls they texture
+  make one noise). An amplitude is the thickness times the largest value of its
+  noise module: Perlin, Billow and RidgedMulti add octaves and can exceed one.
+  Arachne's combined mode moves a point by half its change of width, which adds
+  half the smallest width it keeps. On top come the largest point distance, the
+  farthest a chord cutting a convex corner passes from the smooth point, and a
+  micrometre of rounding. There are three outcomes:
   - **exact**: such a crossing exists;
   - **approximate**: the pair coincides (the centerline path, where the surface
     is the centerline) or the line crosses nothing within the window; the
@@ -291,18 +301,24 @@ repeated points, counterclockwise).
     counter, log marker and the type in the warning. A strong segment whose point
     fails takes no part; a weak zone with a failed boundary is dropped.
 - **Strong modifiers** choose the segment and the point on the smooth loop, ties
-  included, so the noise never changes the winner, and insert the carried point
-  into the noisy one.
-- **Weak zones** carry each boundary separately. Before anything is inserted, a
-  zone's share of the noisy loop from its left to its right boundary is compared
-  with its share of the smooth loop; differing by more than half a loop, the
-  boundaries came out in the reverse order, and the zone is reduced to its left
+  included, and insert the carried point into the noisy one. Among candidates
+  that are carried the noise never changes the winner; a candidate whose
+  transfer fails drops out, and the next one wins.
+- **Weak zones** carry each boundary separately. Each boundary lands within the
+  window of its smooth point, and the noise keeps the order along the loop, so
+  the boundaries can swap only where they lie close together; the noise may
+  lengthen parts of the loop unevenly, so shares of its length tell nothing.
+  Before anything is inserted, with a threshold of four windows: a zone shorter
+  than that on the smooth loop is reversed when the noisy loop is longer forward
+  from its left boundary to its right one than back; a zone whose rest of the
+  loop is that short is reversed when the noisy loop is shorter forward than
+  back; longer on both sides, the order holds and is not checked. Lengths run
+  around the loop, across its start. A reversed zone is reduced to its left
   boundary, a zero-length zone that types the one candidate there. This is a
   declared degradation, counted in the log, not a guarantee: it happens, for
   example, for a piece of a convex corner's arc where the noisy loop cuts the
   corner inside it, since the lines through the corner then cross the noise
-  behind it in the reverse order. Zones across the start of a loop are compared
-  around the loop.
+  behind it in the reverse order.
 
 ## Segment extraction
 
@@ -707,11 +723,16 @@ exceeded, one summary marker reports the total.
   acute corner), the nearest crossing may belong to another place than the one
   the smooth point was textured into. Points carried without the line
   (approximate outcome) do not lie on it, and weak zones whose boundaries reverse
-  are reduced to one point. Sliced data loaded from a cache keeps only the
+  are reduced to one point. The window is estimated from the settings; a noise
+  that moves points farther makes their transfers fail. The order of a weak
+  zone's boundaries is checked only where the zone or the rest of the loop is
+  shorter than four windows; on a loop comparable with the window both are, and
+  the zone's rule decides. Sliced data loaded from a cache keeps only the
   extrusions, without the untextured centerline: such loops keep the noisy
   surface and the nominal shift, so the same project may get another seam after
-  loading. A closed thin wall that the classic generator builds outside its
-  loops has no untextured centerline either.
+  loading. The tests only clear the field by hand; they do not go through
+  writing and loading the cache. A closed thin wall that the classic generator
+  builds outside its loops has no untextured centerline either.
 - **Grazing contacts.** Contacts are taken as clipping returns them, without
   tangency rules, so boundaries that only graze the surface are the user's
   responsibility. Several near-touches on inclined edges can leave several
@@ -875,9 +896,10 @@ last modifier would.
   margin, and with a step along an edge. Fuzzy skin: the transfer onto hand-made
   noisy loops across a straight edge, at an acute corner, with several crossings,
   along an edge on the line, and its three outcomes; the surface pairs of segment
-  ends, of a piece of arc and of Center inside an edge, at a vertex and in a dead
-  stretch; a loop keeping its untextured centerline when copied, reversed or
-  turned. A boundary swept in sub-micron steps across shallow concave
+  ends, of a piece of arc, of separate pieces of one arc, across the start of the
+  loop, and of Center inside an edge, at a vertex, at a collinear vertex (also
+  vertex zero and a changing shift) and in a dead stretch; a loop keeping its
+  untextured centerline when copied, reversed or turned. A boundary swept in sub-micron steps across shallow concave
   vertices of tessellated holes and notches must move a single segment end
   monotonically. On the centerline they cover
   clipping and binding: holes and components, contour origin and reversal,
@@ -892,7 +914,8 @@ last modifier would.
   zero-length weak zones of every type, with fuzzy skin strong points chosen on
   the smooth loop and inserted into the noisy one or discarded when they cannot be
   carried, and weak zones short, zero-length at a convex corner, reversed (for
-  every type) and across the start of both loops, priorities, weak boundaries that coincide or share an edge, enforced
+  every type), across the start of both loops, long with noise lengthening only
+  their part of the loop (for every type) and almost all round, priorities, weak boundaries that coincide or share an edge, enforced
   subdivision, whole-perimeter weak zones with painting and priorities, weak
   zones over painting's oversampled candidates, the warning type masks, usage
   tracking for the "had no effect" and whole-perimeter Blocked warnings, volume
@@ -909,9 +932,10 @@ last modifier would.
   foot compensation in one region and in several, an Arachne wall narrower than
   its line, fuzzy skin on contours or holes (measured on the smooth centerline;
   which loops keep it; with sine noise a modifier acts at the model surface, not
-  at the noise, also on part of a wall; a weak zone; elephant foot compensation in
-  one region and in several; a closed classic thin wall; loops that lost the
-  untextured centerline, as after loading cached data), a modifier
+  at the noise, also on part of a wall; a weak zone; Arachne's combined mode with
+  the smallest noise; elephant foot compensation in one region and in several; a
+  closed classic thin wall; loops whose untextured centerline is cleared by hand,
+  as loading cached data leaves them), a modifier
   crossing only an open thin wall, Enforced and Blocked zones,
   a perimeter blocked all round under every seam position, a modifier with a
   hole, and the user warning.
