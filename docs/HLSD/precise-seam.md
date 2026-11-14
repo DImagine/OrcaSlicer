@@ -277,17 +277,20 @@ repeated points, counterclockwise).
   of the shifted edge at the same parameter (shift profile included), the middle
   of the arc or bridge at a vertex (of the piece covered, for a zero-length
   segment), the point where the shifted edges meet at a vertex without either
-  (collinear edges), or the crossing `K` in the dead stretch of a concave
-  corner.
+  (collinear edges; the smooth point itself, as an emergency fallback, should
+  the edge have no element left), or the crossing `K` in the dead stretch of a
+  concave corner.
 - **Transfer.** The line through the surface point and the smooth point is
   intersected with the edges of the noisy loop within a window of the smooth
   point, and the crossing nearest to it is taken; an edge lying along the line
   gives its point nearest to the smooth point. The window is an estimate from the
-  settings, not a measured distance. Regions texture a loop one after another,
-  each over the result of the previous ones, so it adds up the amplitudes of the
-  layer's different noises (regions that differ only in which walls they texture
-  make one noise). An amplitude is the thickness times the largest value of its
-  noise module: Perlin, Billow and RidgedMulti add octaves and can exceed one.
+  settings, not a measured distance or a proven bound. Regions texture a loop one
+  after another, each over the result of the previous ones, so it adds up the
+  amplitudes of the layer's different noises (regions that differ only in which
+  walls they texture make one noise; regions with fuzzy skin disabled make none).
+  An amplitude is the thickness times the largest value of its noise module:
+  Perlin, Billow and RidgedMulti add octaves and can exceed one. These bounds rest
+  on the range libnoise states for its coherent noise, from -1 to 1.
   Arachne's combined mode moves a point by half its change of width, which adds
   half the smallest width it keeps. On top come the largest point distance, the
   farthest a chord cutting a convex corner passes from the smooth point, and a
@@ -304,21 +307,32 @@ repeated points, counterclockwise).
   included, and insert the carried point into the noisy one. Among candidates
   that are carried the noise never changes the winner; a candidate whose
   transfer fails drops out, and the next one wins.
-- **Weak zones** carry each boundary separately. Each boundary lands within the
-  window of its smooth point, and the noise keeps the order along the loop, so
-  the boundaries can swap only where they lie close together; the noise may
-  lengthen parts of the loop unevenly, so shares of its length tell nothing.
-  Before anything is inserted, with a threshold of four windows: a zone shorter
-  than that on the smooth loop is reversed when the noisy loop is longer forward
-  from its left boundary to its right one than back; a zone whose rest of the
-  loop is that short is reversed when the noisy loop is shorter forward than
-  back; longer on both sides, the order holds and is not checked. Lengths run
-  around the loop, across its start. A reversed zone is reduced to its left
-  boundary, a zero-length zone that types the one candidate there. This is a
-  declared degradation, counted in the log, not a guarantee: it happens, for
-  example, for a piece of a convex corner's arc where the noisy loop cuts the
-  corner inside it, since the lines through the corner then cross the noise
-  behind it in the reverse order.
+- **Weak zones** carry each boundary separately. Before anything is inserted, a
+  policy, not a proven guarantee, tells some zones whose boundaries came out in
+  the reverse order. Each boundary lands within the window of its smooth point,
+  so the noisy arc between the carried boundaries of a short zone stays near the
+  smooth zone, however much the noise lengthens it, while an arc round the rest
+  of the loop goes far from it. Lengths of noisy arcs tell nothing, as the noise
+  may lengthen a stretch many times over. With a threshold of four windows on the
+  smooth loop:
+  - a zone shorter than that is reversed when the noisy arc from its carried
+    left boundary forward to its right one leaves the circle around its smooth
+    left boundary whose radius is the zone's length plus a window;
+  - otherwise, a zone whose rest of the loop is that short is reversed when the
+    noisy arc from its carried right boundary forward to its left one leaves the
+    circle around its smooth right boundary whose radius is the rest's length
+    plus a window;
+  - otherwise the order is not checked; a transfer onto another part of the loop
+    there is a limitation of the direct transfer.
+
+  An arc leaves the circle when either carried boundary or a vertex of the noisy
+  loop between them, across its start, lies outside; boundaries on one edge with
+  the second behind the first make an arc round the whole loop. A reversed zone
+  is reduced to its left boundary, a zero-length zone that types the one
+  candidate there. This is a declared degradation, counted in the log: it
+  happens, for example, for a piece of a convex corner's arc where the noisy
+  loop cuts the corner inside it, since the lines through the corner then cross
+  the noise behind it in the reverse order.
 
 ## Segment extraction
 
@@ -725,9 +739,10 @@ exceeded, one summary marker reports the total.
   (approximate outcome) do not lie on it, and weak zones whose boundaries reverse
   are reduced to one point. The window is estimated from the settings; a noise
   that moves points farther makes their transfers fail. The order of a weak
-  zone's boundaries is checked only where the zone or the rest of the loop is
-  shorter than four windows; on a loop comparable with the window both are, and
-  the zone's rule decides. Sliced data loaded from a cache keeps only the
+  zone's boundaries is a policy checked only where the zone or the rest of the
+  loop is shorter than four windows; where both are longer, boundaries carried
+  onto another part of the loop are not noticed. On a loop comparable with the
+  window both are short, and the zone's rule decides. Sliced data loaded from a cache keeps only the
   extrusions, without the untextured centerline: such loops keep the noisy
   surface and the nominal shift, so the same project may get another seam after
   loading. The tests only clear the field by hand; they do not go through
@@ -914,8 +929,9 @@ last modifier would.
   zero-length weak zones of every type, with fuzzy skin strong points chosen on
   the smooth loop and inserted into the noisy one or discarded when they cannot be
   carried, and weak zones short, zero-length at a convex corner, reversed (for
-  every type), across the start of both loops, long with noise lengthening only
-  their part of the loop (for every type) and almost all round, priorities, weak boundaries that coincide or share an edge, enforced
+  every type), across the start of both loops, long or short with noise
+  lengthening only their part of the loop and almost all round, also with noise
+  lengthening only the short rest (each for every type), priorities, weak boundaries that coincide or share an edge, enforced
   subdivision, whole-perimeter weak zones with painting and priorities, weak
   zones over painting's oversampled candidates, the warning type masks, usage
   tracking for the "had no effect" and whole-perimeter Blocked warnings, volume
